@@ -1,0 +1,10 @@
+--- a/arch/arm64/boot/dts/mediatek/mt7987-netsys.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt7987-netsys.dtsi
+@@ -123,6 +123,7 @@
+ 	mtketh-lan = "lan";
+ 	mtketh-max-gmac = <3>;
+ 	mtketh-ppe-num = <2>;
++	ext-devices-prefix = "wwan", "usb", "eth";
+ 	status = "okay";
+ };
+ 
