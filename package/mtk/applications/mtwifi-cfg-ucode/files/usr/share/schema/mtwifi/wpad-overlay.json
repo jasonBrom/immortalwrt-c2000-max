@@ -1,2 +1,9 @@
 {
+	"iface": {
+		"encryption": {
+			"sae+gcmp256": {
+				"ieee80211w_mgmt_cipher": "BIP-GMAC-256"
+			}
+		}
+	}
 }
