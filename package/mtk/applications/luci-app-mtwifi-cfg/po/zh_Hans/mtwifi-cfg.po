@@ -39,3 +39,21 @@ msgstr "无线网络设置错误"
 
 msgid "At least one MBSSID needs to be reserved"
 msgstr "至少需要保留1个MBSSID"
+
+msgid "WPA2-Personal SHA256"
+msgstr "WPA2-Personal SHA256"
+
+msgid "Also advertise WPA-PSK-SHA256, the SHA256-based WPA2-Personal key management mode."
+msgstr "同时广播 WPA-PSK-SHA256，即基于 SHA256 的 WPA2-Personal 密钥管理模式。"
+
+msgid "SAE PWE derivation"
+msgstr "SAE 密码元素（PWE）派生算法"
+
+msgid "Hunting-and-pecking"
+msgstr "HnP 循环（Hunting-and-Pecking）"
+
+msgid "Hash-to-element"
+msgstr "H2E（Hash-to-Element）"
+
+msgid "SAE groups"
+msgstr "SAE 有限循环群组"
