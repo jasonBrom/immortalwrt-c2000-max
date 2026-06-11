@@ -33,6 +33,44 @@
             "type": "string",
             "description": "Override interface MAC address"
         },
+        "ieee80211w": {
+            "type": "integer",
+            "description": "Management frame protection (0 disabled, 1 optional, 2 required)",
+            "enum": [
+                0,
+                1,
+                2
+            ]
+        },
+        "pmf_sha256": {
+            "type": "boolean",
+            "description": "Enable SHA256 key management for PMF"
+        },
+        "sae_pwe": {
+            "type": "integer",
+            "description": "SAE PWE derivation mode",
+            "enum": [
+                0,
+                1,
+                2
+            ]
+        },
+        "rsn_override": {
+            "type": "integer",
+            "description": "RSN override mode",
+            "enum": [
+                0,
+                1,
+                2
+            ]
+        },
+        "sae_groups": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "description": "SAE group list"
+        },
         "bridge_isolate": {
             "type": "boolean",
             "description": "Enable bridge port isolation"
