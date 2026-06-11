@@ -1,0 +1,34 @@
+--- a/files-ucode/usr/share/ucode/wifi/iface.uc
++++ b/files-ucode/usr/share/ucode/wifi/iface.uc
+@@ -135,7 +135,7 @@ export function wpa_key_mgmt(config) {
+ 		append_value(config, 'wpa_key_mgmt', 'WPA-PSK');
+ 		if (config.wpa >= 2 && config.ieee80211r)
+ 			append_value(config, 'wpa_key_mgmt', 'FT-PSK');
+-		if (config.ieee80211w)
++		if (config.ieee80211w && config.pmf_sha256)
+ 			append_value(config, 'wpa_key_mgmt', 'WPA-PSK-SHA256');
+ 		break;
+ 
+@@ -203,7 +203,7 @@ export function wpa_key_mgmt(config) {
+ 			delete config.wpa_key_mgmt;
+ 
+ 		append_value(config, 'wpa_key_mgmt', 'WPA-PSK');
+-		if (config.ieee80211w)
++		if (config.ieee80211w && config.pmf_sha256)
+ 			append_value(config, 'wpa_key_mgmt', 'WPA-PSK-SHA256');
+ 		if (config.ieee80211r)
+ 			append_value(config, 'wpa_key_mgmt', 'FT-PSK');
+--- a/files-ucode/usr/share/schema/wireless.wifi-iface.json
++++ b/files-ucode/usr/share/schema/wireless.wifi-iface.json
+@@ -825,6 +825,11 @@
+ 			"type": "boolean",
+ 			"default": false
+ 		},
++		"pmf_sha256": {
++			"description": "Enable WPA-PSK-SHA256 key management for WPA-PSK with PMF",
++			"type": "boolean",
++			"default": false
++		},
+ 		"port:port": {
+ 			"type": "number"
+ 		},
