@@ -25,7 +25,7 @@ import * as uci from 'uci';
 import * as l1parser from 'l1parser';
 import * as datconf from 'datconf';
 
-import { schemas } from 'mtwifi.defaults';
+import { schemas, wpad_overlay } from 'mtwifi.defaults';
 import * as netifd from 'mtwifi.netifd';
 import * as cfg from 'mtwifi.config';
 import * as driver from 'mtwifi.driver';
@@ -196,6 +196,7 @@ function prepare_wpad_data(data, iface_items, phy) {
         config: clone_config(data.config || {}),
         interfaces: {}
     };
+    let iface_overlay = wpad_overlay.iface;
 
     wdata.phy = phy;
     let radio = wdata.config.radio;
@@ -213,6 +214,15 @@ function prepare_wpad_data(data, iface_items, phy) {
         wdata.interfaces[iface_key] = clone_interface(iface);
 
         let iface_config = wdata.interfaces[iface_key].config;
+        /*
+         * BSS overlay order is intentional: mtwifi defaults, original
+         * UCI/netifd iface config, then per-encryption hostapd fixups.
+         */
+        iface_config = wdata.interfaces[iface_key].config = {
+            ...(iface_overlay?.config || {}),
+            ...iface_config,
+            ...(iface_overlay?.encryption[iface_config.encryption] || {})
+        };
         normalize_iface_config(iface_config, iface.mtwifi_ifname);
     }
 
