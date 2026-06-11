@@ -1,0 +1,38 @@
+--- a/files-ucode/usr/share/ucode/wifi/ap.uc
++++ b/files-ucode/usr/share/ucode/wifi/ap.uc
+@@ -180,7 +180,7 @@ function iface_auth_type(config) {
+ 	}
+ 
+ 	append_vars(config, [
+-		'sae_require_mfp', 'sae_password_file', 'sae_pwe', 'sae_track_password', 'time_advertisement', 'time_zone',
++		'sae_require_mfp', 'sae_password_file', 'sae_pwe', 'sae_groups', 'sae_track_password', 'time_advertisement', 'time_zone',
+ 		'wpa_group_rekey', 'wpa_ptk_rekey', 'wpa_gmk_rekey', 'wpa_strict_rekey',
+ 		'macaddr_acl', 'wpa_psk_radius', 'wpa_psk', 'wpa_passphrase', 'wpa_psk_file',
+ 		'eapol_version', 'dynamic_vlan', 'radius_request_cui', 'eap_reauth_period',
+--- a/files-ucode/usr/share/ucode/wifi/supplicant.uc
++++ b/files-ucode/usr/share/ucode/wifi/supplicant.uc
+@@ -196,7 +196,7 @@ function setup_sta(data, config) {
+ 		 ]);
+ 	network_append_vars(config, [
+ 		'rsn_overriding', 'scan_ssid', 'noscan', 'disabled', 'multi_ap_profile', 'multi_ap_backhaul_sta',
+-		'ocv', 'beacon_prot', 'key_mgmt', 'sae_pwe', 'psk', 'sae_password', 'pairwise', 'group', 'bssid',
++		'ocv', 'beacon_prot', 'key_mgmt', 'sae_pwe', 'sae_groups', 'psk', 'sae_password', 'pairwise', 'group', 'bssid',
+ 		'proto', 'mesh_fwding', 'mesh_rssi_threshold', 'frequency', 'fixed_freq',
+ 		'disable_ht', 'disable_ht40', 'disable_vht', 'vht', 'max_oper_chwidth',
+ 		'ht40', 'beacon_int', 'ieee80211w', 'rates', 'mesh_basic_rates', 'mcast_rate',
+--- a/files-ucode/usr/share/schema/wireless.wifi-iface.json
++++ b/files-ucode/usr/share/schema/wireless.wifi-iface.json
+@@ -980,6 +980,13 @@
+ 			"type": "number",
+ 			"enum": [ 0, 1, 2 ]
+ 		},
++		"sae_groups": {
++			"description": "SAE group list",
++			"type": "array",
++			"items": {
++				"type": "string"
++			}
++		},
+ 		"sae_require_mfp": {
+ 			"description": "Require MFP for all associations using SAE",
+ 			"type": "boolean"
