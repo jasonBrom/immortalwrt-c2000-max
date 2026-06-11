@@ -34,6 +34,8 @@ define Package/wifi-scripts/description
 endef
 
 define Build/Prepare
+	$(CP) ./files ./files-ucode $(PKG_BUILD_DIR)/
+	$(Build/Patch)
 endef
 
 define Build/Configure
@@ -44,9 +46,9 @@ endef
 
 define Package/wifi-scripts/install
 	$(INSTALL_DIR) $(1)
-	$(CP) ./files/* $(1)/
+	$(CP) $(PKG_BUILD_DIR)/files/* $(1)/
 ifeq ($(CONFIG_WIFI_SCRIPTS_UCODE),y)
-	$(CP) ./files-ucode/* $(1)/
+	$(CP) $(PKG_BUILD_DIR)/files-ucode/* $(1)/
 endif
 endef
 
