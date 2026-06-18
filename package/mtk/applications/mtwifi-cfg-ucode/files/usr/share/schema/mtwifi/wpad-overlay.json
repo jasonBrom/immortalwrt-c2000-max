@@ -1,5 +1,9 @@
 {
 	"iface": {
+		"config": {
+			"bss_load_update_period": 0,
+			"chan_util_avg_period": 0
+		},
 		"encryption": {
 			"sae+gcmp256": {
 				"ieee80211w_mgmt_cipher": "BIP-GMAC-256"
