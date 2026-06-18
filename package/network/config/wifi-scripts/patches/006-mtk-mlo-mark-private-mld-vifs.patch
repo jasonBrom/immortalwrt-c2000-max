@@ -1,0 +1,66 @@
+--- a/files/lib/netifd/wireless.uc
++++ b/files/lib/netifd/wireless.uc
+@@ -25,6 +25,10 @@ function wpad_update_mlo(service, mode)
+ 		if (data.mode != mode)
+ 			continue;
+ 
++		// mtwifi maps mainline MLO intent to DAT/private driver MLD.
++		if (data.private_mld)
++			continue;
++
+ 		data.phy = find_phy(data.radio_config[0], true);
+ 		if (!data.phy)
+ 			continue;
+@@ -50,13 +54,15 @@ function supplicant_update_mlo()
+ 	wpad_update_mlo("wpa_supplicant", "sta");
+ }
+ 
+-function mlo_vif_create(config, radio_config, vif_idx, mlo_vifs)
++function mlo_vif_create(config, radio_config, vif_idx, mlo_vifs, private_mld)
+ {
+ 	let mlo_config = { ...config };
+ 
+ 	if (config.wds)
+ 		mlo_config['4addr'] = config.wds;
+ 	mlo_config.radio_config = radio_config;
++	if (private_mld)
++		mlo_config.private_mld = true;
+ 
+ 	let ifname = config.ifname;
+ 	if (!ifname) {
+@@ -166,6 +172,9 @@ function config_init(uci)
+ 		let radios = map(dev_names, (v) => radio_idx[v]);
+ 		radios = filter(radios, (v) => v != null);
+ 		let radio_config = map(dev_names, (v) => devices[v]?.config);
++		let private_mld = length(dev_names) &&
++			length(filter(dev_names,
++				(v) => sections.device[v]?.type == "mtwifi")) == length(dev_names);
+ 		let ifname;
+ 		let mlo_created = false;
+ 
+@@ -182,7 +191,8 @@ function config_init(uci)
+ 			config.radios = radios;
+ 
+ 			if (mlo_vif && !mlo_created) {
+-				ifname = mlo_vif_create(config, radio_config, vif_idx, mlo_vifs);
++				ifname = mlo_vif_create(config, radio_config, vif_idx,
++					mlo_vifs, private_mld);
+ 				mlo_created = true;
+ 			}
+ 
+@@ -315,10 +325,14 @@ function config_init(uci)
+ 						radios = filter(radios, (v) => v != null);
+ 						let radio_config = map(devs, (v) => devices[v]?.config);
+ 						radio_config = filter(radio_config, (v) => v != null);
++						let private_mld = length(devs) &&
++							length(filter(devs,
++								(v) => sections.device[v]?.type == "mtwifi")) == length(devs);
+ 						let ifname;
+ 
+ 						if (mlo_vif) {
+-							ifname = mlo_vif_create(config, radio_config, vif_idx, mlo_vifs);
++							ifname = mlo_vif_create(config, radio_config,
++								vif_idx, mlo_vifs, private_mld);
+ 							mlo_vifs[ifname].radios = radios;
+ 						}
+ 
