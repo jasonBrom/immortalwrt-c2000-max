@@ -1,0 +1,844 @@
+--- a/src/ap/hostapd.c
++++ b/src/ap/hostapd.c
+@@ -1465,7 +1465,7 @@ int hostapd_setup_bss(struct hostapd_dat
+ 		bool use_existing = first == -1;
+ 
+ #ifdef CONFIG_IEEE80211BE
+-		if (hapd->conf->mld_ap)
++		if (hapd->conf->mld_ap && !hostapd_is_mtk_private_mld(hapd))
+ 			addr = NULL;
+ #endif /* CONFIG_IEEE80211BE */
+ 		if (!is_zero_ether_addr(conf->bssid)) {
+@@ -1493,7 +1493,8 @@ int hostapd_setup_bss(struct hostapd_dat
+ 		if (conf->mld_ap) {
+ 			struct hostapd_data *h_hapd;
+ 
+-			h_hapd = hostapd_mld_get_first_bss(hapd);
++			h_hapd = hostapd_is_mtk_private_mld(hapd) ?
++				NULL : hostapd_mld_get_first_bss(hapd);
+ 			if (h_hapd) {
+ 				hapd->drv_priv = h_hapd->drv_priv;
+ 				hapd->interface_added = h_hapd->interface_added;
+@@ -1502,7 +1503,8 @@ int hostapd_setup_bss(struct hostapd_dat
+ 					   hapd->mld_link_id, hapd->conf->iface);
+ 				goto setup_mld;
+ 			}
+-			use_existing = true;
++			if (!hostapd_is_mtk_private_mld(hapd))
++				use_existing = true;
+ 		}
+ #endif /* CONFIG_IEEE80211BE */
+ 
+@@ -1522,7 +1524,13 @@ int hostapd_setup_bss(struct hostapd_dat
+ 			os_memcpy(hapd->own_addr, if_addr, ETH_ALEN);
+ 
+ #ifdef CONFIG_IEEE80211BE
+-		if (hapd->conf->mld_ap) {
++		if (hostapd_is_mtk_private_mld(hapd)) {
++			if (hostapd_sync_mtk_private_mld_link(hapd))
++				return -1;
++			wpa_printf(MSG_DEBUG,
++				   "Setup of MTK private link (%d) BSS %s",
++				   hapd->mld_link_id, hapd->conf->iface);
++		} else if (hapd->conf->mld_ap) {
+ 			wpa_printf(MSG_DEBUG,
+ 				   "Setup of first link (%d) BSS of MLD %s",
+ 				   hapd->mld_link_id, hapd->conf->iface);
+@@ -1541,14 +1549,16 @@ setup_mld:
+ 			   hapd->mld_link_id, MAC2STR(hapd->mld->mld_addr),
+ 			   MAC2STR(hapd->own_addr));
+ 
+-		if (hostapd_drv_link_add(hapd, hapd->mld_link_id,
+-					 hapd->own_addr)) {
+-			wpa_printf(MSG_ERROR,
+-				   "MLD: Failed to add link %d in MLD %s",
+-				   hapd->mld_link_id, hapd->conf->iface);
+-			return -1;
++		if (!hostapd_is_mtk_private_mld(hapd)) {
++			if (hostapd_drv_link_add(hapd, hapd->mld_link_id,
++						 hapd->own_addr)) {
++				wpa_printf(MSG_ERROR,
++					   "MLD: Failed to add link %d in MLD %s",
++					   hapd->mld_link_id, hapd->conf->iface);
++				return -1;
++			}
++			hostapd_mld_add_link(hapd);
+ 		}
+-		hostapd_mld_add_link(hapd);
+ 	}
+ #endif /* CONFIG_IEEE80211BE */
+ 
+@@ -2738,6 +2748,15 @@ static int hostapd_setup_interface_compl
+ 		}
+ 	}
+ 
++#if defined(CONFIG_IEEE80211BE) && defined(CONFIG_DRIVER_NL80211_MTK)
++	for (j = 0; j < iface->num_bss; j++) {
++		hapd = iface->bss[j];
++		if (hostapd_is_mtk_private_mld(hapd) &&
++		    hostapd_sync_mtk_private_mld_link(hapd))
++			goto fail;
++	}
++#endif /* CONFIG_IEEE80211BE && CONFIG_DRIVER_NL80211_MTK */
++
+ 	hapd = iface->bss[0];
+ 
+ 	hostapd_tx_queue_params(iface);
+@@ -3153,6 +3172,273 @@ static void hostapd_bss_alloc_link_id(st
+ 	wpa_printf(MSG_DEBUG, "AP MLD: %s: Link ID %d assigned.",
+ 		   hapd->mld->name, hapd->mld_link_id);
+ }
++
++
++bool hostapd_is_mtk_private_mld(struct hostapd_data *hapd)
++{
++#ifdef CONFIG_DRIVER_NL80211_MTK
++	return hapd && hapd->conf && hapd->conf->mtk_private_mld;
++#else /* CONFIG_DRIVER_NL80211_MTK */
++	return false;
++#endif /* CONFIG_DRIVER_NL80211_MTK */
++}
++
++
++#ifdef CONFIG_DRIVER_NL80211_MTK
++static const char *
++mtk_mld_update_source_to_str(enum mtk_mld_update_source source)
++{
++	switch (source) {
++	case MTK_MLD_UPDATE_FROM_QUERY:
++		return "query";
++	case MTK_MLD_UPDATE_FROM_EVENT:
++		return "event";
++	}
++
++	return "unknown";
++}
++#endif /* CONFIG_DRIVER_NL80211_MTK */
++
++
++int hostapd_update_mtk_private_mld_link(struct hostapd_data *hapd,
++					u8 group_idx, u8 link_id,
++					const u8 *mld_addr,
++					enum mtk_mld_update_source source)
++{
++#ifdef CONFIG_DRIVER_NL80211_MTK
++	struct hapd_interfaces *interfaces;
++	const char *ifname;
++	const char *source_str;
++	bool is_changed;
++	size_t i, j;
++
++	if (!hostapd_is_mtk_private_mld(hapd))
++		return 0;
++
++	ifname = hapd->conf->iface;
++	source_str = mtk_mld_update_source_to_str(source);
++
++	if (!group_idx) {
++		wpa_printf(MSG_ERROR,
++			   "MTK private MLD: refuse update without driver group: "
++			   "iface=%s source=%s",
++			   ifname, source_str);
++		return -1;
++	}
++
++	if (!mld_addr || is_zero_ether_addr(mld_addr))
++		return -1;
++
++	if (hapd->mtk_mld_group_idx &&
++	    hapd->mtk_mld_group_idx != group_idx) {
++		wpa_printf(MSG_ERROR,
++			   "MTK private MLD: refuse group change: "
++			   "iface=%s source=%s cached_group=%u driver_group=%u",
++			   ifname, source_str,
++			   hapd->mtk_mld_group_idx, group_idx);
++		return -1;
++	}
++
++	interfaces = hapd->iface ? hapd->iface->interfaces : NULL;
++	if (interfaces) {
++		for (i = 0; i < interfaces->count; i++) {
++			struct hostapd_iface *iface = interfaces->iface[i];
++
++			if (!iface)
++				continue;
++
++			for (j = 0; j < iface->num_bss; j++) {
++				struct hostapd_data *bss = iface->bss[j];
++
++				if (!bss || bss == hapd ||
++				    !hostapd_is_mtk_private_mld(bss))
++					continue;
++
++				if (!bss->mtk_mld_group_idx ||
++				    is_zero_ether_addr(bss->conf->mld_addr))
++					continue;
++
++				if (bss->mtk_mld_group_idx == group_idx) {
++					if (ether_addr_equal(bss->conf->mld_addr,
++							     mld_addr))
++						continue;
++
++					wpa_printf(MSG_ERROR,
++						   "MTK private MLD: refuse conflicting group member: "
++						   "iface=%s group=%u mld_addr=" MACSTR
++						   " partner_iface=%s partner_mld_addr=" MACSTR,
++						   ifname, group_idx, MAC2STR(mld_addr),
++						   bss->conf->iface,
++						   MAC2STR(bss->conf->mld_addr));
++					return -1;
++				}
++
++				if (ether_addr_equal(bss->conf->mld_addr,
++						     mld_addr)) {
++					wpa_printf(MSG_ERROR,
++						   "MTK private MLD: refuse duplicate MLD address: "
++						   "iface=%s group=%u mld_addr=" MACSTR
++						   " partner_iface=%s partner_group=%u",
++						   ifname, group_idx, MAC2STR(mld_addr),
++						   bss->conf->iface,
++						   bss->mtk_mld_group_idx);
++					return -1;
++				}
++			}
++		}
++	}
++
++	is_changed = hapd->mtk_mld_group_idx != group_idx ||
++		is_zero_ether_addr(hapd->conf->mld_addr) ||
++		!ether_addr_equal(hapd->conf->mld_addr, mld_addr);
++	if (!is_changed && hapd->mld &&
++	    !ether_addr_equal(hapd->mld->mld_addr, mld_addr))
++		is_changed = true;
++
++	if (!is_zero_ether_addr(hapd->conf->mld_addr) &&
++	    !ether_addr_equal(hapd->conf->mld_addr, mld_addr)) {
++		wpa_printf(MSG_DEBUG,
++			   "MTK private MLD: replace cached MLD address: "
++			   "iface=%s source=%s "
++			   "old=" MACSTR " new=" MACSTR,
++			   ifname, source_str,
++			   MAC2STR(hapd->conf->mld_addr),
++			   MAC2STR(mld_addr));
++	}
++
++	hapd->mtk_mld_group_idx = group_idx;
++	hapd->mld_link_id = link_id;
++	os_memcpy(hapd->conf->mld_addr, mld_addr, ETH_ALEN);
++	if (hapd->mld)
++		os_memcpy(hapd->mld->mld_addr, mld_addr, ETH_ALEN);
++	if (hapd->mld && !hapd->link.next && hostapd_mld_add_link(hapd))
++		return -1;
++
++	if (hapd->wpa_auth &&
++	    wpa_auth_set_mld_addr(hapd->wpa_auth, mld_addr, link_id)) {
++		wpa_printf(MSG_ERROR,
++			   "MTK private MLD: failed to update WPA MLD info: iface=%s",
++			   ifname);
++		return -1;
++	}
++
++	/*
++	 * The MTK driver owns private MLD beacon/ML IE state. It can report
++	 * the final MLD address while the link beacon path is still settling,
++	 * so keep hostapd/WPA state in sync without pushing another beacon.
++	 */
++	if (is_changed && hapd->started)
++		wpa_printf(MSG_DEBUG,
++			   "MTK private MLD: updated driver-owned link: "
++			   "iface=%s source=%s group=%u link_id=%u "
++			   "mld_addr=" MACSTR,
++			   ifname, source_str, group_idx, link_id,
++			   MAC2STR(mld_addr));
++
++	return 0;
++#else /* CONFIG_DRIVER_NL80211_MTK */
++	return hostapd_is_mtk_private_mld(hapd) ? -1 : 0;
++#endif /* CONFIG_DRIVER_NL80211_MTK */
++}
++
++
++int hostapd_remove_mtk_private_mld_link(struct hostapd_data *hapd,
++					u8 group_idx, u8 link_id)
++{
++#ifdef CONFIG_DRIVER_NL80211_MTK
++	struct hostapd_mld *mld;
++	const char *ifname;
++
++	if (!hostapd_is_mtk_private_mld(hapd))
++		return 0;
++
++	ifname = hapd->conf->iface;
++
++	if (!group_idx) {
++		wpa_printf(MSG_ERROR,
++			   "MTK private MLD: refuse DEL_LINK without driver group: iface=%s",
++			   ifname);
++		return -1;
++	}
++
++	if (hapd->mtk_mld_group_idx &&
++	    hapd->mtk_mld_group_idx != group_idx) {
++		wpa_printf(MSG_ERROR,
++			   "MTK private MLD: refuse DEL_LINK group mismatch: "
++			   "iface=%s driver_group=%u cached_group=%u",
++			   ifname, group_idx,
++			   hapd->mtk_mld_group_idx);
++		return -1;
++	}
++
++	if (hapd->mld_link_id != link_id) {
++		wpa_printf(MSG_ERROR,
++			   "MTK private MLD: refuse DEL_LINK link mismatch: "
++			   "iface=%s driver_link_id=%u cached_link_id=%u",
++			   ifname, link_id, hapd->mld_link_id);
++		return -1;
++	}
++
++	if (hapd->wpa_auth && wpa_auth_clear_mld_addr(hapd->wpa_auth)) {
++		wpa_printf(MSG_ERROR,
++			   "MTK private MLD: failed to clear WPA MLD info: iface=%s",
++			   ifname);
++		return -1;
++	}
++
++	mld = hapd->mld;
++	if (hostapd_mld_remove_link(hapd))
++		return -1;
++
++	os_memset(hapd->conf->mld_addr, 0, ETH_ALEN);
++	hapd->mtk_mld_group_idx = 0;
++	if (mld && dl_list_empty(&mld->links))
++		os_memset(mld->mld_addr, 0, ETH_ALEN);
++
++	return 0;
++#else /* CONFIG_DRIVER_NL80211_MTK */
++	return hostapd_is_mtk_private_mld(hapd) ? -1 : 0;
++#endif /* CONFIG_DRIVER_NL80211_MTK */
++}
++
++
++int hostapd_sync_mtk_private_mld_link(struct hostapd_data *hapd)
++{
++#ifdef CONFIG_DRIVER_NL80211_MTK
++	u8 mld_addr[ETH_ALEN];
++	u8 group_idx = 0;
++	u8 link_id = 0;
++
++	if (!hostapd_is_mtk_private_mld(hapd))
++		return 0;
++
++	if (!hapd->driver || !hapd->driver->get_bss_mlo_info)
++		return -1;
++
++	os_memset(mld_addr, 0, sizeof(mld_addr));
++	if (hapd->driver->get_bss_mlo_info(hapd->drv_priv, mld_addr,
++					   &link_id, &group_idx))
++		return -1;
++
++	if (is_zero_ether_addr(mld_addr)) {
++		/*
++		 * The MTK driver may publish private MLD info after the BSS is
++		 * attached. Match the SDK path by not synthesizing link state
++		 * before a non-zero driver MLD address is available.
++		 */
++		wpa_printf(MSG_DEBUG,
++			   "MTK private MLD: defer driver MLD address: iface=%s",
++			   hapd->conf->iface);
++		return 0;
++	}
++
++	return hostapd_update_mtk_private_mld_link(hapd, group_idx, link_id,
++						   mld_addr,
++						   MTK_MLD_UPDATE_FROM_QUERY);
++#else /* CONFIG_DRIVER_NL80211_MTK */
++	return hostapd_is_mtk_private_mld(hapd) ? -1 : 0;
++#endif /* CONFIG_DRIVER_NL80211_MTK */
++}
+ #endif /* CONFIG_IEEE80211BE */
+ 
+ 
+@@ -3192,7 +3478,7 @@ void hostapd_bss_setup_multi_link(struct
+ 	if (!mld)
+ 		goto fail;
+ 
+-	os_strlcpy(mld->name, conf->iface, sizeof(conf->iface));
++	os_strlcpy(mld->name, conf->iface, sizeof(mld->name));
+ 	dl_list_init(&mld->links);
+ 	mld->ctrl_sock = -1;
+ 	if (hapd->conf->ctrl_interface)
+@@ -3543,7 +3829,8 @@ static void hostapd_cleanup_driver(const
+ 		return;
+ 	}
+ 
+-	if (iface->bss[0]->conf->mld_ap) {
++	if (iface->bss[0]->conf->mld_ap &&
++	    !hostapd_is_mtk_private_mld(iface->bss[0])) {
+ 		if (hostapd_if_link_remove(iface->bss[0],
+ 					WPA_IF_AP_BSS,
+ 					iface->bss[0]->conf->iface,
+@@ -3961,6 +4248,12 @@ int hostapd_add_iface(struct hapd_interf
+ 				os_free(hapd);
+ 				return -1;
+ 			}
++#if defined(CONFIG_IEEE80211BE) && defined(CONFIG_DRIVER_NL80211_MTK)
++			if (hapd_iface->state == HAPD_IFACE_ENABLED &&
++			    hostapd_is_mtk_private_mld(hapd) &&
++			    hostapd_sync_mtk_private_mld_link(hapd))
++				return -1;
++#endif /* CONFIG_IEEE80211BE && CONFIG_DRIVER_NL80211_MTK */
+ 		}
+ 		hostapd_owe_update_trans(hapd_iface);
+ 		return 0;
+@@ -5110,8 +5403,7 @@ struct hostapd_data * hostapd_mld_get_li
+ 		for (j = 0; j < iface->num_bss; j++) {
+ 			bss = iface->bss[j];
+ 
+-			if (!bss->conf->mld_ap ||
+-			    !hostapd_is_ml_partner(hapd, bss))
++			if (!hostapd_is_ml_partner(hapd, bss))
+ 				continue;
+ 
+ 			if (!bss->drv_priv)
+@@ -5129,6 +5421,22 @@ struct hostapd_data * hostapd_mld_get_li
+ bool hostapd_is_ml_partner(struct hostapd_data *hapd1,
+ 			   struct hostapd_data *hapd2)
+ {
++#ifdef CONFIG_DRIVER_NL80211_MTK
++	if (hostapd_is_mtk_private_mld(hapd1) ||
++	    hostapd_is_mtk_private_mld(hapd2)) {
++		if (!hostapd_is_mtk_private_mld(hapd1) ||
++		    !hostapd_is_mtk_private_mld(hapd2) ||
++		    !hapd1->mtk_mld_group_idx ||
++		    hapd1->mtk_mld_group_idx != hapd2->mtk_mld_group_idx ||
++		    is_zero_ether_addr(hapd1->conf->mld_addr) ||
++		    is_zero_ether_addr(hapd2->conf->mld_addr))
++			return false;
++
++		return ether_addr_equal(hapd1->conf->mld_addr,
++					hapd2->conf->mld_addr);
++	}
++#endif /* CONFIG_DRIVER_NL80211_MTK */
++
+ 	if (!hapd1->conf->mld_ap || !hapd2->conf->mld_ap)
+ 		return false;
+ 
+@@ -5256,6 +5564,11 @@ void hostapd_mld_interface_freed(struct
+ 	if (!hapd || !hapd->conf->mld_ap)
+ 		return;
+ 
++	if (hostapd_is_mtk_private_mld(hapd)) {
++		hapd->drv_priv = NULL;
++		return;
++	}
++
+ 	for_each_mld_link(link_bss, hapd)
+ 		link_bss->drv_priv = NULL;
+ }
+@@ -5269,6 +5582,19 @@ u8 hostapd_get_active_links(struct hosta
+ 	struct hostapd_data *link_bss;
+ 	u8 active_links = 0;
+ 
++#ifdef CONFIG_DRIVER_NL80211_MTK
++	if (hostapd_is_mtk_private_mld(hapd)) {
++		for_each_mtk_private_mld_link(link_bss, hapd) {
++			if (link_bss == hapd || !link_bss->started)
++				continue;
++
++			active_links++;
++		}
++
++		return active_links;
++	}
++#endif /* CONFIG_DRIVER_NL80211_MTK */
++
+ 	if (!hapd || !hapd->conf->mld_ap)
+ 		return 0;
+ 
+--- a/hostapd/config_file.c
++++ b/hostapd/config_file.c
+@@ -4958,6 +4958,10 @@ static int hostapd_config_fill(struct ho
+ 		conf->punct_acs_threshold = val;
+ 	} else if (os_strcmp(buf, "mld_ap") == 0) {
+ 		bss->mld_ap = !!atoi(pos);
++#ifdef CONFIG_DRIVER_NL80211_MTK
++	} else if (os_strcmp(buf, "mtk_private_mld") == 0) {
++		bss->mtk_private_mld = !!atoi(pos);
++#endif /* CONFIG_DRIVER_NL80211_MTK */
+ 	} else if (os_strcmp(buf, "mld_link_id") == 0) {
+ 		bss->mld_link_id = atoi(pos);
+ 	} else if (os_strcmp(buf, "mld_addr") == 0) {
+--- a/hostapd/main.c
++++ b/hostapd/main.c
+@@ -173,7 +173,8 @@ static int hostapd_driver_init(struct ho
+ 	if (conf->mld_ap) {
+ 		if (!hapd->mld)
+ 			hostapd_bss_setup_multi_link(hapd, iface->interfaces);
+-		h_hapd = hostapd_mld_get_first_bss(hapd);
++		if (!hostapd_is_mtk_private_mld(hapd))
++			h_hapd = hostapd_mld_get_first_bss(hapd);
+ 	}
+ 
+ 	if (h_hapd) {
+@@ -234,7 +235,7 @@ static int hostapd_driver_init(struct ho
+ 	 * Use the configured MLD MAC address as the interface hardware address
+ 	 * if this AP is a part of an AP MLD.
+ 	 */
+-	if (hapd->conf->mld_ap) {
++	if (hapd->conf->mld_ap && !hostapd_is_mtk_private_mld(hapd)) {
+ 		if (!is_zero_ether_addr(hapd->conf->mld_addr))
+ 			params.bssid = hapd->conf->mld_addr;
+ 		else
+@@ -311,7 +312,14 @@ pre_setup_mld:
+ 	 * would be derived from the original interface address if BSSID is not
+ 	 * configured, and otherwise it would be the configured BSSID.
+ 	 */
+-	if (hapd->conf->mld_ap) {
++	if (hostapd_is_mtk_private_mld(hapd)) {
++		if (hostapd_sync_mtk_private_mld_link(hapd))
++			return -1;
++
++		wpa_printf(MSG_DEBUG,
++			   "Setup of MTK private link (%d) BSS %s",
++			   hapd->mld_link_id, hapd->conf->iface);
++	} else if (hapd->conf->mld_ap) {
+ 		os_memcpy(hapd->mld->mld_addr, hapd->own_addr, ETH_ALEN);
+ 
+ 		if (!b)
+@@ -378,14 +386,16 @@ setup_mld:
+ 			   hapd->mld_link_id, MAC2STR(hapd->mld->mld_addr),
+ 			   MAC2STR(hapd->own_addr));
+ 
+-		if (hostapd_drv_link_add(hapd, hapd->mld_link_id,
+-					 hapd->own_addr)) {
+-			wpa_printf(MSG_ERROR,
+-				   "MLD: Failed to add link %d in MLD %s",
+-				   hapd->mld_link_id, hapd->conf->iface);
+-			return -1;
++		if (!hostapd_is_mtk_private_mld(hapd)) {
++			if (hostapd_drv_link_add(hapd, hapd->mld_link_id,
++						 hapd->own_addr)) {
++				wpa_printf(MSG_ERROR,
++					   "MLD: Failed to add link %d in MLD %s",
++					   hapd->mld_link_id, hapd->conf->iface);
++				return -1;
++			}
++			hostapd_mld_add_link(hapd);
+ 		}
+-		hostapd_mld_add_link(hapd);
+ 	}
+ #endif /* CONFIG_IEEE80211BE */
+ 
+--- a/src/ap/ap_config.h
++++ b/src/ap/ap_config.h
+@@ -965,6 +965,10 @@ struct hostapd_bss_config {
+ 	/* The AP is part of an AP MLD */
+ 	u8 mld_ap;
+ 
++#ifdef CONFIG_DRIVER_NL80211_MTK
++	u8 mtk_private_mld;
++#endif /* CONFIG_DRIVER_NL80211_MTK */
++
+ 	/* The MLD ID to which the AP MLD is affiliated with */
+ 	u8 mld_id;
+ 
+--- a/src/ap/hostapd.h
++++ b/src/ap/hostapd.h
+@@ -519,6 +519,9 @@ struct hostapd_data {
+ 	struct hostapd_mld *mld;
+ 	struct dl_list link;
+ 	u8 mld_link_id;
++#ifdef CONFIG_DRIVER_NL80211_MTK
++	u8 mtk_mld_group_idx;
++#endif /* CONFIG_DRIVER_NL80211_MTK */
+ 
+ 	/* Cached partner info for ML probe response */
+ 	struct mld_link_info partner_links[MAX_NUM_MLD_LINKS];
+@@ -907,12 +910,43 @@ int hostapd_fill_cca_settings(struct hos
+ 
+ #ifdef CONFIG_IEEE80211BE
+ 
++bool hostapd_is_mtk_private_mld(struct hostapd_data *hapd);
++enum mtk_mld_update_source {
++	MTK_MLD_UPDATE_FROM_QUERY,
++	MTK_MLD_UPDATE_FROM_EVENT,
++};
++
++int hostapd_update_mtk_private_mld_link(struct hostapd_data *hapd,
++					u8 group_idx, u8 link_id,
++					const u8 *mld_addr,
++					enum mtk_mld_update_source source);
++int hostapd_remove_mtk_private_mld_link(struct hostapd_data *hapd,
++					u8 group_idx, u8 link_id);
++int hostapd_sync_mtk_private_mld_link(struct hostapd_data *hapd);
+ bool hostapd_mld_is_first_bss(struct hostapd_data *hapd);
+ void hostapd_mld_interface_freed(struct hostapd_data *hapd);
+ 
+ #define for_each_mld_link(partner, self) \
+ 	dl_list_for_each(partner, &self->mld->links, struct hostapd_data, link)
+ 
++#ifdef CONFIG_DRIVER_NL80211_MTK
++#define for_each_mtk_private_mld_link(partner, self) \
++	for (size_t _mtk_iface_idx = 0; \
++	     (self)->iface && (self)->iface->interfaces && \
++	     _mtk_iface_idx < (self)->iface->interfaces->count; \
++	     _mtk_iface_idx++) \
++		for (size_t _mtk_bss_idx = 0; \
++		     (self)->iface->interfaces->iface[_mtk_iface_idx] && \
++		     _mtk_bss_idx < (self)->iface->interfaces->iface[_mtk_iface_idx]->num_bss; \
++		     _mtk_bss_idx++) \
++			if (((partner) = \
++			     (self)->iface->interfaces->iface[_mtk_iface_idx]->bss[_mtk_bss_idx]), \
++			    (partner) && hostapd_is_ml_partner((self), (partner)))
++#else /* CONFIG_DRIVER_NL80211_MTK */
++#define for_each_mtk_private_mld_link(partner, self) \
++	if (false)
++#endif /* CONFIG_DRIVER_NL80211_MTK */
++
+ #else /* CONFIG_IEEE80211BE */
+ 
+ static inline bool hostapd_mld_is_first_bss(struct hostapd_data *hapd)
+@@ -922,6 +956,8 @@ static inline bool hostapd_mld_is_first_
+ 
+ #define for_each_mld_link(partner, self) \
+ 	if (false)
++#define for_each_mtk_private_mld_link(partner, self) \
++	if (false)
+ 
+ #endif /* CONFIG_IEEE80211BE */
+ 
+--- a/src/ap/ap_drv_ops.c
++++ b/src/ap/ap_drv_ops.c
+@@ -625,7 +625,7 @@ int hostapd_if_remove(struct hostapd_dat
+ 		return -1;
+ 
+ #ifdef CONFIG_IEEE80211BE
+-	if (hapd->conf->mld_ap)
++	if (hapd->conf->mld_ap && !hostapd_is_mtk_private_mld(hapd))
+ 		return hostapd_if_link_remove(hapd, type, ifname,
+ 					      hapd->mld_link_id);
+ #endif /* CONFIG_IEEE80211BE */
+@@ -764,7 +764,7 @@ int hostapd_set_tx_queue_params(struct h
+ 		return 0;
+ 
+ #ifdef CONFIG_IEEE80211BE
+-	if (hapd->conf->mld_ap)
++	if (hapd->conf->mld_ap && !hostapd_is_mtk_private_mld(hapd))
+ 		link_id = hapd->mld_link_id;
+ #endif /* CONFIG_IEEE80211BE */
+ 
+@@ -909,7 +909,7 @@ int hostapd_drv_send_mlme(struct hostapd
+ 	int link_id = -1;
+ 
+ #ifdef CONFIG_IEEE80211BE
+-	if (hapd->conf->mld_ap)
++	if (hapd->conf->mld_ap && !hostapd_is_mtk_private_mld(hapd))
+ 		link_id = hapd->mld_link_id;
+ #endif /* CONFIG_IEEE80211BE */
+ 
+--- a/src/ap/drv_callbacks.c
++++ b/src/ap/drv_callbacks.c
+@@ -2924,6 +2924,48 @@ void hostapd_wpa_event(void *ctx, enum w
+ 		hostapd_mld_interface_freed(hapd);
+ 		break;
+ #endif /* CONFIG_IEEE80211BE */
++#if defined(CONFIG_IEEE80211BE) && defined(CONFIG_DRIVER_NL80211_MTK)
++	case EVENT_MTK_BSS_MLO_INFO:
++	{
++		const u8 *mld_addr;
++		u8 event_id, group_idx, link_id;
++
++		if (!data || !hostapd_is_mtk_private_mld(hapd))
++			break;
++
++		event_id = data->mtk_bss_mlo_info.event_id;
++		group_idx = data->mtk_bss_mlo_info.mld_grp_idx;
++		link_id = data->mtk_bss_mlo_info.link_id;
++		mld_addr = data->mtk_bss_mlo_info.mld_addr;
++
++		switch (event_id) {
++		case MTK_BSS_MLO_EVENT_ADD_LINK:
++			if (hostapd_update_mtk_private_mld_link(hapd, group_idx,
++								link_id, mld_addr,
++								MTK_MLD_UPDATE_FROM_EVENT))
++				wpa_printf(MSG_ERROR,
++					   "MTK private MLD: failed to apply driver MLO event: iface=%s",
++					   hapd->conf->iface);
++			break;
++		case MTK_BSS_MLO_EVENT_DEL_LINK:
++			wpa_printf(MSG_DEBUG,
++				   "MTK private MLD: driver removed MLO link: iface=%s group=%u link_id=%u",
++				   hapd->conf->iface, group_idx, link_id);
++			if (hostapd_remove_mtk_private_mld_link(hapd, group_idx,
++								link_id))
++				wpa_printf(MSG_ERROR,
++					   "MTK private MLD: failed to remove driver MLO link: iface=%s",
++					   hapd->conf->iface);
++			break;
++		default:
++			wpa_printf(MSG_DEBUG,
++				   "MTK private MLD: ignore driver MLO event: iface=%s event_id=%u",
++				   hapd->conf->iface, event_id);
++			break;
++		}
++		break;
++	}
++#endif /* CONFIG_IEEE80211BE && CONFIG_DRIVER_NL80211_MTK */
+ 	default:
+ 		wpa_printf(MSG_DEBUG, "Unknown event %d", event);
+ 		break;
+--- a/src/ap/wpa_auth.c
++++ b/src/ap/wpa_auth.c
+@@ -204,6 +204,20 @@ static int wpa_get_primary_auth_cb(struc
+ 	return 1;
+ }
+ 
++
++static struct wpa_authenticator *
++wpa_get_primary_auth_for_mld(struct wpa_authenticator *wpa_auth,
++			     const u8 *mld_addr)
++{
++	struct wpa_get_link_auth_ctx ctx;
++
++	ctx.addr = mld_addr;
++	ctx.wpa_auth = NULL;
++	wpa_auth_for_each_auth(wpa_auth, wpa_get_primary_auth_cb, &ctx);
++
++	return ctx.wpa_auth;
++}
++
+ #endif /* CONFIG_IEEE80211BE */
+ 
+ 
+@@ -211,16 +225,10 @@ static struct wpa_authenticator *
+ wpa_get_primary_auth(struct wpa_authenticator *wpa_auth)
+ {
+ #ifdef CONFIG_IEEE80211BE
+-	struct wpa_get_link_auth_ctx ctx;
+-
+ 	if (!wpa_auth || !wpa_auth->is_ml || wpa_auth->primary_auth)
+ 		return wpa_auth;
+ 
+-	ctx.addr = wpa_auth->mld_addr;
+-	ctx.wpa_auth = NULL;
+-	wpa_auth_for_each_auth(wpa_auth, wpa_get_primary_auth_cb, &ctx);
+-
+-	return ctx.wpa_auth;
++	return wpa_get_primary_auth_for_mld(wpa_auth, wpa_auth->mld_addr);
+ #else /* CONFIG_IEEE80211BE */
+ 	return wpa_auth;
+ #endif /* CONFIG_IEEE80211BE */
+@@ -1015,6 +1023,99 @@ int wpa_reconfig(struct wpa_authenticato
+ }
+ 
+ 
++#ifdef CONFIG_IEEE80211BE
++int wpa_auth_set_mld_addr(struct wpa_authenticator *wpa_auth,
++			  const u8 *mld_addr, int link_id)
++{
++	struct wpa_authenticator *pa;
++
++	if (!wpa_auth || !mld_addr || is_zero_ether_addr(mld_addr))
++		return -1;
++
++	/* MTK private MLD may learn the driver-owned MLD address after
++	 * wpa_init(), so initialize the ML view on the first non-zero update.
++	 */
++	pa = wpa_get_primary_auth_for_mld(wpa_auth, mld_addr);
++	if (!pa || pa == wpa_auth) {
++		wpa_auth->primary_auth = true;
++		if (!wpa_auth->ml_pmksa) {
++			wpa_auth->ml_pmksa = pmksa_cache_auth_init(
++				wpa_auth_pmksa_free_cb, wpa_auth);
++			if (!wpa_auth->ml_pmksa) {
++				wpa_printf(MSG_ERROR,
++					   "MLD-level PMKSA cache initialization failed.");
++				return -1;
++			}
++		}
++	} else {
++		if (!pa->ml_pmksa) {
++			wpa_printf(MSG_ERROR,
++				   "Primary MLD-level PMKSA cache is missing.");
++			return -1;
++		}
++		wpa_auth->primary_auth = false;
++		wpa_auth->ml_pmksa = pa->ml_pmksa;
++		eloop_cancel_timeout(wpa_rekey_gtk, wpa_auth, NULL);
++	}
++
++	wpa_auth->link_id = link_id;
++	wpa_auth->is_ml = true;
++	wpa_auth->conf.mld_addr = wpa_auth->mld_addr;
++	wpa_auth->conf.link_id = link_id;
++	os_memcpy(wpa_auth->mld_addr, mld_addr, ETH_ALEN);
++
++	if (wpa_auth_gen_wpa_ie(wpa_auth)) {
++		wpa_printf(MSG_ERROR, "Could not regenerate WPA IE.");
++		return -1;
++	}
++
++	return 0;
++}
++
++
++int wpa_auth_clear_mld_addr(struct wpa_authenticator *wpa_auth)
++{
++	struct wpa_authenticator *next_pa = NULL;
++
++	if (!wpa_auth || !wpa_auth->is_ml)
++		return 0;
++
++	if (wpa_auth->primary_auth) {
++		next_pa = wpa_auth->cb->next_primary_auth(wpa_auth->cb_ctx);
++		if (next_pa && next_pa != wpa_auth) {
++			eloop_cancel_timeout(wpa_rekey_gtk, wpa_auth, NULL);
++			next_pa->primary_auth = true;
++			next_pa->ml_pmksa = wpa_auth->ml_pmksa;
++			wpa_auth->ml_pmksa = NULL;
++			if (next_pa->conf.wpa_group_rekey)
++				eloop_register_timeout(
++					next_pa->conf.wpa_group_rekey, 0,
++					wpa_rekey_gtk, next_pa, NULL);
++		} else {
++			pmksa_cache_auth_deinit(wpa_auth->ml_pmksa);
++			wpa_auth->ml_pmksa = NULL;
++		}
++	} else {
++		wpa_auth->ml_pmksa = NULL;
++	}
++
++	wpa_auth->primary_auth = false;
++	wpa_auth->is_ml = false;
++	wpa_auth->link_id = 0;
++	wpa_auth->conf.mld_addr = NULL;
++	wpa_auth->conf.link_id = -1;
++	os_memset(wpa_auth->mld_addr, 0, ETH_ALEN);
++
++	if (wpa_auth_gen_wpa_ie(wpa_auth)) {
++		wpa_printf(MSG_ERROR, "Could not regenerate WPA IE.");
++		return -1;
++	}
++
++	return 0;
++}
++#endif /* CONFIG_IEEE80211BE */
++
++
+ struct wpa_state_machine *
+ wpa_auth_sta_init(struct wpa_authenticator *wpa_auth, const u8 *addr,
+ 		  const u8 *p2p_dev_addr)
+--- a/src/ap/wpa_auth.h
++++ b/src/ap/wpa_auth.h
+@@ -446,6 +446,11 @@ int wpa_init_keys(struct wpa_authenticat
+ void wpa_deinit(struct wpa_authenticator *wpa_auth);
+ int wpa_reconfig(struct wpa_authenticator *wpa_auth,
+ 		 struct wpa_auth_config *conf);
++#ifdef CONFIG_IEEE80211BE
++int wpa_auth_set_mld_addr(struct wpa_authenticator *wpa_auth,
++			  const u8 *mld_addr, int link_id);
++int wpa_auth_clear_mld_addr(struct wpa_authenticator *wpa_auth);
++#endif /* CONFIG_IEEE80211BE */
+ 
+ enum wpa_validate_result {
+ 	WPA_IE_OK, WPA_INVALID_IE, WPA_INVALID_GROUP, WPA_INVALID_PAIRWISE,
