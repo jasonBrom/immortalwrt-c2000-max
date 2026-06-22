@@ -53,6 +53,7 @@ const types = {
 	"array": 1,
 	"string": 3,
 	"integer": 5,
+	"number": 5,
 	"boolean": 7,
 };
 
