@@ -21,11 +21,10 @@
 'use strict';
 
 import * as fs from 'fs';
-import * as uci from 'uci';
 import * as l1parser from 'l1parser';
 import * as datconf from 'datconf';
 
-import { schemas, wpad_overlay } from 'mtwifi.defaults';
+import { defs, schemas, wpad_overlay } from 'mtwifi.defaults';
 import * as netifd from 'mtwifi.netifd';
 import * as cfg from 'mtwifi.config';
 import * as driver from 'mtwifi.driver';
@@ -36,15 +35,15 @@ import * as supplicant from 'wifi.supplicant';
 import { validate } from 'wifi.validate';
 
 const LOCK_FILE = "/var/lock/mtwifi.lock";
-// MTWIFI_MAX_* interface index limits.
-const MAX_AP_IDX = 15;
-const MAX_APCLI_IDX = 0;
-
-log.debug(`[Setup] received cmd ${ARGV}`);
+const MAX_AP_VIFS = defs.MAX_MBSSID;
+const MAX_APCLI_VIFS = defs.MAX_APCLI_NUM;
+const MAX_MLD_GROUP_ID = defs.MAX_MLD_GROUP_ID;
 
 let command = ARGV[1];
 let cur_devname = ARGV[2];
 let config_json_str = ARGV[3];
+
+log.debug(`[Setup] received ${command} for ${cur_devname}`);
 
 // for netifd script parsing
 global.radio = cur_devname;
@@ -288,7 +287,7 @@ function setup_wpad(data, cur_dev) {
         let ifname = iface.mtwifi_ifname;
         let config = iface.config;
 
-        if (!ifname || config.disabled)
+        if (!ifname)
             continue;
 
         let iface_key = iface.name || ifname;
@@ -489,62 +488,6 @@ function handle_setup(data) {
     // UCI doesnt contain this key
     data.device = cur_devname;
 
-    /*****        ADD DISABLED VIFS CONFIG       *******/
-
-    // read UCI cfg
-    let cursor = uci.cursor();
-    cursor.load("wireless");
-
-    // build netifd ifaces projection
-    // ifname -> object
-    let netifd_ifaces = {};
-    for (let k, v in data.interfaces) {
-        let name = v.name || v.section;
-        if (name) netifd_ifaces[name] = v;
-    }
-
-    // rebuild ifaces object from read UCI cfg
-    let complete_ifaces = {};
-    let sort_idx = 1;
-
-    cursor.foreach("wireless", "wifi-iface", function(sec) {
-        // skip iface that doesnt belong to cur dev
-        if (type(sec.device) == "array") {
-            if (index(sec.device, cur_devname) < 0) return;
-        } else if (sec.device != cur_devname) {
-            return;
-        }
-
-        // generate ordered keys (01, 02, 03...)
-        let key = sprintf("%02d", sort_idx++);
-
-        if (exists(netifd_ifaces, sec['.name'])) {
-            // use netifd config if exists
-            complete_ifaces[key] = netifd_ifaces[sec['.name']];
-        } else {
-            // construct iface data with same format
-            complete_ifaces[key] = {
-                "name": sec['.name'],
-                "config": {
-                    "network":      split(sec.network, " "),
-                    "device":       sec.device,
-                    "mode":         sec.mode,
-                    "mlo":          sec.mlo == "1",
-                    "encryption":   sec.encryption,
-                    "key":          sec.key,
-                    "ssid":         sec.ssid,
-                    "radios":       [],
-                    "disabled":     sec.disabled == "1"
-                }
-            };
-
-            log.debug(`[Setup] Restored disabled interface from UCI: ${sec['.name']}`);
-        }
-    });
-
-    // replace the data.interfaces
-    data.interfaces = complete_ifaces;
-
     /*****      PREPARE PREFIXES AND COUNTINGS     *******/
 
     // MTWIFI_AP_IF_PREFIX <= ext_ifname
@@ -556,72 +499,70 @@ function handle_setup(data) {
     let apcli_idx = 0;
 
 
-    /*****          SET VIFS IN NETIFD        *******/
+    /*****       VALIDATE AND ASSIGN VIFS      *******/
 
-    // netifd idx may mismatch with UCI idx, keep it separately.
-    let netifd_idx = (() => {
-        let i = 1;
-        return {
-            increase: () => { return ++i; },
-            get: () => { return sprintf("%02d", i); }
-        }
-    })();
+    // Dropped local VIFs must not reach DAT conversion or wpad projection.
+    let active_interfaces = {};
 
-    // keep iterating sequence for config.interfaces
-    // we assume that UCI arrays are ordered
-    // for_each_interface ap mtwifi_vif_ap_set_data
+    /*
+     * Cross-radio mtwifi MLO admission has already happened in wifi-scripts.
+     * These limits remain the handler contract for every per-radio payload.
+     */
     for (let idx, iface_data in data.interfaces) {
         let config = iface_data.config;
         let mode = config.mode;
-        let calc_ifname = null;
 
-        // AP mode handling
-        // mtwifi_vif_ap_set_data
         if (mode == "ap") {
-            if (ap_idx > MAX_AP_IDX) {
-                let kind = config.mlo ? "MLO AP" : "AP";
-                log.warn(`[Setup] Drop ${kind} interface ${iface_data.name || idx}: max AP index ${MAX_AP_IDX} reached`);
+            if (config.mlo) {
+                let mld_ifname_match = match(config.ifname, /^ap-mld([0-9]+)$/);
+                // netifd identity ap-mldN is zero-based; DAT group 0 means non-MLO.
+                let group_id = mld_ifname_match ? int(mld_ifname_match[1]) + 1 : null;
+
+                if (group_id == null || group_id > MAX_MLD_GROUP_ID) {
+                    log.error(`[Setup] Invalid MLO identity ${config.ifname} ` +
+                        `for ${iface_data.name}`);
+                    netifd.setup_failed("INVALID_MLO_IFNAME");
+                    l1.close();
+                    return;
+                }
+            }
+
+            if (ap_idx >= MAX_AP_VIFS) {
+                log.warn(`[Setup] Drop AP interface ${iface_data.name}: ` +
+                    `max AP VIF count ${MAX_AP_VIFS} reached`);
                 continue;
             }
 
-            calc_ifname = ap_prefix + ap_idx++;
+            iface_data.mtwifi_ifname = ap_prefix + ap_idx++;
         }
-        // STA(Client) mode handling
-        // mtwifi_vif_sta_set_data
         else if (mode == "sta") {
-            if (apcli_idx <= MAX_APCLI_IDX) {
-                calc_ifname = apcli_prefix + apcli_idx;
-                apcli_idx++;
-            } else {
-                log.warn(`[Setup] Ignored STA interface ${idx}: Max index reached.`);
+            if (apcli_idx >= MAX_APCLI_VIFS) {
+                log.warn(`[Setup] Drop STA interface ${iface_data.name}: ` +
+                    `max APCLI VIF count ${MAX_APCLI_VIFS} reached`);
+                continue;
             }
+
+            iface_data.mtwifi_ifname = apcli_prefix + apcli_idx++;
         }
 
-        // inject calculated ifname into mtwifi_ifname
-        // this is CRITICAL for cfg.setup(), since vif names are not contained in raw UCI cfgs
-        // json_add_string "$MTWIFI_CFG_IFNAME_KEY" "$ifname"
-        if (calc_ifname) {
-            iface_data.mtwifi_ifname = calc_ifname;
+        active_interfaces[idx] = iface_data;
+    }
 
-            // notify netifd to bind interfaces
-            // hooked in netifd-wireless
-            // mtwifi_vif_ap_config -> wireless_add_vif
-            // NOTE: shell script checked config.disabled before wireless_add_vif
-            if (!config.disabled) {
-                // if previous ifaces were disabled, netifd idx may mismatch with UCI index
-                log.info(`[Setup] Add interface: ${idx} -> ${calc_ifname} (mode: ${mode}, netifd idx: ${netifd_idx.get()})`);
-                // here set vif with real netifd idx
-                netifd.set_vif(netifd_idx.get(), calc_ifname);
-                // increase the netifd idx
-                netifd_idx.increase();
-            } else {
-                log.info(`[Setup] Skipped disabled interface: ${calc_ifname}`);
-            }
-        }
+    data.interfaces = active_interfaces;
+
+    /*****          SET VIFS IN NETIFD        *******/
+
+    for (let idx, iface_data in data.interfaces) {
+        let ifname = iface_data.mtwifi_ifname;
+        if (!ifname)
+            continue;
+
+        log.info(`[Setup] Add interface: ${idx} -> ${ifname} (mode: ${iface_data.config.mode})`);
+        netifd.set_vif(idx, ifname);
     }
 
     /*****          SETUP VIFS        *******/
-    // UCI => DAT, ifup, reload driver...
+    // Active netifd payload => current-band DAT and wpad attach.
     if (!wpad_enabled()) {
         netifd.setup_failed("WPAD_NOT_FOUND");
         l1.close();
@@ -676,7 +617,7 @@ switch (command) {
                 handle_setup(data);
             }, LOCK_FILE, `${command} ${cur_devname}`);
 		} else {
-            log.error(`[Setup] UCI cfg data not valid!!! raw: ${config_json_str}, json parse: ${data}`);
+			log.error(`[Setup] Invalid configuration data for ${cur_devname}`);
 			exit(1);
 		}
 		break;
