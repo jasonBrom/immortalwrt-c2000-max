@@ -401,8 +401,9 @@ function remove_wpad_iface(obj, ifname) {
 /**
  * Remove wpad state by actual ifname.
  *
- * APCLI/ext VIFs can outlive their netifd projection, so this asks driver
- * helpers to rediscover related kernel ifnames.
+ * Each APCLI is a separate supplicant interface. AP BSSes are registered as
+ * one hostapd interface anchored at the device main ifname, so removing that
+ * anchor tears down all of its BSSes.
  *
  * @param {Object} dev - L1 device descriptor.
  */
@@ -411,9 +412,6 @@ function teardown_wpad(dev) {
 
     for (let ifname in ifnames.sta)
         remove_wpad_iface('wpa_supplicant', ifname);
-
-    for (let ifname in ifnames.ap)
-        remove_wpad_iface('hostapd', ifname);
 
     remove_wpad_iface('hostapd', ifnames.main);
 }
