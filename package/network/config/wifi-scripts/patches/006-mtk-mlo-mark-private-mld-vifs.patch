@@ -1,66 +1,126 @@
 --- a/files/lib/netifd/wireless.uc
 +++ b/files/lib/netifd/wireless.uc
-@@ -25,6 +25,10 @@ function wpad_update_mlo(service, mode)
+@@ -10,6 +10,9 @@ import {
+ import { find_phy } from "wifi.utils";
+ import * as wdev from "./wireless-device.uc";
+ 
++// Per-radio mtwifi VIF limits used during whole-interface admission.
++const MTWIFI_MAX_AP_VIFS = 16;
++
+ let wireless = netifd.wireless = {
+ 	handlers: {},
+ 	devices: {},
+@@ -25,6 +28,10 @@ function wpad_update_mlo(service, mode)
  		if (data.mode != mode)
  			continue;
  
-+		// mtwifi maps mainline MLO intent to DAT/private driver MLD.
-+		if (data.private_mld)
++		// mtwifi creates the MLD in the driver instead of through mld_set.
++		if (data.is_mtwifi_mlo)
 +			continue;
 +
  		data.phy = find_phy(data.radio_config[0], true);
  		if (!data.phy)
  			continue;
-@@ -50,13 +54,15 @@ function supplicant_update_mlo()
+@@ -50,13 +57,15 @@ function supplicant_update_mlo()
  	wpad_update_mlo("wpa_supplicant", "sta");
  }
  
 -function mlo_vif_create(config, radio_config, vif_idx, mlo_vifs)
-+function mlo_vif_create(config, radio_config, vif_idx, mlo_vifs, private_mld)
++function mlo_vif_create(config, radio_config, vif_idx, mlo_vifs, is_mtwifi_mlo)
  {
  	let mlo_config = { ...config };
  
  	if (config.wds)
  		mlo_config['4addr'] = config.wds;
  	mlo_config.radio_config = radio_config;
-+	if (private_mld)
-+		mlo_config.private_mld = true;
++	if (is_mtwifi_mlo)
++		mlo_config.is_mtwifi_mlo = true;
  
  	let ifname = config.ifname;
  	if (!ifname) {
-@@ -166,6 +172,9 @@ function config_init(uci)
+@@ -82,6 +91,42 @@ function mlo_vif_macaddr(config, dev_nam
+ 		config.macaddr = macaddr;
+ }
+ 
++function match_mtwifi_devices(devices, dev_names)
++{
++	if (!length(dev_names))
++		return false;
++
++	for (let dev_name in dev_names) {
++		let dev = devices[dev_name];
++		if (!dev || dev.config.type != "mtwifi")
++			return false;
++	}
++
++	return true;
++}
++
++// Admit the complete MLO AP before splitting it into radio payloads.
++function validate_mtwifi_mlo_ap(devices, dev_names, iface_name)
++{
++	for (let dev_name in dev_names) {
++		let dev = devices[dev_name];
++		if (dev.config.disabled)
++			continue;
++		if (index(dev.config.htmode, "EHT") != 0) {
++			warn(`mtwifi: drop MLO AP ${iface_name}: ${dev_name} is not EHT`);
++			return false;
++		}
++
++		let vif_count = length(filter(dev.vif, (vif) => vif.config.mode == "ap"));
++		if (vif_count >= MTWIFI_MAX_AP_VIFS) {
++			warn(`mtwifi: drop MLO AP ${iface_name}: no AP VIF slot on ${dev_name}`);
++			return false;
++		}
++	}
++
++	return true;
++}
++
+ function update_config(new_devices, mlo_vifs)
+ {
+ 	wireless.mlo = mlo_vifs;
+@@ -166,9 +211,14 @@ function config_init(uci)
  		let radios = map(dev_names, (v) => radio_idx[v]);
  		radios = filter(radios, (v) => v != null);
  		let radio_config = map(dev_names, (v) => devices[v]?.config);
-+		let private_mld = length(dev_names) &&
-+			length(filter(dev_names,
-+				(v) => sections.device[v]?.type == "mtwifi")) == length(dev_names);
++		let is_mtwifi_mlo = mlo_vif && match_mtwifi_devices(devices, dev_names);
  		let ifname;
  		let mlo_created = false;
  
-@@ -182,7 +191,8 @@ function config_init(uci)
++		if (is_mtwifi_mlo && data.mode == "ap" &&
++			!validate_mtwifi_mlo_ap(devices, dev_names, name))
++			continue;
++
+ 		for (let dev_name in dev_names) {
+ 			let dev = devices[dev_name];
+ 			if (!dev || dev.config.disabled)
+@@ -182,7 +232,8 @@ function config_init(uci)
  			config.radios = radios;
  
  			if (mlo_vif && !mlo_created) {
 -				ifname = mlo_vif_create(config, radio_config, vif_idx, mlo_vifs);
 +				ifname = mlo_vif_create(config, radio_config, vif_idx,
-+					mlo_vifs, private_mld);
++					mlo_vifs, is_mtwifi_mlo);
  				mlo_created = true;
  			}
  
-@@ -315,10 +325,14 @@ function config_init(uci)
+@@ -315,10 +366,16 @@ function config_init(uci)
  						radios = filter(radios, (v) => v != null);
  						let radio_config = map(devs, (v) => devices[v]?.config);
  						radio_config = filter(radio_config, (v) => v != null);
-+						let private_mld = length(devs) &&
-+							length(filter(devs,
-+								(v) => sections.device[v]?.type == "mtwifi")) == length(devs);
++						let is_mtwifi_mlo = mlo_vif && match_mtwifi_devices(devices, devs);
  						let ifname;
  
++						if (is_mtwifi_mlo && config.mode == "ap" &&
++							!validate_mtwifi_mlo_ap(devices, devs, name))
++							continue;
++
  						if (mlo_vif) {
 -							ifname = mlo_vif_create(config, radio_config, vif_idx, mlo_vifs);
 +							ifname = mlo_vif_create(config, radio_config,
-+								vif_idx, mlo_vifs, private_mld);
++								vif_idx, mlo_vifs, is_mtwifi_mlo);
  							mlo_vifs[ifname].radios = radios;
  						}
  
