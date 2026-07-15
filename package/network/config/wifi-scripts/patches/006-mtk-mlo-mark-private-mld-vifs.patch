@@ -1,16 +1,17 @@
 --- a/files/lib/netifd/wireless.uc
 +++ b/files/lib/netifd/wireless.uc
-@@ -10,6 +10,9 @@ import {
+@@ -10,6 +10,10 @@ import {
  import { find_phy } from "wifi.utils";
  import * as wdev from "./wireless-device.uc";
  
 +// Per-radio mtwifi VIF limits used during whole-interface admission.
 +const MTWIFI_MAX_AP_VIFS = 16;
++const MTWIFI_MAX_STA_VIFS = 1;
 +
  let wireless = netifd.wireless = {
  	handlers: {},
  	devices: {},
-@@ -25,6 +28,10 @@ function wpad_update_mlo(service, mode)
+@@ -25,6 +29,10 @@ function wpad_update_mlo(service, mode)
  		if (data.mode != mode)
  			continue;
  
@@ -21,7 +22,7 @@
  		data.phy = find_phy(data.radio_config[0], true);
  		if (!data.phy)
  			continue;
-@@ -50,13 +57,15 @@ function supplicant_update_mlo()
+@@ -50,13 +58,15 @@ function supplicant_update_mlo()
  	wpad_update_mlo("wpa_supplicant", "sta");
  }
  
@@ -38,10 +39,11 @@
  
  	let ifname = config.ifname;
  	if (!ifname) {
-@@ -82,6 +91,42 @@ function mlo_vif_macaddr(config, dev_nam
+@@ -82,7 +92,65 @@ function mlo_vif_macaddr(config, dev_nam
  		config.macaddr = macaddr;
  }
  
+-function update_config(new_devices, mlo_vifs)
 +function match_mtwifi_devices(devices, dev_names)
 +{
 +	if (!length(dev_names))
@@ -56,21 +58,30 @@
 +	return true;
 +}
 +
-+// Admit the complete MLO AP before splitting it into radio payloads.
-+function validate_mtwifi_mlo_ap(devices, dev_names, iface_name)
++// Admit the complete MLO interface before splitting it into radio payloads.
++function validate_mtwifi_mlo(devices, dev_names, mode, iface_name)
 +{
++	let mode_label = (mode == "ap") ? "AP" : "STA";
++	let main_dev = devices[dev_names[0]];
++
++	if (mode == "sta" && main_dev.config.disabled) {
++		warn(`mtwifi: drop MLO ${mode_label} ${iface_name}: main radio is unavailable`);
++		return false;
++	}
++
 +	for (let dev_name in dev_names) {
 +		let dev = devices[dev_name];
 +		if (dev.config.disabled)
 +			continue;
 +		if (index(dev.config.htmode, "EHT") != 0) {
-+			warn(`mtwifi: drop MLO AP ${iface_name}: ${dev_name} is not EHT`);
++			warn(`mtwifi: drop MLO ${mode_label} ${iface_name}: ${dev_name} is not EHT`);
 +			return false;
 +		}
 +
-+		let vif_count = length(filter(dev.vif, (vif) => vif.config.mode == "ap"));
-+		if (vif_count >= MTWIFI_MAX_AP_VIFS) {
-+			warn(`mtwifi: drop MLO AP ${iface_name}: no AP VIF slot on ${dev_name}`);
++		let vif_limit = mode == "ap" ? MTWIFI_MAX_AP_VIFS : MTWIFI_MAX_STA_VIFS;
++		let vif_count = length(filter(dev.vif, (vif) => vif.config.mode == mode));
++		if (vif_count >= vif_limit) {
++			warn(`mtwifi: drop MLO ${mode_label} ${iface_name}: no ${mode_label} VIF slot on ${dev_name}`);
 +			return false;
 +		}
 +	}
@@ -78,26 +89,69 @@
 +	return true;
 +}
 +
- function update_config(new_devices, mlo_vifs)
++/*
++ * Preserve the configured device order. Only the first STA member owns the
++ * network; record its device so update_config() starts it before the others.
++ */
++function prepare_mtwifi_sta_mlo(config, dev_name, dev_names, sta_mlo_main_devices)
++{
++	config.device = dev_names;
++	if (dev_name == dev_names[0])
++		push(sta_mlo_main_devices, dev_name);
++	else
++		config.network = [];
++}
++
++function update_config(new_devices, mlo_vifs, sta_mlo_main_devices)
  {
  	wireless.mlo = mlo_vifs;
-@@ -166,9 +211,14 @@ function config_init(uci)
+ 	hostapd_update_mlo();
+@@ -92,7 +160,14 @@ function update_config(new_devices, mlo_
+ 		if (!new_devices[name])
+ 			dev.destroy();
+ 
+-	for (let name, dev in new_devices) {
++	// Start each STA MLO main device before the remaining devices.
++	let ordered_device_names = [
++		...sta_mlo_main_devices,
++		...filter(keys(new_devices), (name) => index(sta_mlo_main_devices, name) < 0)
++	];
++
++	for (let name in ordered_device_names) {
++		let dev = new_devices[name];
+ 		let cur_dev = wireless.devices[name];
+ 		if (cur_dev) {
+ 			cur_dev.update(dev);
+@@ -116,6 +191,7 @@ function config_init(uci)
+ 	let devices = {};
+ 	let vifs = {};
+ 	let mlo_vifs = {};
++	let sta_mlo_main_devices = [];
+ 
+ 	let sections = {
+ 		device: {},
+@@ -166,9 +242,15 @@ function config_init(uci)
  		let radios = map(dev_names, (v) => radio_idx[v]);
  		radios = filter(radios, (v) => v != null);
  		let radio_config = map(dev_names, (v) => devices[v]?.config);
 +		let is_mtwifi_mlo = mlo_vif && match_mtwifi_devices(devices, dev_names);
++		let is_mtwifi_sta_mlo = is_mtwifi_mlo && data.mode == "sta";
  		let ifname;
  		let mlo_created = false;
  
-+		if (is_mtwifi_mlo && data.mode == "ap" &&
-+			!validate_mtwifi_mlo_ap(devices, dev_names, name))
++		if (is_mtwifi_mlo && (data.mode == "ap" || data.mode == "sta") &&
++			!validate_mtwifi_mlo(devices, dev_names, data.mode, name))
 +			continue;
 +
  		for (let dev_name in dev_names) {
  			let dev = devices[dev_name];
  			if (!dev || dev.config.disabled)
-@@ -182,7 +232,8 @@ function config_init(uci)
+@@ -180,9 +262,12 @@ function config_init(uci)
+ 
+ 			let config = parse_attribute_list(data, handler.iface);
  			config.radios = radios;
++			if (is_mtwifi_sta_mlo)
++				prepare_mtwifi_sta_mlo(config, dev_name, dev_names, sta_mlo_main_devices);
  
  			if (mlo_vif && !mlo_created) {
 -				ifname = mlo_vif_create(config, radio_config, vif_idx, mlo_vifs);
@@ -106,15 +160,17 @@
  				mlo_created = true;
  			}
  
-@@ -315,10 +366,16 @@ function config_init(uci)
+@@ -315,10 +400,18 @@ function config_init(uci)
  						radios = filter(radios, (v) => v != null);
  						let radio_config = map(devs, (v) => devices[v]?.config);
  						radio_config = filter(radio_config, (v) => v != null);
 +						let is_mtwifi_mlo = mlo_vif && match_mtwifi_devices(devices, devs);
++						let is_mtwifi_sta_mlo = is_mtwifi_mlo && config.mode == "sta";
  						let ifname;
  
-+						if (is_mtwifi_mlo && config.mode == "ap" &&
-+							!validate_mtwifi_mlo_ap(devices, devs, name))
++						if (is_mtwifi_mlo &&
++							(config.mode == "ap" || config.mode == "sta") &&
++							!validate_mtwifi_mlo(devices, devs, config.mode, name))
 +							continue;
 +
  						if (mlo_vif) {
@@ -124,3 +180,22 @@
  							mlo_vifs[ifname].radios = radios;
  						}
  
+@@ -328,6 +421,9 @@ function config_init(uci)
+ 								continue;
+ 
+ 							let vif_config = ifname ? { ...config, ifname, radios } : config;
++							if (is_mtwifi_sta_mlo)
++								prepare_mtwifi_sta_mlo(vif_config, device, devs,
++									sta_mlo_main_devices);
+ 							if (ifname)
+ 								mlo_vif_macaddr(vif_config, devs, device);
+ 
+@@ -348,7 +444,7 @@ function config_init(uci)
+ 		}
+ 	}
+ 
+-	update_config(devices, mlo_vifs);
++	update_config(devices, mlo_vifs, sta_mlo_main_devices);
+ }
+ 
+ function config_start()
