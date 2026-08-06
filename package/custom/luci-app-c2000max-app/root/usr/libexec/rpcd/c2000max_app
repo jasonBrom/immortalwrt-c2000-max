@@ -1,0 +1,411 @@
+#!/bin/sh
+
+. /usr/share/libubox/jshn.sh
+
+OPTIONS="
+local_enable
+remote_enable
+local_device_enable
+local_signal_enable
+local_client_enable
+local_wifi_enable
+local_traffic_enable
+local_sms_enable
+local_network_write_enable
+local_sim_switch_enable
+local_cellular_record_enable
+password_enable
+reboot_enable
+remote_web_enable
+device_report_enable
+signal_report_enable
+traffic_report_enable
+terminal_tracking_enable
+broadcast_enable
+command_enable
+file_enable
+appstore_enable
+developer_enable
+"
+
+normalize_bool()
+{
+	case "$1" in
+		1|true) printf '1\n' ;;
+		0|false) printf '0\n' ;;
+		*) return 1 ;;
+	esac
+}
+
+status()
+{
+	local option value identity device_id broker state state_message bridge_log
+	local agent_log bridge_state bridge_diagnostic
+	local cache_state cache_message cache_elapsed_ms
+	local wifi_apply_state wifi_apply_message
+	local remote_command_state remote_command_message
+	local remote_command_exit_code remote_command_ready remote_command_rweb
+	local remote_command_app_ready remote_command_failure_class
+	local remote_command_missing_program remote_command_tunnel_method
+	local remote_command_bootstrap_tool remote_command_uci_queries
+	local remote_command_updated
+	local remote_wget_runtime remote_wget_ready
+	local identity_available identity_source identity_mismatch factory_id
+	local bdinfo_present bdinfo_source crypto_source app_auth_source
+	local bdinfo_fac_mac_present bdinfo_identity_valid identity_error
+	local remote_identity_available device_code_present
+	local local_enabled local_probe local_probe_code
+	local local_probe_build local_probe_message local_route_installed
+
+	identity="$(/usr/sbin/c2000max-app-remote identity 2>/dev/null)"
+	device_id="$(printf '%s' "$identity" | jsonfilter -e '@.device_id')"
+	broker="$(printf '%s' "$identity" | jsonfilter -e '@.broker')"
+	state="$(printf '%s' "$identity" | jsonfilter -e '@.state')"
+	state_message="$(printf '%s' "$identity" | jsonfilter -e '@.message')"
+	bridge_log="$(printf '%s' "$identity" | jsonfilter -e '@.bridge_log')"
+	agent_log="$(printf '%s' "$identity" | jsonfilter -e '@.agent_log')"
+	bridge_state="$(printf '%s' "$identity" | jsonfilter -e '@.bridge_state')"
+	bridge_diagnostic="$(printf '%s' "$identity" |
+		jsonfilter -e '@.bridge_diagnostic')"
+	cache_state="$(printf '%s' "$identity" | jsonfilter -e '@.cache_state')"
+	cache_message="$(printf '%s' "$identity" | jsonfilter -e '@.cache_message')"
+	cache_elapsed_ms="$(printf '%s' "$identity" |
+		jsonfilter -e '@.cache_elapsed_ms')"
+	case "$cache_elapsed_ms" in
+		''|*[!0-9]*) cache_elapsed_ms=0 ;;
+	esac
+	wifi_apply_state="$(printf '%s' "$identity" |
+		jsonfilter -e '@.wifi_apply_state')"
+	wifi_apply_message="$(printf '%s' "$identity" |
+		jsonfilter -e '@.wifi_apply_message')"
+	remote_command_state="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_command_state')"
+	remote_command_message="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_command_message')"
+	remote_command_exit_code="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_command_exit_code')"
+	remote_command_ready="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_command_ready')"
+	remote_command_rweb="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_command_rweb')"
+	remote_command_app_ready="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_command_app_ready')"
+	remote_command_failure_class="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_command_failure_class')"
+	remote_command_missing_program="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_command_missing_program')"
+	remote_command_tunnel_method="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_command_tunnel_method')"
+	remote_command_bootstrap_tool="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_command_bootstrap_tool')"
+	remote_command_uci_queries="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_command_uci_queries')"
+	remote_command_updated="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_command_updated')"
+	case "$remote_command_updated" in
+		''|*[!0-9]*) remote_command_updated=0 ;;
+	esac
+	remote_wget_runtime="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_wget_runtime')"
+	remote_wget_ready="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_wget_ready')"
+	identity_available="$(printf '%s' "$identity" |
+		jsonfilter -e '@.available')"
+	identity_source="$(printf '%s' "$identity" |
+		jsonfilter -e '@.device_source')"
+	identity_mismatch="$(printf '%s' "$identity" |
+		jsonfilter -e '@.identity_mismatch')"
+	factory_id="$(printf '%s' "$identity" | jsonfilter -e '@.factory_id')"
+	bdinfo_present="$(printf '%s' "$identity" |
+		jsonfilter -e '@.bdinfo_present')"
+	bdinfo_source="$(printf '%s' "$identity" |
+		jsonfilter -e '@.bdinfo_source')"
+	bdinfo_fac_mac_present="$(printf '%s' "$identity" |
+		jsonfilter -e '@.bdinfo_fac_mac_present')"
+	bdinfo_identity_valid="$(printf '%s' "$identity" |
+		jsonfilter -e '@.bdinfo_identity_valid')"
+	remote_identity_available="$(printf '%s' "$identity" |
+		jsonfilter -e '@.remote_identity_available')"
+	identity_error="$(printf '%s' "$identity" |
+		jsonfilter -e '@.identity_error')"
+	crypto_source="$(printf '%s' "$identity" |
+		jsonfilter -e '@.crypto_source')"
+	app_auth_source="$(printf '%s' "$identity" |
+		jsonfilter -e '@.app_auth_source')"
+	device_code_present="$(printf '%s' "$identity" |
+		jsonfilter -e '@.device_code_present')"
+
+	json_init
+	for option in $OPTIONS; do
+		value="$(uci -q get "c2000max_app.main.$option")"
+		json_add_boolean "$option" "$([ "$value" = 1 ] && echo 1 || echo 0)"
+	done
+	json_add_string device_id "$device_id"
+	json_add_string factory_id "$factory_id"
+	json_add_string identity_source "$identity_source"
+	json_add_boolean identity_available \
+		"$([ "$identity_available" = true ] && echo 1 || echo 0)"
+	json_add_boolean identity_mismatch \
+		"$([ "$identity_mismatch" = true ] && echo 1 || echo 0)"
+	json_add_boolean bdinfo_present \
+		"$([ "$bdinfo_present" = true ] && echo 1 || echo 0)"
+	json_add_string bdinfo_source "$bdinfo_source"
+	json_add_boolean bdinfo_fac_mac_present \
+		"$([ "$bdinfo_fac_mac_present" = true ] && echo 1 || echo 0)"
+	json_add_boolean bdinfo_identity_valid \
+		"$([ "$bdinfo_identity_valid" = true ] && echo 1 || echo 0)"
+	json_add_boolean remote_identity_available \
+		"$([ "$remote_identity_available" = true ] && echo 1 || echo 0)"
+	json_add_string identity_error "$identity_error"
+	json_add_string crypto_source "$crypto_source"
+	json_add_string app_auth_source "$app_auth_source"
+	json_add_boolean device_code_present \
+		"$([ "$device_code_present" = true ] && echo 1 || echo 0)"
+	json_add_string broker "$broker"
+	json_add_string remote_state "${state:-stopped}"
+	json_add_string remote_message "$state_message"
+	json_add_string bridge_log "$bridge_log"
+	json_add_string agent_log "$agent_log"
+	json_add_string bridge_state "$bridge_state"
+	json_add_string bridge_diagnostic "$bridge_diagnostic"
+	json_add_string cache_state "$cache_state"
+	json_add_string cache_message "$cache_message"
+	json_add_int cache_elapsed_ms "${cache_elapsed_ms:-0}"
+	json_add_string wifi_apply_state "$wifi_apply_state"
+	json_add_string wifi_apply_message "$wifi_apply_message"
+	json_add_string remote_command_state "$remote_command_state"
+	json_add_string remote_command_message "$remote_command_message"
+	json_add_string remote_command_exit_code "$remote_command_exit_code"
+	json_add_boolean remote_command_ready \
+		"$([ "$remote_command_ready" = true ] && echo 1 || echo 0)"
+	json_add_boolean remote_command_rweb \
+		"$([ "$remote_command_rweb" = true ] && echo 1 || echo 0)"
+	json_add_boolean remote_command_app_ready \
+		"$([ "$remote_command_app_ready" = true ] && echo 1 || echo 0)"
+	json_add_string remote_command_failure_class \
+		"$remote_command_failure_class"
+	json_add_string remote_command_missing_program \
+		"$remote_command_missing_program"
+	json_add_string remote_command_tunnel_method \
+		"$remote_command_tunnel_method"
+	json_add_string remote_command_bootstrap_tool \
+		"$remote_command_bootstrap_tool"
+	json_add_string remote_command_uci_queries \
+		"$remote_command_uci_queries"
+	json_add_int remote_command_updated "${remote_command_updated:-0}"
+	json_add_string remote_wget_runtime "$remote_wget_runtime"
+	json_add_boolean remote_wget_ready \
+		"$([ "$remote_wget_ready" = true ] && echo 1 || echo 0)"
+	json_add_string app_build "V35.25-TEST"
+	json_add_string app_software_version "9.9.13.n0.c1"
+	json_add_boolean upgrade_permanently_disabled 1
+	local_enabled="$(uci -q get c2000max_app.main.local_enable)"
+	local_route_installed=0
+	if [ -f /usr/share/luci/menu.d/c2000max_app_api.json ] &&
+	   [ -f /usr/lib/lua/c2000max_app/http.lua ]; then
+		local_route_installed=1
+	fi
+	json_add_boolean local_route_installed "$local_route_installed"
+	if [ "$local_enabled" != 1 ]; then
+		json_add_boolean local_api_ready 0
+		local_probe_message="局域网 APP 管理未启用"
+	elif [ "$local_route_installed" != 1 ]; then
+		json_add_boolean local_api_ready 0
+		local_probe_message="APP 路由文件未就绪"
+	else
+		local_probe="$(/usr/bin/wget -q -O - -T 3 \
+			--post-data='{}' \
+			http://127.0.0.1/cgi-bin/luci/nradio/app/health \
+			2>/dev/null)"
+		local_probe_code="$(printf '%s' "$local_probe" |
+			jsonfilter -e '@.code')"
+		local_probe_build="$(printf '%s' "$local_probe" |
+			jsonfilter -e '@.build')"
+		if [ "$local_probe_code" != 0 ] ||
+		   [ "$local_probe_build" != V35.21 ]; then
+			local_probe="$(/usr/bin/wget -q -O - -T 3 \
+				--post-data='{}' \
+				http://127.0.0.1:82/cgi-bin/luci/nradio/app/health \
+				2>/dev/null)"
+			local_probe_code="$(printf '%s' "$local_probe" |
+				jsonfilter -e '@.code')"
+			local_probe_build="$(printf '%s' "$local_probe" |
+				jsonfilter -e '@.build')"
+		fi
+		if [ "$local_probe_code" = 0 ] &&
+		   [ "$local_probe_build" = V35.21 ]; then
+			json_add_boolean local_api_ready 1
+			local_probe_message="HTTP 回环请求通过（端口 80/82 兼容）"
+		else
+			json_add_boolean local_api_ready 0
+			local_probe_message="HTTP 回环请求失败"
+		fi
+	fi
+	json_add_string local_probe_message "$local_probe_message"
+	if pgrep -f '/usr/sbin/c2000max-app-local' >/dev/null 2>&1; then
+		json_add_boolean legacy_discovery_running 1
+	else
+		json_add_boolean legacy_discovery_running 0
+	fi
+	if [ "$local_probe_code" = 0 ] &&
+	   [ "$local_probe_build" = V35.21 ]; then
+		json_add_boolean local_running 1
+	else
+		json_add_boolean local_running 0
+	fi
+	if pgrep -f '/usr/sbin/mosquitto -c /var/run/c2000max-app/mosquitto.conf' \
+	   >/dev/null 2>&1; then
+		json_add_boolean bridge_running 1
+	else
+		json_add_boolean bridge_running 0
+	fi
+	if pgrep -f '/usr/sbin/c2000max-app-remote' >/dev/null 2>&1; then
+		json_add_boolean agent_running 1
+	else
+		json_add_boolean agent_running 0
+	fi
+	if pgrep -f '/usr/sbin/mosquitto -c /var/run/c2000max-app/mosquitto.conf' \
+	   >/dev/null 2>&1 &&
+	   pgrep -f '/usr/sbin/c2000max-app-remote' >/dev/null 2>&1; then
+		json_add_boolean remote_running 1
+	else
+		json_add_boolean remote_running 0
+	fi
+	if pgrep -f '/usr/sbin/c2000max-app-cache' >/dev/null 2>&1; then
+		json_add_boolean cache_running 1
+	else
+		json_add_boolean cache_running 0
+	fi
+	if [ -L /etc/rc.d/S96c2000max-app ]; then
+		json_add_boolean service_autostart 1
+	else
+		json_add_boolean service_autostart 0
+	fi
+	json_add_array local_features
+	for value in heartbeat signal info wifi client sim sms apn lan status \
+		speed password reboot combo sync neighbour earfcn wifiauth; do
+		json_add_string "" "$value"
+	done
+	json_close_array
+	json_add_array cloud_features
+	for value in device_report signal_report traffic_report terminal_tracking \
+		remote_web broadcast command file appstore developer; do
+		json_add_string "" "$value"
+	done
+	json_close_array
+	json_dump
+}
+
+case "$1" in
+	list)
+		cat <<'EOF'
+{
+	"status": {},
+	"restart": {},
+	"set": {
+		"local_enable": "bool",
+		"remote_enable": "bool",
+		"local_device_enable": "bool",
+		"local_signal_enable": "bool",
+		"local_client_enable": "bool",
+		"local_wifi_enable": "bool",
+		"local_traffic_enable": "bool",
+		"local_sms_enable": "bool",
+		"local_network_write_enable": "bool",
+		"local_sim_switch_enable": "bool",
+		"local_cellular_record_enable": "bool",
+		"password_enable": "bool",
+		"reboot_enable": "bool",
+		"remote_web_enable": "bool",
+		"device_report_enable": "bool",
+		"signal_report_enable": "bool",
+		"traffic_report_enable": "bool",
+		"terminal_tracking_enable": "bool",
+		"broadcast_enable": "bool",
+		"command_enable": "bool",
+		"file_enable": "bool",
+		"appstore_enable": "bool",
+		"developer_enable": "bool"
+	}
+}
+EOF
+		;;
+	call)
+		read -r input
+		case "$2" in
+			status)
+				status
+				;;
+			restart)
+				/etc/init.d/c2000max-app enable >/dev/null 2>&1 || true
+				/etc/init.d/c2000max-app restart >/dev/null 2>&1 || true
+				sleep 1
+				printf '{"success":true,"message":"APP 服务已重新启动","status":'
+				status
+				printf '}\n'
+				;;
+			set)
+				json_load "$input" || {
+					echo '{"success":false,"message":"无效的设置数据"}'
+					exit 0
+				}
+				local_requested=0
+				remote_requested=0
+				for option in $OPTIONS; do
+					json_get_var raw "$option"
+					value="$(normalize_bool "$raw")" || {
+						echo '{"success":false,"message":"APP 管理开关值无效"}'
+						exit 0
+					}
+					case "$option" in
+						local_enable) local_requested="$value" ;;
+						remote_enable) remote_requested="$value" ;;
+					esac
+					uci -q set "c2000max_app.main.$option=$value" || {
+						uci -q revert c2000max_app
+						echo '{"success":false,"message":"无法保存 APP 管理设置"}'
+						exit 0
+					}
+				done
+				if [ "$remote_requested" = 1 ]; then
+					identity="$(/usr/sbin/c2000max-app-remote identity 2>/dev/null)"
+					available="$(printf '%s' "$identity" |
+						jsonfilter -e '@.available')"
+					bdinfo_present="$(printf '%s' "$identity" |
+						jsonfilter -e '@.bdinfo_present')"
+					bdinfo_identity_valid="$(printf '%s' "$identity" |
+						jsonfilter -e '@.bdinfo_identity_valid')"
+					remote_identity_available="$(printf '%s' "$identity" |
+						jsonfilter -e '@.remote_identity_available')"
+					device_code_present="$(printf '%s' "$identity" |
+						jsonfilter -e '@.device_code_present')"
+					if [ "$available" != true ] ||
+					   [ "$bdinfo_present" != true ] ||
+					   [ "$bdinfo_identity_valid" != true ] ||
+					   [ "$remote_identity_available" != true ] ||
+					   [ "$device_code_present" != true ]; then
+						uci -q revert c2000max_app
+						echo '{"success":false,"message":"原厂 bdinfo 身份或设备码不可用，已拒绝启动远程连接"}'
+						exit 0
+					fi
+				fi
+				uci -q delete c2000max_app.main.device_id
+				uci -q delete c2000max_app.main.allow_sensitive
+				uci -q delete c2000max_app.main.upgrade_enable
+				uci -q commit c2000max_app || {
+					uci -q revert c2000max_app
+					echo '{"success":false,"message":"无法提交 APP 管理设置"}'
+					exit 0
+				}
+				# Keep the dispatcher enabled even when both switches are off.
+				# In that state start_service() launches no process, while a
+				# restored opt-in survives sysupgrade and the next reboot.
+				/etc/init.d/c2000max-app enable >/dev/null 2>&1 || true
+				/etc/init.d/c2000max-app restart >/dev/null 2>&1 || true
+				printf '{"success":true,"message":"APP 管理设置已应用","status":'
+				status
+				printf '}\n'
+				;;
+		esac
+		;;
+esac

@@ -14,14 +14,15 @@
  		wpa3_pairwise = 'GCMP-256 ' + wpa3_pairwise;
  
  	switch(config.auth_type) {
-@@ -170,12 +174,22 @@ export function wpa_key_mgmt(config) {
+@@ -170,12 +174,18 @@ export function wpa_key_mgmt(config) {
  		append_value(config, 'wpa_key_mgmt', 'SAE');
  		if (config.ieee80211r)
  			append_value(config, 'wpa_key_mgmt', 'FT-SAE');
-+		if (config.ieee80211be) {
-+			append_value(config, 'wpa_key_mgmt', 'SAE-EXT-KEY');
++		if (config.ieee80211be && config.rsn_override) {
++			config.rsn_override_key_mgmt = config.wpa_key_mgmt;
++			append_value(config, 'rsn_override_key_mgmt_2', 'SAE-EXT-KEY');
 +			if (config.ieee80211r)
-+				append_value(config, 'wpa_key_mgmt', 'FT-SAE-EXT-KEY');
++				append_value(config, 'rsn_override_key_mgmt_2', 'FT-SAE-EXT-KEY');
 +		}
  		break;
  
@@ -29,11 +30,6 @@
  		append_value(config, 'wpa_key_mgmt', 'SAE');
  		if (config.ieee80211r)
  			append_value(config, 'wpa_key_mgmt', 'FT-SAE');
-+		if (config.ieee80211be) {
-+			append_value(config, 'wpa_key_mgmt', 'SAE-EXT-KEY');
-+			if (config.ieee80211r)
-+				append_value(config, 'wpa_key_mgmt', 'FT-SAE-EXT-KEY');
-+		}
  
  		if (config.rsn_override) {
  			config.rsn_override_key_mgmt = config.wpa_key_mgmt;

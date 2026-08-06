@@ -1,0 +1,29 @@
+#!/bin/sh
+
+# Always keep the dispatcher registered with procd.  With both master
+# switches off it creates no listener, cache worker or cloud connection.
+# This matters after sysupgrade, where /etc/config/c2000max_app may be
+# restored with an existing opt-in but /etc/rc.d symlinks are regenerated.
+/etc/init.d/c2000max-app enable >/dev/null 2>&1 || true
+
+# A preserved pre-V35.13 conffile still contains the old per-feature defaults.
+# Preselect every optional interface once, without changing either master
+# switch. This keeps an explicit existing local/cloud opt-in or opt-out intact.
+if [ "$(uci -q get c2000max_app.main.permission_defaults_v3513)" != "1" ]; then
+	for option in \
+		local_device_enable local_signal_enable local_client_enable \
+		local_wifi_enable local_traffic_enable local_sms_enable \
+		local_network_write_enable local_sim_switch_enable \
+		local_cellular_record_enable password_enable reboot_enable \
+		remote_web_enable device_report_enable signal_report_enable \
+		traffic_report_enable terminal_tracking_enable broadcast_enable \
+		command_enable file_enable appstore_enable developer_enable \
+		cellular_record_enable
+	do
+		uci -q set "c2000max_app.main.${option}=1"
+	done
+	uci -q set c2000max_app.main.permission_defaults_v3513='1'
+	uci -q commit c2000max_app
+fi
+
+exit 0

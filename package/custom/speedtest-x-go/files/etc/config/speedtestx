@@ -1,0 +1,6 @@
+config speedtestx 'main'
+	option enabled '0'
+	option listen '0.0.0.0:9001'
+	option max_download_mb '50'
+	option max_clients '24'
+	option history_limit '100'

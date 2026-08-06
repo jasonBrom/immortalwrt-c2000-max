@@ -1,0 +1,15 @@
+{
+	"c2000max-app": {
+		"description": "Grant access to C2000-MAX APP management settings",
+		"read": {
+			"ubus": {
+				"c2000max_app": [ "status" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"c2000max_app": [ "set" ]
+			}
+		}
+	}
+}

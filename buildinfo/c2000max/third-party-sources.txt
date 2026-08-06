@@ -1,0 +1,30 @@
+PassWall2
+  repository: https://github.com/Openwrt-Passwall/openwrt-passwall2
+  tag: 26.7.16-1
+  commit: 083dbfb2475aae9b7df36c4a8e13e4495ae54ec0
+  imported path: package/custom/luci-app-passwall2
+
+NetBird LuCI
+  repository: https://github.com/looong-cat/luci-app-netbird
+  commit: be588c364a606c99d1911e782c1c212a559ff45f
+  imported path: package/custom/luci-app-netbird
+
+NetBird client
+  source package: ImmortalWrt packages feed, package netbird
+  feed commit: eb68b2392b7fc2b0ce6e5a53df7a8489a2839eb0
+  package version at build: 0.73.2-r2 (V35.2 local low-memory overlay)
+
+Adblock Fast
+  source package: ImmortalWrt packages feed, package adblock-fast
+  feed commit: eb68b2392b7fc2b0ce6e5a53df7a8489a2839eb0
+  package version at build: 1.2.4-r5 (V35.2 local low-memory overlay)
+
+APK v3 dump helper (vendored build-only tool)
+  imported path: tools/vendor/adumpk.py
+  license: GPL-3.0 (tools/vendor/adumpk-LICENSE)
+  use: convert verified OpenWrt APK v3 payloads into the V35.7 root tree
+
+pyfdt (vendored inspection-only helper)
+  copyright: Neil Armstrong, 2014
+  imported path: tools/vendor/pyfdt.py
+  license: Apache-2.0 (license notice embedded in source)

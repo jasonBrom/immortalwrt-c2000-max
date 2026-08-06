@@ -1,0 +1,47 @@
+#!/usr/bin/lua
+
+local fs = require "nixio.fs"
+local nixio = require "nixio"
+local json = require "luci.jsonc"
+local core = require "c2000max_app.core"
+
+local STATE_DIR = "/var/run/c2000max-app"
+local STATE_FILE = STATE_DIR .. "/cache.state"
+
+local function clock()
+	if type(nixio.gettimeofday) == "function" then
+		local ok, seconds, microseconds = pcall(nixio.gettimeofday)
+		if ok and tonumber(seconds) then
+			return tonumber(seconds) + (tonumber(microseconds) or 0) / 1000000
+		end
+	end
+	return os.time()
+end
+
+local function write_state(state, message, result, elapsed)
+	fs.mkdirr(STATE_DIR)
+	fs.chmod(STATE_DIR, "0755")
+	fs.writefile(STATE_FILE, json.stringify({
+		state = state,
+		message = message or "",
+		modems = type(result) == "table" and result.modems or 0,
+		elapsed_ms = math.floor((tonumber(elapsed) or 0) * 1000 + 0.5),
+		updated = os.time()
+	}))
+	fs.chmod(STATE_FILE, "0600")
+end
+
+while core.local_enabled() or core.remote_enabled() do
+	local started = clock()
+	local ok, result = pcall(core.prewarm)
+	local elapsed = clock() - started
+	if ok then
+		write_state("ready", "APP snapshot cache is warm", result, elapsed)
+	else
+		write_state("error", tostring(result), nil, elapsed)
+	end
+	nixio.nanosleep(2)
+end
+
+write_state("stopped", "APP management disabled", nil, 0)
+

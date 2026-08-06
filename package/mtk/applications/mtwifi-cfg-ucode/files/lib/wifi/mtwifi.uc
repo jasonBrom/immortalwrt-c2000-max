@@ -49,15 +49,18 @@ let all_devnames = l1.list();
  * change SSID/security from LuCI or UCI later.
  *
  * @param {string} band - mtwifi band name: 2g, 5g, or 6g.
- * @returns {Object} Default htmode, htbsscoex, and ssid values.
+ * @returns {Object} Default channel, htmode, htbsscoex, and ssid values.
  */
 function get_band_defaults(band) {
     if (band == "2g") {
-        return { htmode: "EHT40", htbsscoex: 1, ssid: "ImmortalWrt-2.4G" };
+        return { channel: "auto", htmode: "EHT40", htbsscoex: 1, ssid: "ImmortalWrt-2.4G" };
     } else if (band == "5g") {
-        return { htmode: "EHT160", htbsscoex: 0, ssid: "ImmortalWrt-5G" };
+        /* Fixed at the requested maximum-width profile.  In CN the 36-64
+         * 160 MHz block includes DFS spectrum, so beaconing still waits for
+         * the mandatory CAC even though ACS itself is skipped. */
+        return { channel: "36", htmode: "EHT160", htbsscoex: 0, ssid: "ImmortalWrt-5G" };
     } else {
-        return { htmode: "EHT160", htbsscoex: 0, ssid: "ImmortalWrt-6G" };
+        return { channel: "auto", htmode: "EHT160", htbsscoex: 0, ssid: "ImmortalWrt-6G" };
     }
 }
 
@@ -109,7 +112,7 @@ for (let devname in all_devnames) {
         "type": "mtwifi",
         "phy": phy,
         "band": band,
-        "channel": "auto",
+        "channel": defs.channel,
         "txpower": 100,
         "htmode": defs.htmode,
         "country": "CN",

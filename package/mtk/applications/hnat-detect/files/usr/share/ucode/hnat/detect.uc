@@ -31,49 +31,95 @@
 'use strict';
 
 import { log, merge } from 'hnat.utils.common';
+import * as fs from 'fs';
+import * as uci from 'uci';
 import * as debugfs from 'hnat.utils.debugfs';
 import * as sysnet from 'hnat.utils.sysnet';
 import * as fw4 from 'hnat.utils.fw4_parser';
 
-if (!debugfs.is_hnat_present())
-	exit(0);
+const STRICT = getenv('HNAT_DETECT_STRICT') == '1';
+
+if (!debugfs.is_hnat_present()) {
+	log.error('skip: HNAT debugfs is unavailable');
+	exit(STRICT ? 1 : 0);
+}
 
 /* ---------------- Env guard ---------------- */
 
 const ACTION    = getenv('ACTION');
 const INTERFACE = getenv('INTERFACE');
 
+const fail = (message) => {
+	log.error(message);
+
+	/*
+	 * Hotplug runs in strict mode.  Once a topology cannot be proven safe,
+	 * leave no old hook active under stale endpoints.  hnat_disable_hook()
+	 * synchronously flushes the PPE BIND table, so this is also the
+	 * fail-closed barrier for preflight errors.
+	 */
+	if (STRICT && debugfs.hook_toggle.read() == 'enabled') {
+		if (!debugfs.hook_toggle.write('0') ||
+		    debugfs.hook_toggle.read() != 'disabled')
+			log.error('failed to force HNAT hook off after detector error');
+	}
+
+	exit(STRICT ? 1 : 0);
+};
+
+const write_debugfs = (node, value, label) => {
+	if (!node.write(value))
+		fail(`write failed: ${label}`);
+};
+
 log.debug(`env: ACTION= ${ACTION || ''} INTERFACE= ${INTERFACE || ''}`);
 
-// if (ACTION != 'ifup' && ACTION != 'update' && ACTION != 'ifupdate')
-if (ACTION != 'ifup')
+if (ACTION != 'ifup' && ACTION != 'update')
 	exit(0);
 
 if (!INTERFACE || INTERFACE == 'loopback')
 	exit(0);
 
+/*
+ * Netifd hotplug events may overlap.  Hold one process-wide lock from the
+ * state snapshot through hook disable, topology commit/readback, rxppd
+ * changes and hook restore.  Acquiring it before fw4 discovery also ensures
+ * a queued event resolves the latest topology instead of applying a stale
+ * pre-lock snapshot after a newer event.
+ */
+const DETECT_LOCK = '/var/lock/hnat-detect.lock';
+let detect_lock = fs.open(DETECT_LOCK, 'w+');
+
+if (!detect_lock) {
+	log.error(`cannot open HNAT detector lock ${DETECT_LOCK}: ${fs.error()}`);
+	exit(1);
+}
+
+if (!detect_lock.lock('x')) {
+	log.error(`cannot acquire HNAT detector lock ${DETECT_LOCK}: ${fs.error()}`);
+	detect_lock.close();
+	exit(1);
+}
+
 /* ---------------- Main selection ---------------- */
 
 let state = fw4.load_state();
 if (!state || !state.zones) {
-	log.error('skip: /var/run/fw4.state missing or invalid JSON');
-	exit(0);
+	fail('skip: /var/run/fw4.state missing or invalid JSON');
 }
 
 let roots = sysnet.get_gmac_roots();
 log.debug('gmac_roots=' + sprintf('%J', roots));
 
 if (!length(roots)) {
-	log.error('skip: no GMAC roots (mediatek,eth-mac) found');
-	exit(0);
+	fail('skip: no GMAC roots (mediatek,eth-mac) found');
 }
 
 let z = fw4.zmap(state);
 
 let nat_zone = fw4.pick_nat_zone(state, INTERFACE);
 if (!nat_zone) {
-	log.warn('skip: no NAT (masq) zone found');
-	exit(0);
+	fail('skip: no NAT (masq) zone found');
 }
 
 let src_zones = fw4.forward_src_zones(nat_zone.name);
@@ -157,8 +203,7 @@ if (has_sw) {
 }
 
 if (!lan_name) {
-	log.warn('skip: cannot resolve LAN endpoint safely');
-	exit(0);
+	fail('skip: cannot resolve LAN endpoint safely');
 }
 
 /* LAN2 selection:
@@ -200,6 +245,9 @@ if (has_sw) {
 
 log.info(`chosen: ppd = ${ppd_name || '(keep)'}, wan = ${wan_name || '(keep)'}, lan = ${lan_name}, lan2 = ${lan2_name}`);
 
+if (STRICT && !ppd_name)
+	fail('skip: cannot resolve PPD endpoint safely');
+
 /* Rx PPD detect logic:
  * Rx PPD is used for Ext devices (such as USB, WWAN) HNAT
  * If NAT zone physical device is ext device, add Rx PPD to bridge device in src zone.
@@ -208,7 +256,7 @@ log.info(`chosen: ppd = ${ppd_name || '(keep)'}, wan = ${wan_name || '(keep)'}, 
 
 const RX_PPD_NAME = "rxppd";
 const is_ext = (name) => {
-    return match(name, /^(usb|wwan|eth)/); 
+    return match(name, /^(usb|wwan|eth|rmnet|mhi)/);
 };
 let ext_devs = filter(nat_zone_devs, d => is_ext(d) && !is_gmac(d));
 
@@ -231,75 +279,145 @@ for (let dev in lan_devs) {
 }
 
 if (length(ext_devs) > 0) {
-	if (br_dev) {
+	if (!br_dev) {
+		if (STRICT)
+			fail('skip: external NAT device requires a LAN bridge for rxppd');
+	}
+	else {
 		log.info(`ext devices: ${ext_devs}, enable ${RX_PPD_NAME} on ${br_dev}`);
 		/* add Rx PPD */
 		if (!sysnet.dev_exist(RX_PPD_NAME)) {
 			push(rx_ppd_cmd, `ip link add ${RX_PPD_NAME} type dummy`);
 			push(rx_ppd_cmd, `ip link set ${RX_PPD_NAME} up`);
 		}
+		/* The device may survive a network reload in DOWN state.  Restore it
+		 * only when necessary so ordinary ifup events do not toggle HNAT and
+		 * flush the PPE flow table. */
+		else if (trim(fs.readfile(`/sys/class/net/${RX_PPD_NAME}/operstate`) || '') == 'down') {
+			push(rx_ppd_cmd, `ip link set ${RX_PPD_NAME} up`);
+		}
 		/* add Rx PPD to bridge */
 		if (index(sysnet.br_members(br_dev), RX_PPD_NAME) < 0) {
 			push(rx_ppd_cmd, `ip link set ${RX_PPD_NAME} master ${br_dev}`);
 		}
-    }
+	}
 } else {
 	/* no ext devices, remove Rx PPD from bridge */
-	if (sysnet.dev_exist(RX_PPD_NAME) && index(sysnet.br_members(br_dev), RX_PPD_NAME) >= 0) {
+	if (br_dev && sysnet.dev_exist(RX_PPD_NAME) &&
+	    index(sysnet.br_members(br_dev), RX_PPD_NAME) >= 0) {
 		push(rx_ppd_cmd, `ip link set ${RX_PPD_NAME} nomaster`);
 		log.info(`No ext devices, removing ${RX_PPD_NAME}`);
 	}
 }
 
-/* Apply:
- * - WAN: only write when we resolved a GMAC/switch endpoint (never apcli0/aplicx0).
- * - LAN/LAN2: always write the safe result.
- * - Rx PPD: batch exec queued commands.
+/* Apply every endpoint as one kernel transaction.  The legacy per-endpoint
+ * debugfs nodes are read-only so an interrupted event can never expose a
+ * half-old, half-new topology.
  */
 
 const hook_toggle = () => debugfs.hook_toggle.read() == 'enabled' ? true : false;
 
-let cur_state = {
-	hook_toggle: hook_toggle(),
-	ppd: debugfs.ppd.read(),
-	wan: debugfs.wan.read(),
-	lan: debugfs.lan.read(),
-	lan2: debugfs.lan2.read(),
+const parse_topology = (value) => {
+	let m = match(value || '',
+		/^wan=([^ \n]+) lan=([^ \n]+) lan2=([^ \n]+) ppd=([^ \n]+)\n$/);
+
+	if (!m)
+		return null;
+
+	return {
+		wan: m[1],
+		lan: m[2],
+		lan2: m[3],
+		ppd: m[4],
+	};
 };
 
-let changed = (ppd_name && ppd_name != cur_state.ppd) ||
-	(wan_name && wan_name != cur_state.wan) ||
-	(lan_name && lan_name != cur_state.lan) ||
-	(lan2_name && lan2_name != cur_state.lan2) || 
+const topology_line = (topology) =>
+	`wan=${topology.wan} lan=${topology.lan} lan2=${topology.lan2} ppd=${topology.ppd}`;
+
+let active_topology_line = debugfs.topology.read();
+let active_topology = parse_topology(active_topology_line);
+
+if (!active_topology)
+	fail('HNAT atomic topology node is missing or returned invalid state');
+
+let desired_topology = {
+	/* An unresolved NAT device is an external/Wi-Fi path, not a wired WAN. */
+	wan: wan_name || '/',
+	lan: lan_name,
+	lan2: lan2_name,
+	/* Keep a valid existing PPD when generic discovery cannot improve it. */
+	ppd: ppd_name || active_topology.ppd,
+};
+let desired_topology_line = topology_line(desired_topology);
+let desired_topology_readback = desired_topology_line + '\n';
+
+let cur_state = {
+	hook_toggle: hook_toggle(),
+	topology: active_topology_line,
+};
+
+let changed = desired_topology_readback != cur_state.topology ||
 	(length(rx_ppd_cmd) > 0);
 
 /* if changed, disable hook first */
 if (changed && cur_state.hook_toggle) {
-	debugfs.hook_toggle.write("0");
+	write_debugfs(debugfs.hook_toggle, "0", "hook_toggle");
+	if (hook_toggle())
+		fail('HNAT hook remained enabled after disable request');
 }
 
-if (!ppd_name)
-	log.debug('skip PPD write: cannot safely resolve a GMAC device for Ping-Pong Device');
-else if (ppd_name != cur_state.ppd)
-	debugfs.ppd.write(ppd_name);
-
-if (!wan_name)
-	log.debug('skip WAN write: NAT endpoint not on GMAC/switch (likely Wi-Fi/apcli)');
-else if (wan_name != cur_state.wan)
-	debugfs.wan.write(wan_name);
-
-if (lan_name != cur_state.lan)
-	debugfs.lan.write(lan_name);
-
-if (lan2_name != cur_state.lan2)
-	debugfs.lan2.write(lan2_name);
+if (desired_topology_readback != cur_state.topology) {
+	write_debugfs(debugfs.topology, desired_topology_line, "hnat_topology");
+	if (debugfs.topology.read() != desired_topology_readback)
+		fail('HNAT topology readback did not match the atomic request');
+}
 
 for (let cmd in rx_ppd_cmd) {
-	system(cmd);
+	if (system(cmd) != 0)
+		fail(`command failed: ${cmd}`);
 }
 
 if (cur_state.hook_toggle && !hook_toggle()) {
-	debugfs.hook_toggle.write("1");
+	let board = trim(fs.readfile('/tmp/sysinfo/board_name') || '');
+	let restore = true;
+
+	if (board == 'nradio,c2000-max') {
+		let cursor = uci.cursor();
+		let network = cursor.get_all('network') || {};
+		let lan_bridge = null;
+
+		for (let name, section in network) {
+			if (section['.type'] == 'device' &&
+			    section.type == 'bridge' && section.name == 'br-lan') {
+				lan_bridge = section;
+				break;
+			}
+		}
+		cursor.load('turboacc');
+		let ports = lan_bridge?.ports;
+		let eth1_in_lan =
+			(type(ports) == 'array' && index(ports, 'eth1') >= 0) ||
+			(type(ports) == 'string' &&
+			 index(split(trim(ports), /\s+/), 'eth1') >= 0);
+		restore =
+			eth1_in_lan &&
+			!network.c2000_wan && !network.c2000_wan6 &&
+			!fs.access('/var/run/c2000max-port-role.switching') &&
+			!fs.access('/var/run/c2000max-port-role.degraded') &&
+			cursor.get('turboacc', 'config', 'fastpath') == 'mediatek_hnat';
+	}
+
+	if (restore) {
+		write_debugfs(debugfs.hook_toggle, "1", "hook_toggle");
+		if (!hook_toggle())
+			fail('HNAT hook remained disabled after restore request');
+	}
+	else {
+		log.info('skip hook restore: TurboACC no longer selects MediaTek HNAT');
+		if (board == 'nradio,c2000-max')
+			fail('C2000-MAX topology changed while detecting HNAT endpoints');
+	}
 }
 
 exit(0);

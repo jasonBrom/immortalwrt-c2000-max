@@ -23,7 +23,7 @@ define Package/iwinfo-ucode
   SECTION:=utils
   CATEGORY:=Utilities
   TITLE:=Wireless Information utility rewritten in ucode
-  DEPENDS:=+ucode-mod-iwinfo @!PACKAGE_iwinfo
+  DEPENDS:=+ucode-mod-iwinfo
 endef
 
 define Build/Compile

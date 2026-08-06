@@ -2045,6 +2045,16 @@ return view.extend({
 					encr.value(crypto_modes[i][0], '%s (%s)'.format(crypto_modes[i][1], security_level));
 				}
 
+				if (hwtype == 'mtwifi') {
+					o = ss.taboption('encryption', form.Flag, 'rsn_override', _('Wi-Fi 7 RSN Override'),
+						_('Advertise the separate RSN profiles required by Wi-Fi 7 clients. Disable only as a compatibility workaround for a client that cannot complete WPA3/OWE association.'));
+					o.depends({ mode: 'ap', encryption: 'sae' });
+					o.depends({ mode: 'ap', encryption: 'sae-mixed' });
+					o.depends({ mode: 'ap', encryption: 'owe' });
+					o.default = o.enabled;
+					o.rmempty = false;
+				}
+
 
 				o = ss.taboption('encryption', form.Value, 'auth_server', _('Radius-Authentication-Server'));
 				add_dependency_permutations(o, { mode: ['ap', 'ap-wds'], encryption: ['wpa', 'wpa2', 'wpa3', 'wpa3-mixed'] });
@@ -3579,7 +3589,12 @@ return view.extend({
 
 			cbi_update_table(table, [], E('em', { 'class': 'spinning' }, _('Collecting data...')))
 
-			return E([ nodes, E('h3', _('Associated Stations')), table ]);
+			var dfsNotice = E('div', { 'class': 'alert-message warning' }, [
+				E('strong', {}, '5 GHz 160 MHz 提醒：'),
+				'在中国区使用 5 GHz 160 MHz 时无法避开 DFS 信道；开机或重新加载无线后必须先完成雷达检测（CAC），需等待较长时间才能搜索到 SSID。'
+			]);
+
+			return E([ dfsNotice, nodes, E('h3', _('Associated Stations')), table ]);
 		}, this, m));
 	},
 

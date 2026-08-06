@@ -1,0 +1,49 @@
+name: Extract i18n Strings
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'application/qmodem/files/usr/share/qmodem/**'
+      - 'luci/luci-app-qmodem-next/htdocs/luci-static/resources/**'
+  pull_request:
+    paths:
+      - 'application/qmodem/files/usr/share/qmodem/**'
+      - 'luci/luci-app-qmodem-next/htdocs/luci-static/resources/**'
+
+jobs:
+  extract-i18n:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+          
+      - name: Extract i18n strings
+        run: |
+          python3 scripts/extract_i18n_strings.py \
+            --sh-path application/qmodem/files/usr/share/qmodem \
+            --js-path luci/luci-app-qmodem-next/htdocs/luci-static/resources \
+            --format po \
+            --output luci/luci-app-qmodem-next/po/template/qmodem-next.po
+            
+      - name: Check for changes
+        id: git-check
+        run: |
+          git diff --exit-code luci/luci-app-qmodem-next/po/template/qmodem-next.po || echo "changed=true" >> $GITHUB_OUTPUT
+          
+      - name: Commit and push if changed
+        if: steps.git-check.outputs.changed == 'true' && github.event_name == 'push'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add luci/luci-app-qmodem-next/po/template
+          git commit -m "chore: update i18n template strings [skip ci]"
+          git push

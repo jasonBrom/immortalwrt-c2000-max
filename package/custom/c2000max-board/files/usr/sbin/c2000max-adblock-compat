@@ -1,0 +1,118 @@
+#!/bin/sh
+
+# C2000-MAX compatibility policy for AdBlock Fast.
+#
+# This file is owned by c2000max-board instead of adblock-fast, so updating the
+# plugin cannot silently remove the low-memory defaults or the usable seed
+# source.  Existing user-selected block sources always win.
+
+PACKAGE=adblock-fast
+DEFAULT_SECTION=c2000max_light
+DEFAULT_NAME='HaGeZi - Light (C2000-MAX)'
+DEFAULT_URL='https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard/light-onlydomains.txt'
+FUNCTIONS_SH="${C2000MAX_FUNCTIONS_SH:-/lib/functions.sh}"
+MEMINFO="${C2000MAX_MEMINFO:-/proc/meminfo}"
+
+. "$FUNCTIONS_SH"
+
+_enabled_block_source=0
+_changed=0
+
+_check_source()
+{
+	local section="$1"
+	local enabled action url
+
+	config_get enabled "$section" enabled 0
+	config_get action "$section" action block
+	config_get url "$section" url
+
+	[ "$enabled" = 1 ] || return 0
+	[ "$action" = block ] || return 0
+	[ -n "$url" ] || return 0
+	_enabled_block_source=1
+}
+
+has_block_input()
+{
+	local local_domains
+
+	_enabled_block_source=0
+	config_load "$PACKAGE"
+	config_foreach _check_source file_url
+	[ "$_enabled_block_source" = 1 ] && return 0
+
+	# A local blocked_domain list is also a valid input.  Do not add a remote
+	# source when the user deliberately maintains local entries.
+	local_domains="$(uci -q get "$PACKAGE.config.blocked_domain" 2>/dev/null)"
+	[ -n "$local_domains" ]
+}
+
+clamp_parallel_downloads()
+{
+	local current total_kb
+
+	total_kb="$(awk '/^MemTotal:/ { print $2; exit }' "$MEMINFO" 2>/dev/null)"
+	case "$total_kb" in
+		''|*[!0-9]*) return 0 ;;
+	esac
+	[ "$total_kb" -le 786432 ] || return 0
+
+	current="$(uci -q get "$PACKAGE.config.parallel_downloads" 2>/dev/null)"
+	case "$current" in
+		1|2) return 0 ;;
+	esac
+
+	uci -q set "$PACKAGE.config.parallel_downloads=2"
+	uci -q commit "$PACKAGE"
+	_changed=1
+	logger -t c2000max-adblock "parallel downloads clamped to 2 for 512 MiB RAM"
+}
+
+seed_default_source()
+{
+	[ -n "$(uci -q get "$PACKAGE.config" 2>/dev/null)" ] || return 0
+
+	clamp_parallel_downloads
+	has_block_input && return 0
+
+	uci -q set "$PACKAGE.$DEFAULT_SECTION=file_url"
+	uci -q set "$PACKAGE.$DEFAULT_SECTION.name=$DEFAULT_NAME"
+	uci -q set "$PACKAGE.$DEFAULT_SECTION.url=$DEFAULT_URL"
+	uci -q set "$PACKAGE.$DEFAULT_SECTION.action=block"
+	uci -q set "$PACKAGE.$DEFAULT_SECTION.enabled=1"
+	uci -q commit "$PACKAGE"
+	_changed=1
+	logger -t c2000max-adblock "enabled lightweight default block source because no usable block input existed"
+}
+
+case "$1" in
+	seed)
+		seed_default_source
+		;;
+	ensure-if-enabled)
+		[ "$(uci -q get "$PACKAGE.config.enabled" 2>/dev/null)" = 1 ] ||
+			exit 0
+		seed_default_source
+		if [ "$_changed" = 1 ] && [ -x /etc/init.d/adblock-fast ]; then
+			# An updated plugin may attempt one start before the five-second
+			# board worker sees its reset config.  Repair and retry once so the
+			# user does not need to toggle the service manually.
+			/usr/bin/timeout -k 1s 5s \
+				/etc/init.d/adblock-fast restart >/dev/null 2>&1 || true
+		fi
+		;;
+	check)
+		if has_block_input; then
+			echo '{"success":true,"has_block_input":true}'
+		else
+			echo '{"success":true,"has_block_input":false}'
+		fi
+		;;
+	*)
+		echo "usage: $0 {seed|ensure-if-enabled|check}" >&2
+		exit 2
+		;;
+esac
+
+exit 0

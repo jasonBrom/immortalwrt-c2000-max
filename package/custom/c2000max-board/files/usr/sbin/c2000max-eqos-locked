@@ -1,0 +1,26 @@
+#!/bin/sh
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+
+[ "$(board_name)" = "nradio,c2000-max" ] || exit 1
+[ "${C2000MAX_PORT_SWITCH:-0}" = "1" ] || exit 1
+[ "${C2000MAX_ACCEL_LOCKS_HELD:-0}" = "1" ] || exit 1
+[ -r /etc/init.d/eqos ] || exit 1
+
+# Source only the worker functions.  Invoking the rc.common entry point here
+# would acquire EQoS' procd lock after ROLE/HNAT and invert the normal
+# procd-EQoS -> ROLE -> HNAT order.
+. /etc/init.d/eqos
+
+case "$1" in
+	start)
+		eqos_start_service_locked
+		;;
+	stop)
+		eqos_stop_service_locked
+		;;
+	*)
+		exit 1
+		;;
+esac

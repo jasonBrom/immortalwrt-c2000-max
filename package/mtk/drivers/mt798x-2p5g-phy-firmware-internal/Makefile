@@ -4,6 +4,8 @@ include $(INCLUDE_DIR)/kernel.mk
 PKG_NAME:=mt798x-2p5g-phy-firmware-internal
 PKG_VERSION:=1
 PKG_RELEASE:=1
+PKG_LICENSE:=MediaTek-Firmware
+PKG_LICENSE_FILES:=files/LICENCE.mediatek
 
 include $(INCLUDE_DIR)/package.mk
 

@@ -1,0 +1,40 @@
+#!/usr/bin/lua
+
+local nixio = require "nixio"
+local uci = require("luci.model.uci").cursor()
+local core = require "c2000max_app.core"
+local cloud = require "c2000max_app.cloud"
+
+if not core.remote_enabled() then
+	os.exit(0)
+end
+
+local presence_interval = tonumber(uci:get("c2000max_app", "main",
+	"presence_interval") or "2") or 2
+if presence_interval < 2 then
+	presence_interval = 2
+elseif presence_interval > 60 then
+	presence_interval = 60
+end
+
+local status_interval = tonumber(uci:get("c2000max_app", "main",
+	"status_interval") or "30") or 30
+if status_interval < 10 then
+	status_interval = 10
+elseif status_interval > 300 then
+	status_interval = 300
+end
+
+nixio.nanosleep(10)
+local next_status = 0
+while core.remote_enabled() do
+	local now = os.time()
+	if now >= next_status then
+		cloud.publish_online_status()
+		next_status = now + status_interval
+	end
+	-- Factory report_proactively emits cpestatus about every two seconds.
+	-- Keep this behind the user's signal-report permission.
+	cloud.publish_cpe_status()
+	nixio.nanosleep(presence_interval)
+end

@@ -1,0 +1,65 @@
+#!/bin/sh
+
+ACTION="$1"
+
+status_snapshot() {
+	local enabled listen port port_hex pid listening=0 running=0
+
+	enabled="$(uci -q get cnspeedtest.main.enabled)"
+	[ "$enabled" = 1 ] || enabled=0
+	listen="$(uci -q get cnspeedtest.main.listen)"
+	[ -n "$listen" ] || listen='0.0.0.0:8787'
+	port="${listen##*:}"
+	port="${port%]}"
+	pid="$(pidof cnspeedtest 2>/dev/null | awk '{ print $1 }')"
+
+	case "$port" in
+		''|*[!0-9]*) ;;
+		*)
+			port_hex="$(printf '%04X' "$port" 2>/dev/null)"
+			if [ -n "$pid" ] && [ -d "/proc/$pid" ] &&
+			   awk -v p="$port_hex" '
+				FNR > 1 && $4 == "0A" {
+					split($2, address, ":")
+					if (toupper(address[2]) == p)
+						found = 1
+				}
+				END { exit(found ? 0 : 1) }
+			   ' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+				listening=1
+			fi
+			;;
+	esac
+
+	[ -n "$pid" ] && [ -d "/proc/$pid" ] && [ "$listening" = 1 ] && running=1
+	printf 'running=%s\nenabled=%s\npid=%s\nlisten=%s\nlistening=%s\n' \
+		"$running" "$enabled" "$pid" "$listen" "$listening"
+}
+
+case "$ACTION" in
+	start)
+		uci -q set cnspeedtest.main.enabled='1'
+		uci -q commit cnspeedtest
+		/etc/init.d/cnspeedtest enable >/dev/null 2>&1 || true
+		exec /etc/init.d/cnspeedtest start
+		;;
+	stop)
+		uci -q set cnspeedtest.main.enabled='0'
+		uci -q commit cnspeedtest
+		/etc/init.d/cnspeedtest stop >/dev/null 2>&1 || true
+		exec /etc/init.d/cnspeedtest disable
+		;;
+	restart)
+		uci -q set cnspeedtest.main.enabled='1'
+		uci -q commit cnspeedtest
+		/etc/init.d/cnspeedtest enable >/dev/null 2>&1 || true
+		exec /etc/init.d/cnspeedtest restart
+		;;
+	status)
+		status_snapshot
+		;;
+	*)
+		echo "usage: $0 {start|stop|restart|status}" >&2
+		exit 2
+		;;
+esac

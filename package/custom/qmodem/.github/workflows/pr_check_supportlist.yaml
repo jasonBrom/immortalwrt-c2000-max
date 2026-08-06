@@ -1,0 +1,77 @@
+name: "PR Update Support List"
+on:
+    pull_request:
+        # only run when "luci/luci-app-qmodem/root/usr/share/qmodem/modem_support.json" is changed
+        paths:
+            - 'application/qmodem/files/usr/share/qmodem/modem_support.json'
+
+env:
+    TZ: Asia/Shanghai
+
+jobs:
+    update_support_list:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout PR Branch
+              uses: actions/checkout@v2
+              with:
+                path: 'pr_branch'
+
+            - name: Checkout Base Branch
+              uses: actions/checkout@v2
+              with:
+                repository: ${{ github.repository }}
+                ref: ${{ github.event.pull_request.base.ref }}
+                path: 'base_branch'
+
+            - name: Update Support List and Check
+              id: update_modem_support_list
+              env:
+                GH_TOKEN: ${{ github.token }}
+              run: |
+                cd pr_branch
+                is_json_invalid=0
+                python3 ./scripts/update_support_list.py temp_support_list ./application/qmodem/files/usr/share/qmodem/modem_support.json || is_json_invalid=1
+                
+                if [ "$is_json_invalid" = "1" ]; then
+                    echo "pr_close=1" >> $GITHUB_OUTPUT
+                    echo "The JSON file is invalid, please check" >> pr_comment.txt
+                    exit 0
+                fi
+                
+                # Compare with base branch support_list.md
+                is_diff=0
+                if ! diff ./temp_support_list.md ../base_branch/docs/support_list.md > /dev/null 2>&1; then
+                    is_diff=1
+                fi
+                
+                # Generate pr_comment.txt for comment
+                echo '```' > ./pr_comment.txt
+                diff -u ./temp_support_list.md ../base_branch/docs/support_list.md >> ./pr_comment.txt || true
+                echo '```' >> ./pr_comment.txt
+                if [ "$is_diff" = "1" ]; then 
+                    echo "The support list has been updated, please check the changes" >> ./pr_comment.txt
+                    echo "pr_close=0" >> $GITHUB_OUTPUT
+                    echo "has_diff=1" >> $GITHUB_OUTPUT
+                else
+                    echo "No changes in the support list" >> ./pr_comment.txt
+                    echo "pr_close=0" >> $GITHUB_OUTPUT
+                    echo "has_diff=0" >> $GITHUB_OUTPUT
+                fi
+
+            - name: Close PR if JSON Invalid
+              if: steps.update_modem_support_list.outputs.pr_close == '1'
+              env:
+                GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                cd base_branch
+                gh pr comment ${{ github.event.pull_request.number }} -F ../pr_branch/pr_comment.txt
+                gh pr close ${{ github.event.pull_request.number }}
+
+            - name: Comment on PR if JSON Valid
+              if: steps.update_modem_support_list.outputs.pr_close == '0'
+              env:
+                GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                cd base_branch
+                gh pr comment ${{ github.event.pull_request.number }} -F ../pr_branch/pr_comment.txt

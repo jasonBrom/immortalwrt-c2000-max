@@ -2830,6 +2830,49 @@ define Device/nradio_c8-668gl
 endef
 TARGET_DEVICES += nradio_c8-668gl
 
+define Device/nradio_c2000-max
+  DEVICE_VENDOR := NRadio
+  DEVICE_MODEL := C2000-MAX
+  DEVICE_DTS := mt7987a-nradio-c2000-max
+  DEVICE_DTS_DIR := ../dts
+  DEVICE_PACKAGES := kmod-mt798x-2p5g-phy \
+	kmod-warp kmod-mt_wifi7 kmod-mt_wifi_osal kmod-mt_hwifi \
+	kmod-mtk_pci kmod-mtk_wed kmod-connac_if kmod-mt7993 \
+	wifi-profile mwctl datconf ucode-mod-datconf ucode-mod-l1parser \
+	mtwifi-cfg-ucode luci-app-mtwifi-cfg luci-i18n-mtwifi-cfg-zh-cn \
+	-wpad-basic-mbedtls \
+	wpad-openssl hostapd-utils wpa-cli \
+	kmod-hwmon-pwmfan kmod-mediatek_hnat kmod-nft-fullcone kmod-dummy \
+	mtkhnat_util hnat-detect luci-app-turboacc-mtk \
+	luci-i18n-turboacc-mtk-zh-cn \
+	kmod-usb3 kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm \
+	kmod-usb-net-huawei-cdc-ncm kmod-usb-net-qmi-wwan \
+	kmod-usb-net-cdc-mbim kmod-usb-net-rndis \
+	kmod-usb-serial-option uqmi umbim usbutils \
+	f2fsck mkf2fs c2000max-board luci-ssl luci-i18n-base-zh-cn \
+	mt5700-web-go luci-app-mt5700-web \
+	luci-app-eqos-mtk luci-i18n-eqos-mtk-zh-cn \
+	cpufreq luci-app-cpufreq luci-i18n-cpufreq-zh-cn \
+	luci-app-qmodem-next luci-i18n-qmodem-next-zh-cn \
+	luci-app-openclash luci-theme-argon luci-app-argon-config \
+	luci-i18n-argon-config-zh-cn \
+	luci-app-filemanager luci-i18n-filemanager-zh-cn \
+	luci-app-ttyd luci-i18n-ttyd-zh-cn \
+	luci-app-statistics luci-i18n-statistics-zh-cn \
+	collectd-mod-thermal collectd-mod-uptime \
+	luci-app-sqm luci-i18n-sqm-zh-cn sqm-scripts \
+	luci-app-mwan3 luci-i18n-mwan3-zh-cn mwan3 \
+	cnspeedtest luci-app-cnspeedtest \
+	speedtest-x-go luci-app-speedtest-x \
+	luci-app-uugamebooster
+  KERNEL := kernel-bin | lzma | \
+	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb
+  KERNEL_LOADADDR := 0x40000000
+  IMAGE_SIZE := 524288k
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata | check-size
+endef
+TARGET_DEVICES += nradio_c2000-max
+
 define Device/openembed_som7981
   DEVICE_VENDOR := OpenEmbed
   DEVICE_MODEL := SOM7981

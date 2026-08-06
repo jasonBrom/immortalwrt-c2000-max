@@ -9,7 +9,7 @@
  	char *p, *tmp;
  
  	if (count >= IFNAMSIZ)
-@@ -2576,32 +2576,44 @@ static ssize_t hnat_ppd_if_write(struct
+@@ -2576,32 +2576,46 @@ static ssize_t hnat_ppd_if_write(struct
  
  	tmp = buf;
  	p = strsep(&tmp, "\n\r ");
@@ -68,6 +68,8 @@
 +	seq_printf(m, "%s\n", hnat_priv->ppd);
 +	seq_printf(m, "g_ppdev=%s\n",
 +		   hnat_priv->g_ppdev ? hnat_priv->g_ppdev->name : "NULL");
++	seq_printf(m, "g_rx_ppdev=%s\n",
++		   g_rx_ppdev ? g_rx_ppdev->name : "NULL");
  
  	return 0;
  }

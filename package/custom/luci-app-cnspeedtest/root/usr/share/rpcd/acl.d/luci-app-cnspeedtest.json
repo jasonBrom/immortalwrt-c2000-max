@@ -1,0 +1,22 @@
+{
+	"luci-app-cnspeedtest": {
+		"description": "Grant access to CNSpeedTest service management",
+		"read": {
+			"uci": [ "cnspeedtest" ],
+			"file": {
+				"/var/log/cnspeedtest.log": [ "read" ],
+				"/etc/cnspeedtest/identity.conf": [ "read" ]
+			}
+		},
+		"write": {
+			"uci": [ "cnspeedtest" ],
+			"file": {
+				"/etc/init.d/cnspeedtest": [ "exec" ],
+				"/usr/libexec/cnspeedtest/identity": [ "exec" ],
+				"/usr/libexec/cnspeedtest/service-control": [ "exec" ],
+				"/usr/bin/tail": [ "exec" ],
+				"/bin/true": [ "exec" ]
+			}
+		}
+	}
+}

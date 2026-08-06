@@ -1,0 +1,14 @@
+#!/bin/sh /etc/rc.common
+
+START=18
+STOP=11
+
+start()
+{
+	[ "$(board_name)" = "nradio,c2000-max" ] || return 0
+	# Compatibility no-op for upgrades from V23.  The old S18 guard stopped
+	# QModem, mwan3 and HNAT merely because a persistent journal existed,
+	# creating a self-lock before USB modem enumeration.  S98 now performs
+	# deterministic, non-quarantining convergence from the actual topology.
+	return 0
+}

@@ -175,6 +175,7 @@ platform_do_upgrade() {
 	glinet,gl-xe3000|\
 	huasifei,wh3000-emmc|\
 	huasifei,wh3000-pro-emmc|\
+	nradio,c2000-max|\
 	sl,3000-emmc|\
 	smartrg,sdg-8612|\
 	smartrg,sdg-8614|\
@@ -380,6 +381,7 @@ platform_check_image() {
 		;;
 	creatlentem,clt-r30b1|\
 	creatlentem,clt-r30b1-112m|\
+	nradio,c2000-max|\
 	nradio,c8-668gl|\
 	zhao,7981r128)
 		# tar magic `ustar`
@@ -417,6 +419,7 @@ platform_copy_config() {
 	huasifei,wh3000-emmc|\
 	huasifei,wh3000-pro-emmc|\
 	jdcloud,re-cp-03|\
+	nradio,c2000-max|\
 	sl,3000-emmc|\
 	nradio,c8-668gl|\
 	smartrg,sdg-8612|\

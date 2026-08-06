@@ -1,0 +1,17 @@
+#!/bin/sh
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+
+HNAT_INIT="${C2000_HNAT_INIT:-/etc/init.d/c2000max-hnat}"
+
+[ "$(board_name)" = "nradio,c2000-max" ] || exit 1
+[ "${C2000MAX_PORT_SWITCH:-0}" = "1" ] || exit 1
+[ "${C2000MAX_ACCEL_LOCKS_HELD:-0}" = "1" ] || exit 1
+[ -r "$HNAT_INIT" ] || exit 1
+
+# The caller already owns ROLE -> HNAT.  Source the controller worker directly
+# so this convergence never waits on procd_c2000max-hnat after taking ROLE.
+. "$HNAT_INIT"
+command -v apply_mode_locked >/dev/null 2>&1 || exit 1
+apply_mode_locked

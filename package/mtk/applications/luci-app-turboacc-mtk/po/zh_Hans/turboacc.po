@@ -35,6 +35,17 @@ msgstr "禁用"
 msgid "Disabled"
 msgstr "已禁用"
 
+msgid "Disable all fast-path acceleration."
+msgstr "关闭全部快速转发与硬件加速。"
+
+msgid ""
+"C2000-MAX uses MediaTek HNAT only in LAN mode. WAN and WAN+5G keep HNAT and "
+"hardware flow offloading disabled, but may use software flow offloading. "
+"Port switching preserves your saved selection."
+msgstr ""
+"C2000-MAX 仅在 LAN 模式使用 MediaTek HNAT。WAN 与 WAN＋5G 模式会关闭 "
+"HNAT 和硬件流量分载，但可以使用软件流量分载；切换网口时会保留你的选择。"
+
 #: applications/luci-app-turboacc/htdocs/luci-static/resources/view/turboacc.js:159
 msgid "Enable IPv6 Acceleration."
 msgstr "启用 IPv6 加速。"

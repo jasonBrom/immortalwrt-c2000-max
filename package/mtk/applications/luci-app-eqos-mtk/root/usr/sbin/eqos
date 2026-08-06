@@ -1,9 +1,13 @@
 #!/bin/sh
 
+. /lib/functions.sh
+. /lib/functions/system.sh
+
 DEV_DEFAULT="br-lan"
 IFB_DEV="ifb-eqos"
 HNAT_DIR="/sys/kernel/debug/hnat"
 NFT="/usr/sbin/nft"
+HNAT_LOCKED_HELPER="${C2000_HNAT_LOCKED_HELPER:-/usr/sbin/c2000max-hnat-locked}"
 
 TABLE_FAMILY="inet"
 TABLE_NAME="eqos"
@@ -29,6 +33,12 @@ DEFAULT_QUEUE_CFG="0 0 0 0 0 0 4"
 die() {
 	echo "eqos: $*" >&2
 	exit 1
+}
+
+require_c2000_accel_locks() {
+	[ "$(board_name)" != "nradio,c2000-max" ] ||
+		[ "${C2000MAX_ACCEL_LOCKS_HELD:-0}" = "1" ] ||
+		die "C2000-MAX EQoS must be changed through /etc/init.d/eqos"
 }
 
 is_uinteger() {
@@ -207,6 +217,42 @@ stop_hnat_qos() {
 
 enable_hnat() {
 	local fastpath bind_rate hook_state
+
+	# C2000-MAX has a board-specific state machine that first turns software
+	# flow offloading off, then configures interfaces and enables HNAT.  Keep
+	# EQoS on that path instead of briefly running both acceleration engines.
+	if [ "$(board_name)" = "nradio,c2000-max" ] &&
+	   [ -x /etc/init.d/c2000max-hnat ]; then
+		local role_lib=/usr/lib/c2000max/port-role.sh
+
+		[ -r "$role_lib" ] ||
+			die "C2000-MAX port role helper is unavailable"
+		. "$role_lib"
+		if [ "${C2000MAX_PORT_SWITCH:-0}" != "1" ]; then
+			[ ! -e "$C2000_SWITCHING" ] ||
+				die "port role switch is in progress"
+			[ ! -e "$C2000_DEGRADED" ] ||
+				die "port role state is degraded"
+		fi
+		[ "$(c2000_actual_role)" = "lan" ] ||
+			die "EQoS is paused unless eth1 is actually configured as LAN"
+		[ -x "$HNAT_LOCKED_HELPER" ] ||
+			die "C2000-MAX locked HNAT worker is unavailable"
+		[ "$(uci -q get turboacc.config.fastpath)" = mediatek_hnat ] ||
+			die "EQoS is paused while fast-path acceleration is disabled"
+		if ! uci -q set "turboacc.config.fastpath_mh_bind_rate=$HNAT_BIND_THRESHOLD" ||
+		   ! uci -q commit turboacc ||
+		   ! C2000MAX_ACCEL_LOCKS_HELD="${C2000MAX_ACCEL_LOCKS_HELD:-0}" \
+		     C2000MAX_PORT_SWITCH=1 "$HNAT_LOCKED_HELPER"; then
+			die "failed to enable HNAT through the C2000-MAX acceleration controller"
+		fi
+
+		[ "$(c2000_actual_role)" = "lan" ] ||
+			die "C2000-MAX port left LAN topology while enabling HNAT"
+		[ "$(cat "$HNAT_DIR/hook_toggle")" = "enabled" ] ||
+			die "C2000-MAX acceleration controller did not enable HNAT"
+		return 0
+	fi
 
 	need_hnat
 	hook_state="$(cat "$HNAT_DIR/hook_toggle")"
@@ -563,18 +609,22 @@ EOF
 
 case "$1" in
 	start)
+		require_c2000_accel_locks
 		shift
 		start_all "$@"
 		;;
 	stop)
+		require_c2000_accel_locks
 		shift
 		stop_all "$@"
 		;;
 	add)
+		require_c2000_accel_locks
 		shift
 		add_inferred_rule "$@"
 		;;
 	enable)
+		require_c2000_accel_locks
 		shift
 		enable_hnat "$@"
 		;;

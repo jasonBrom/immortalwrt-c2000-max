@@ -1,0 +1,44 @@
+#!/bin/sh
+
+STATE_DIR=/var/run/c2000max-app
+STATE_FILE="$STATE_DIR/wifi.state"
+LOG_FILE="$STATE_DIR/wifi-reload.log"
+LOCK_FILE=/var/lock/c2000max-app-wifi.lock
+
+mkdir -p "$STATE_DIR" /var/lock
+chmod 0755 "$STATE_DIR"
+exec 9>"$LOCK_FILE"
+/usr/bin/flock -n 9 || exit 0
+
+write_state()
+{
+	state="$1"
+	message="$2"
+	temporary="$STATE_FILE.tmp.$$"
+	printf '{"state":"%s","message":"%s","updated":%s}\n' \
+		"$state" "$message" "$(date +%s)" > "$temporary"
+	chmod 0600 "$temporary"
+	mv -f "$temporary" "$STATE_FILE"
+}
+
+sleep 2
+: > "$LOG_FILE"
+chmod 0600 "$LOG_FILE"
+
+if /sbin/wifi reload >>"$LOG_FILE" 2>&1; then
+	write_state applied "wireless configuration reloaded"
+	logger -t c2000max-app "APP Wi-Fi configuration applied"
+	exit 0
+fi
+
+if /sbin/wifi down >>"$LOG_FILE" 2>&1 &&
+   /sbin/wifi up >>"$LOG_FILE" 2>&1; then
+	write_state applied "wireless configuration restarted"
+	logger -t c2000max-app "APP Wi-Fi configuration applied after restart"
+	exit 0
+fi
+
+write_state reload_error "wireless reload failed"
+logger -t c2000max-app -p daemon.err "APP Wi-Fi configuration reload failed"
+exit 1
+

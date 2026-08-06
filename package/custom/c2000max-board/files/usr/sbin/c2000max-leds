@@ -1,0 +1,141 @@
+#!/bin/sh
+
+LED_BLUE="blue:sig1"
+LED_GREEN="blue:sig2"
+LED_RED="blue:sig3"
+
+led_dir() {
+	local name="$1" path
+	[ -d "/sys/class/leds/$name" ] && {
+		echo "/sys/class/leds/$name"
+		return
+	}
+	for path in /sys/class/leds/*:"${name#*:}"; do
+		[ -d "$path" ] && {
+			echo "$path"
+			return
+		}
+	done
+}
+
+set_led() {
+	local dir
+	dir="$(led_dir "$1")"
+	[ -n "$dir" ] || return 0
+	echo none > "$dir/trigger" 2>/dev/null
+	echo "$2" > "$dir/brightness" 2>/dev/null
+}
+
+blink_led() {
+	local dir="$1" delay="${2:-500}"
+	dir="$(led_dir "$dir")"
+	[ -n "$dir" ] || return 0
+	echo timer > "$dir/trigger" 2>/dev/null
+	echo "$delay" > "$dir/delay_on" 2>/dev/null
+	echo "$delay" > "$dir/delay_off" 2>/dev/null
+}
+
+set_rgb() {
+	set_led "$LED_BLUE" "$1"
+	set_led "$LED_GREEN" "$2"
+	set_led "$LED_RED" "$3"
+}
+
+first_qmodem_section() {
+	uci -q show qmodem 2>/dev/null |
+		sed -n 's/^qmodem\.\([^.]*\)\.at_port=.*/\1/p' |
+		sed -n '1p'
+}
+
+get_at_port() {
+	local section="$1" port
+	port="$(uci -q get "qmodem.$section.override_at_port")"
+	[ -n "$port" ] || port="$(uci -q get "qmodem.$section.at_port")"
+	echo "$port"
+}
+
+get_rsrp() {
+	local section="$1" value
+	value="$(/usr/share/qmodem/modem_ctrl.sh cell_info "$section" 2>/dev/null |
+		jq -r '.modem_info[]? | select((.key // "" | ascii_downcase) == "rsrp") | .value' 2>/dev/null |
+		sed -n '1p')"
+	printf '%s\n' "$value" | grep -Eo -- '-[0-9]+' | sed -n '1p'
+}
+
+data_online() {
+	local section="$1" interface="$2" status up
+	[ -n "$interface" ] || interface="$section"
+	status="$(ubus call "network.interface.$interface" status 2>/dev/null)"
+	[ -n "$status" ] || return 1
+	up="$(printf '%s' "$status" | jsonfilter -e '@.up' 2>/dev/null)"
+	[ "$up" = true ] || return 1
+	# An administratively-up interface without an address or a default route
+	# is still dialing and must not be shown as an attached 5G connection.
+	printf '%s' "$status" | jsonfilter \
+		-e '@["ipv4-address"][0].address' \
+		-e '@["ipv6-address"][0].address' \
+		-e '@.route[0].target' 2>/dev/null | grep -q .
+}
+
+cleanup() {
+	set_rgb 0 0 0
+}
+
+trap cleanup EXIT INT TERM
+
+interval="$(uci -q get c2000max.led.interval)"
+weak="$(uci -q get c2000max.led.weak_rsrp)"
+good="$(uci -q get c2000max.led.good_rsrp)"
+case "$interval" in ''|*[!0-9]*) interval=15 ;; esac
+[ "$interval" -ge 10 ] 2>/dev/null || interval=10
+case "$weak" in -[0-9]*) ;; *) weak=-90 ;; esac
+case "$good" in -[0-9]*) ;; *) good=-80 ;; esac
+
+# procd reloads this service when either UCI package changes.  Cache static
+# thresholds here and issue at most one serialized QModem status read per
+# interval instead of reparsing all configuration every five seconds.
+while :; do
+
+	section="$(first_qmodem_section)"
+	if [ -z "$section" ]; then
+		# No modem: red slow blink.
+		set_led "$LED_BLUE" 0
+		set_led "$LED_GREEN" 0
+		blink_led "$LED_RED" 1000
+		sleep "$interval"
+		continue
+	fi
+
+	interface="$(uci -q get "qmodem.$section.alias")"
+	if ! data_online "$section" "$interface"; then
+		# Modem/SIM may be present, but the cellular data interface is not
+		# online yet.  This is the user-visible disconnected state.
+		set_led "$LED_BLUE" 0
+		set_led "$LED_GREEN" 0
+		blink_led "$LED_RED" 1000
+		sleep "$interval"
+		continue
+	fi
+
+	rsrp="$(get_rsrp "$section")"
+	case "$rsrp" in
+		-[0-9]*)
+			# Original C2000-MAX RGB truth table:
+			# >= -80 dBm blue, -90..-81 dBm green, below -90 dBm red.
+			if [ "$rsrp" -ge "$good" ]; then
+				set_rgb 1 0 0
+			elif [ "$rsrp" -ge "$weak" ]; then
+				set_rgb 0 1 0
+			else
+				set_rgb 0 0 1
+			fi
+			;;
+		*)
+			# Data is online, but QModem has not produced a usable RSRP sample.
+			set_led "$LED_BLUE" 0
+			set_led "$LED_RED" 0
+			blink_led "$LED_GREEN" 700
+			;;
+	esac
+	sleep "$interval"
+done

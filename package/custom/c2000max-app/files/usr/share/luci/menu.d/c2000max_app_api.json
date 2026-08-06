@@ -1,0 +1,194 @@
+{
+	"nradio": {
+		"action": {
+			"type": "firstchild",
+			"recurse": true
+		},
+		"auth": {}
+	},
+	"nradio/app": {
+		"action": {
+			"type": "alias",
+			"path": "nradio/app/heartbeat"
+		},
+		"auth": {}
+	},
+	"nradio/app/auth": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_auth"
+		},
+		"auth": {}
+	},
+	"nradio/app/health": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_health"
+		},
+		"auth": {}
+	},
+	"nradio/app/heartbeat": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "heartbeat" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/signal": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "signal" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/cmd": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "cmd" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/info": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "info" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/wifi": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "wifi" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/cpesel": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "cpesel" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/client": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "client" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/combo": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "combo" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/neighbour": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "neighbour" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/earfcn": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "earfcn" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/sms": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "sms" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/apn": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "apn" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/sync": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "sync" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/lan": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "lan" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/status": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "status" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/speed": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "speed" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/password": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "password" ]
+		},
+		"auth": {}
+	},
+	"nradio/app/wifiauth": {
+		"action": {
+			"type": "call",
+			"module": "c2000max_app.http",
+			"function": "action_dispatch",
+			"parameters": [ "wifiauth" ]
+		},
+		"auth": {}
+	}
+}

@@ -1,0 +1,47 @@
+{
+	"luci-app-netbird": {
+		"description": "Grant UI access to NetBird LuCI app",
+		"read": {
+			"ubus": {
+				"luci.netbird": [
+					"get_status",
+					"get_logs",
+					"list_peers",
+					"list_networks",
+					"get_package_versions",
+					"get_settings",
+					"get_connection_info",
+					"get_automation_status",
+					"get_binary_info",
+					"get_binary_update_progress",
+					"get_auth_info",
+					"check_luci_app_update",
+					"list_exit_nodes"
+				]
+			},
+			"uci": [ "netbird", "netbird_bin" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.netbird": [
+					"do_up",
+					"do_down",
+					"do_login",
+					"do_logout",
+					"do_enable_and_start",
+					"setup_firewall_zone",
+					"setup_forwarding",
+					"teardown_automation",
+					"update_binary",
+					"start_binary_update",
+					"cancel_binary_update",
+					"set_binary_source",
+					"delete_custom_binary",
+					"update_luci_app",
+					"select_exit_node"
+				]
+			},
+			"uci": [ "netbird", "netbird_bin" ]
+		}
+	}
+}

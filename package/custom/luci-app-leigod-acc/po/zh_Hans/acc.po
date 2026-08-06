@@ -1,0 +1,98 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-leigod-acc 1.0\n"
+"PO-Revision-Date: 2026-08-05 00:00+0900\n"
+"Last-Translator: C2000-MAX Firmware Team\n"
+"Language-Team: Chinese (Simplified)\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "Leigod Acc"
+msgstr "雷神加速器"
+
+msgid "Leigod Service"
+msgstr "基本设置"
+
+msgid "Leigod Device"
+msgstr "设备管理"
+
+msgid "Leigod App"
+msgstr "客户端"
+
+msgid "Leigod Notice"
+msgstr "使用说明"
+
+msgid "Leigod Accelerator Config"
+msgstr "雷神加速器"
+
+msgid "Enable Leigod Accelerator"
+msgstr "启用雷神加速器"
+
+msgid "Acc Catalog State"
+msgstr "设备加速状态"
+
+msgid "Acc_Catalog"
+msgstr "设备类别"
+
+msgid "Acc_Catalog_Status"
+msgstr "加速状态"
+
+msgid "Leigod Accelerator Usage"
+msgstr "雷神加速器使用说明"
+
+msgid "Leigod Device Config"
+msgstr "雷神设备管理"
+
+msgid "Control Device Config"
+msgstr "设置客户端设备类型"
+
+msgid "Neigh Device"
+msgstr "设备发现"
+
+msgid "acc interface"
+msgstr "局域网接口"
+
+msgid "Device Info"
+msgstr "设备信息"
+
+msgid "None_Catalog"
+msgstr "未分类设备"
+
+msgid "Phone_Catalog"
+msgstr "手机设备"
+
+msgid "PC_Catalog"
+msgstr "电脑设备"
+
+msgid "Game_Catalog"
+msgstr "游戏主机"
+
+msgid "VR_Catalog"
+msgstr "VR 设备"
+
+msgid "Unknown_Catalog"
+msgstr "未识别设备"
+
+msgid "Acc Service Disabled"
+msgstr "加速服务未启动"
+
+msgid "Acc Service Enabled"
+msgstr "加速服务已启动"
+
+msgid "Acc Catalog Started"
+msgstr "已开始加速"
+
+msgid "Acc Catalog Stopped"
+msgstr "已停止加速"
+
+msgid "Acc Catalog Paused"
+msgstr "加速已暂停"
+
+msgid "Stop Acc Service"
+msgstr "停止加速服务"
+
+msgid "Start Acc Service"
+msgstr "启动加速服务"

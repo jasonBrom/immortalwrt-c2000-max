@@ -1,0 +1,26 @@
+From: C2000-MAX firmware build <noreply@example.invalid>
+Subject: [PATCH] net: phy: mediatek: reset retained MT7987 state before firmware
+
+The internal MT7987 2.5G PHY loader marks the XBZ, PMA and RX blocks as
+DO_NOT_RESET while loading DSP data.  Those bits can survive a warm SoC
+reset, so the BMCR reset at the next boot does not necessarily return the
+PHY to the same state as a power-on reset.  Clear the retention mask before
+the existing reset and firmware reload sequence.
+
+This is deliberately done at probe rather than only in a reboot notifier so
+watchdog and crash resets follow the same recovery path.
+
+--- a/drivers/net/phy/mediatek/mtk-2p5ge.c
++++ b/drivers/net/phy/mediatek/mtk-2p5ge.c
+@@ -412,6 +412,11 @@ static int mt7987_2p5ge_phy_load_fw(stru
+ 
+ 	phy_lock_mdio_bus(phydev);
+ 
++	/* A warm SoC reset may retain the internal PHY analog/DSP state. */
++	reg_clear_bits(priv, MTK_2P5GPHY_PMD_REG + DO_NOT_RESET,
++		       DO_NOT_RESET_XBZ | DO_NOT_RESET_PMA | DO_NOT_RESET_RX);
++	usleep_range(1000, 2000);
++
+ 	/* Force 2.5Gphy back to AN state */
+ 	__phy_set_bits(phydev, MII_BMCR, BMCR_RESET);
+ 	usleep_range(5000, 6000);

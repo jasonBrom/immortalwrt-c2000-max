@@ -74,12 +74,21 @@ return view.extend({
 
 		/* only check ppe when mtk_hnat is enabled */
 		let current_fastpath = uci.get('turboacc', 'config', 'fastpath');
-		let has_ppe = (current_fastpath == 'mediatek_hnat') && ppe_stats && ppe_stats['PPE num'];
+		let effective_fastpath = features.effectiveFastpath || current_fastpath;
+		let has_ppe = (effective_fastpath == 'mediatek_hnat') && ppe_stats && ppe_stats['PPE num'];
 
 		let m, s, o;
 
 		m = new form.Map('turboacc', _('TurboACC settings'),
 			_('Open source flow offloading engine (fast path or hardware NAT).'));
+		if (features.portRole == 'inconsistent' || features.portDegraded) {
+			m.description = E('div', { 'class': 'alert-message danger' },
+				_('The C2000-MAX Ethernet topology is inconsistent or degraded. Acceleration is disabled until the port-role controller completes a verified recovery.'));
+		}
+		else if (features.hardHnat) {
+			m.description = E('div', { 'class': 'alert-message notice' },
+				_('C2000-MAX uses MediaTek HNAT only in LAN mode. WAN and WAN+5G keep HNAT and hardware flow offloading disabled, but may use software flow offloading. Port switching preserves your saved selection.'));
+		}
 
 		s = m.section(form.TypedSection);
 		s.anonymous = true;
@@ -162,23 +171,31 @@ return view.extend({
 		/* Mark user edited */
 		s = m.section(form.NamedSection, 'global', 'turboacc');
 		o = s.option(form.HiddenValue, 'set');
-		o.default = '1'; 
+		o.default = '1';
 		o.forcewrite = true;
 
 		s = m.section(form.NamedSection, 'config', 'turboacc');
 
 		o = s.option(form.ListValue, 'fastpath', _('Fastpath engine'),
 			_('The offloading engine for routing/NAT.'));
-		o.value('disabled', _('Disable'));
+		if (features.hardHnat) {
+			o.value('disabled', _('Disable'));
+			if (features.hasFLOWOFFLOADING)
+				o.value('flow_offloading', _('Flow offloading'));
+			o.value('mediatek_hnat', _('MediaTek HNAT'));
+		}
+		else {
+			o.value('disabled', _('Disable'));
+			if (features.hasFLOWOFFLOADING) o.value('flow_offloading', _('Flow offloading'));
+			if (features.hasFASTCLASSIFIER) o.value('fast_classifier', _('Fast classifier'));
+			if (features.hasSHORTCUTFECM) o.value('shortcut_fe_cm', _('SFE connection manager'));
+			if (features.hasMEDIATEKHNAT) o.value('mediatek_hnat', _('MediaTek HNAT'));
+		}
 
-		if (features.hasFLOWOFFLOADING) o.value('flow_offloading', _('Flow offloading'));
-		if (features.hasFASTCLASSIFIER) o.value('fast_classifier', _('Fast classifier'));
-		if (features.hasSHORTCUTFECM) o.value('shortcut_fe_cm', _('SFE connection manager'));
-		if (features.hasMEDIATEKHNAT) o.value('mediatek_hnat', _('MediaTek HNAT'));
-
-		o.default = 'disabled';
+		o.default = features.hardHnat ? 'mediatek_hnat' : 'flow_offloading';
 
 		const descMap = {
+			'disabled': _('Disable all fast-path acceleration.'),
 			'flow_offloading': _('Software based offloading for routing/NAT.'),
 			'fast_classifier': _('Fast classifier connection manager for the shortcut forwarding engine.'),
 			'shortcut_fe_cm': _('Simple connection manager for the shortcut forwarding engine.'),
@@ -195,11 +212,13 @@ return view.extend({
 			}
 		};
 
-		o = s.option(form.Flag, 'fastpath_fo_hw', _('Hardware flow offloading'),
-			_('Requires hardware NAT support. Implemented at least for mt7621.'));
-		o.default = o.disabled;
-		o.rmempty = false;
-		o.depends('fastpath', 'flow_offloading');
+		if (features.hasFLOWOFFLOADHW) {
+			o = s.option(form.Flag, 'fastpath_fo_hw', _('Hardware flow offloading'),
+				_('Requires hardware NAT support. Implemented at least for mt7621.'));
+			o.default = o.disabled;
+			o.rmempty = false;
+			o.depends('fastpath', 'flow_offloading');
+		}
 
 		o = s.option(form.Flag, 'fastpath_fc_br', _('Bridge Acceleration'),
 			_('Enable bridge acceleration (may be functional conflict with bridge-mode VPN server).'));
@@ -231,7 +250,7 @@ return view.extend({
 
 		o = s.option(form.ListValue, 'tcpcca', _('TCP CCA'),
 			_('TCP congestion control algorithm.'));
-		
+
 		if (features.hasTCPCCA) {
 			let algos = features.hasTCPCCA.split(' ').sort();
 			for (let i = 0; i < algos.length; i++) {

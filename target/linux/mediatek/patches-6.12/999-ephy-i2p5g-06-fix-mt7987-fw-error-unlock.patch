@@ -1,0 +1,49 @@
+From: C2000-MAX firmware build <noreply@example.invalid>
+Subject: [PATCH] net: phy: mediatek: preserve firmware errors and unlock MDIO
+
+Return the real error when the first MT7987 firmware request fails.  More
+importantly, unwind the MDIO lock when requesting or validating the second
+DSP firmware fails.  The previous paths either returned directly or jumped
+to a release-only label after phy_lock_mdio_bus(), leaving the bus locked.
+
+--- a/drivers/net/phy/mediatek/mtk-2p5ge.c
++++ b/drivers/net/phy/mediatek/mtk-2p5ge.c
+@@ -403,7 +403,7 @@ static int mt7987_2p5ge_phy_load_fw(stru
+ 	if (ret) {
+ 		dev_err(dev, "failed to load firmware: %s, ret: %d\n",
+ 			MT7987_2P5GE_PMB_FW, ret);
+-		return -EINVAL;
++		return ret;
+ 	}
+ 
+ 	if (fw->size != MT7987_2P5GE_PMB_FW_SIZE) {
+@@ -513,13 +513,13 @@ static int mt7987_2p5ge_phy_load_fw(stru
+ 	if (ret) {
+ 		dev_err(dev, "failed to load firmware: %s, ret: %d\n",
+ 			MT7987_2P5GE_DSPBITTB, ret);
+-		return -EINVAL;
++		goto unlock_mdio;
+ 	}
+ 	if (fw->size != MT7987_2P5GE_DSPBITTB_SIZE) {
+ 		dev_err(dev, "DSPBITTB size 0x%zx != 0x%x\n",
+ 			fw->size, MT7987_2P5GE_DSPBITTB_SIZE);
+ 		ret = -EINVAL;
+-		goto release_fw;
++		goto release_fw_unlock;
+ 	}
+ 
+ 	for (i = 0; i < fw->size - 1; i += 16) {
+@@ -552,6 +552,13 @@ release_fw:
+ 	release_firmware(fw);
+ 
+ 	return ret;
++
++release_fw_unlock:
++	release_firmware(fw);
++
++unlock_mdio:
++	phy_unlock_mdio_bus(phydev);
++	return ret;
+ }
+ 
+ static int mt7988_2p5ge_phy_load_fw(struct phy_device *phydev)

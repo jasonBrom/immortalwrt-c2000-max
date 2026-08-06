@@ -1,0 +1,325 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: Apache-2.0
+#
+# Canonical runtime path: /etc/init.d/netbird-settings
+# Repo canonical source:  root/etc/init.d/netbird-settings
+#
+# netbird-settings — UCI → `netbird up --<flags>` 的唯一应用管线（config-only procd）。
+#
+# 单一职责：读 /etc/config/netbird 的 settings → 渲染 netbird up flag → 应用。
+#   - 取反逻辑（enable_*/access_* → --disable-*/--block-*）集中在本脚本。
+#   - 能力门控（旧版 netbird 缺细粒度 flag）集中在本脚本：先抓 `netbird up --help`
+#     支持的 flag 集合，只 emit 支持的，不支持则静默跳过、不报错。
+#   - daemon 进程生命周期归 /etc/init.d/netbird（上游包 init，procd service run）所有；
+#     本脚本只在需要时对其 enable/disable/start/stop，自身**不** procd_open_instance
+#     （config-only 脚本起 instance 会 crash-loop，参照 tailscale #30）。
+#
+# 触发：service_triggers() 注册 procd_add_reload_trigger "netbird"，Save&Apply 改
+#   /etc/config/netbird 后 procd 调 reload_service() → 渲染并应用（推荐路径：
+#   不在 rpcd 里直接 exec CLI，拿到 OpenWRT rollback）。
+#
+# 失败传播：netbird up 非零 → 本脚本非零退出 + stderr/logread 记录，
+#   **禁止** trap ... exit 0 吞错（tailscale #8）。
+#
+# 调试：环境变量 NB_DRY_RUN=1 时，_render_and_apply 只打印渲染好的命令、不执行，
+#   退出码恒 0；用于验收「取反 / 门控是否正确」（不扰动已连接的 daemon）。
+
+START=98
+USE_PROCD=1
+
+TAG="netbird-settings"
+NB_SERVICE="/etc/init.d/netbird"   # 上游 daemon 生命周期 init
+NB_TIMEOUT="/usr/bin/timeout"
+[ -x "$NB_TIMEOUT" ] || NB_TIMEOUT="/bin/timeout"
+
+# _bounded <wall> <command...> —— 对可能等待 daemon/网络的 CLI 设墙钟。
+# coreutils-timeout 是板级强依赖；缺失时仍保留兼容退化路径。
+_bounded() {
+	local wall="$1"
+	shift
+	if [ -x "$NB_TIMEOUT" ]; then
+		"$NB_TIMEOUT" -k 2s "$wall" "$@"
+	else
+		"$@"
+	fi
+}
+
+# ── 二进制路径运行时探测（运行时探测，不硬编码路径；对齐 paths.uc）─────────────
+# 候选：command -v netbird → /usr/bin/netbird → /usr/sbin/netbird；全无返非零。
+_resolve_bin() {
+	if command -v netbird >/dev/null 2>&1; then
+		command -v netbird
+		return 0
+	fi
+	for p in /usr/bin/netbird /usr/sbin/netbird; do
+		[ -x "$p" ] && { echo "$p"; return 0; }
+	done
+	return 1
+}
+
+# ── UCI 读取小工具 ────────────────────────────────────────────────────────────
+# _get f [default] —— 读 netbird.settings.<f>，缺省回退 default（与 config 默认一致）。
+_get() {
+	local v
+	v="$(uci -q get "netbird.settings.$1" 2>/dev/null)"
+	if [ -z "$v" ] && [ -n "$2" ]; then
+		echo "$2"
+	else
+		echo "$v"
+	fi
+}
+# _bool f default —— 布尔判定：'1' → true(rc 0)；'0' → false(rc 1)；
+#   缺省（未设置/空）用 default（传 0 表示默认 true，传 1 表示默认 false）。
+_bool() {
+	local v
+	v="$(uci -q get "netbird.settings.$1" 2>/dev/null)"
+	if [ -z "$v" ]; then
+		return "$2"
+	fi
+	[ "$v" = "1" ]
+}
+
+# ── 能力门控：抓 `netbird up --help` 支持的 flag 集合 ─────────────────────────
+# 旧版（如 opkg 0.59.13）缺细粒度 SSH/IPv6 flag → _has_flag 返非零 → 跳过该 flag。
+_UP_HELP=""
+_load_up_help() {
+	_UP_HELP="$(_bounded 3s "$1" up --help 2>&1)"
+}
+# _has_flag --some-flag —— help 文本是否含该 long flag（词边界：前导空白 + flag + 空白/=/行尾）。
+_has_flag() {
+	echo "$_UP_HELP" | grep -qE "(^|[[:space:]])$1([[:space:]]|=|\$)"
+}
+
+# ── 敏感渲染值脱敏（安全基线兜底防线，密钥绝不入日志）─────────────────────────
+# stdin → stdout，把 `--preshared-key <值>` 的值替换为 ***。
+# 注意：这**不是** PSK 不入日志的主防线——主防线是 _render_and_apply 根本不把 PSK 放进 $@/被打印的
+# 串（见那里的 psk_disp）。本函数只兜底**回灌 netbird 自身输出**那一处（万一 netbird 在输出里回显
+# 了命令行形态）。`[^ ]*` 对含空格的值会半脱敏，故**不可**当作唯一防线（含空格 PSK 本就非法/前端
+# 校验仅前端、可绕过）；正因主防线已确保 PSK 不进渲染串，此处即便半脱敏也碰不到真值。
+_redact_psk() {
+	sed 's/--preshared-key [^ ]*/--preshared-key ***/g'
+}
+
+# ── 渲染 + 应用 netbird up（核心；取反 + 门控集中处理）────────────────────────
+# 用 `set -- "$@" ...` 累积位置参数：注入安全（每个值独立、不被二次解析，等价
+#   shell_quote 效果且无 eval）。渲染须与执行同函数（ash 下函数内 set -- 不跨作用域），
+#   故渲染 + 执行内联于此函数。
+# 退出码捕获（BusyBox ash 无 PIPESTATUS）：netbird up 不走管道（管道会丢退出码），
+#   输出重定向到临时文件，$? 即真实退出码，随后把临时文件喂 logger。
+#   NB_DRY_RUN=1 时只打印渲染命令、不执行（退出码 0），用于验收取反/门控。
+# 取反矩阵（UI 正向 → netbird flag）：
+#   enable_firewall=0       → --disable-firewall
+#   block_inbound=1         → --block-inbound
+#   allow_ssh=1             → --allow-server-ssh
+#   ssh_root=1              → --enable-ssh-root                       [gate]
+#   ssh_sftp=1              → --enable-ssh-sftp                       [gate]
+#   ssh_local_fwd=1         → --enable-ssh-local-port-forwarding      [gate]
+#   ssh_remote_fwd=1        → --enable-ssh-remote-port-forwarding     [gate]
+#   enable_ssh_auth=0       → --disable-ssh-auth                      [gate]
+#   enable_dns=0            → --disable-dns
+#   access_lan=0            → --block-lan-access
+#   accept_client_routes=0  → --disable-client-routes
+#   accept_server_routes=0  → --disable-server-routes
+#   enable_ipv6=0           → --disable-ipv6                          [gate]
+#   rosenpass_enabled=1     → --enable-rosenpass
+#   rosenpass_permissive=1  → --rosenpass-permissive  (仅 rosenpass 开启时 emit) [gate]
+_render_and_apply() {
+	local bin="$1"
+	local port iface host mgmt loglevel psk psk_disp tmp rc
+
+	_load_up_help "$bin"
+
+	port="$(_get wireguard_port 51820)"
+	iface="$(_get interface_name wt0)"
+	host="$(_get hostname)"
+	mgmt="$(_get management_url)"
+	loglevel="$(_get log_level info)"
+	psk="$(_get preshared_key)"
+
+	set -- up --no-browser
+	[ -n "$port" ]  && set -- "$@" --wireguard-port "$port"
+	[ -n "$iface" ] && set -- "$@" --interface-name "$iface"
+	[ -n "$host" ]  && set -- "$@" --hostname "$host"
+	[ -n "$mgmt" ]  && set -- "$@" --management-url "$mgmt"
+	[ -n "$loglevel" ] && set -- "$@" --log-level "$loglevel"
+	# 敏感：WireGuard 预共享密钥（write-only）。**故意不放进 $@**——否则 $* 进 logread/dry-run
+	# 时整条命令含 PSK 原文，得靠脱敏；而脱敏正则对含空格的值会半脱敏泄露尾段，密钥脱敏不能依赖
+	# 前端校验（ACL 允许直接 uci 写 PSK，可绕过前端无空白校验）。改为：PSK 不入 $@，日志只显示
+	# 静态占位 `--preshared-key ***`（psk_disp），真正的 --preshared-key 仅在下方执行处作为位置参数
+	# 追加（与 set-- 等价、防注入）。如此 PSK 原文绝不进任何被打印的串，无论其内容。
+	psk_disp=""
+	[ -n "$psk" ] && psk_disp=" --preshared-key ***"
+
+	_bool enable_firewall 0 || set -- "$@" --disable-firewall
+	_bool block_inbound 1 && set -- "$@" --block-inbound
+
+	# SSH:子项(root/sftp/本地+远程转发/鉴权)只在 SSH 服务启用(allow_ssh=1)时才下发。
+	# UI 用 depends(allow_ssh=1) 隐藏子项,但后端不能只靠前端(前端可绕过):allow_ssh=0 时 UCI 可能
+	# 残留 ssh_root=1 等(depends 隐藏控件但不清值),若不在此 gate,会渲染出「SSH 服务没开却配
+	# root 登录」的悬空 flag(矩阵边界用例)。故整组子项嵌在 allow_ssh 之下,后端自洽。
+	if _bool allow_ssh 1; then
+		set -- "$@" --allow-server-ssh
+		if _has_flag --enable-ssh-root && _bool ssh_root 1; then
+			set -- "$@" --enable-ssh-root
+		fi
+		if _has_flag --enable-ssh-sftp && _bool ssh_sftp 1; then
+			set -- "$@" --enable-ssh-sftp
+		fi
+		if _has_flag --enable-ssh-local-port-forwarding && _bool ssh_local_fwd 1; then
+			set -- "$@" --enable-ssh-local-port-forwarding
+		fi
+		if _has_flag --enable-ssh-remote-port-forwarding && _bool ssh_remote_fwd 1; then
+			set -- "$@" --enable-ssh-remote-port-forwarding
+		fi
+		if _has_flag --disable-ssh-auth && ! _bool enable_ssh_auth 0; then
+			set -- "$@" --disable-ssh-auth
+		fi
+	fi
+
+	_bool enable_dns 1 || set -- "$@" --disable-dns
+
+	_bool access_lan 0 || set -- "$@" --block-lan-access
+	_bool accept_client_routes 0 || set -- "$@" --disable-client-routes
+	_bool accept_server_routes 0 || set -- "$@" --disable-server-routes
+
+	if _has_flag --disable-ipv6 && ! _bool enable_ipv6 0; then
+		set -- "$@" --disable-ipv6
+	fi
+
+	if _bool rosenpass_enabled 1; then
+		set -- "$@" --enable-rosenpass
+		if _has_flag --rosenpass-permissive && _bool rosenpass_permissive 1; then
+			set -- "$@" --rosenpass-permissive
+		fi
+	fi
+
+	# dry-run：只打印、不执行（验收取反/门控用）。$* 不含 PSK（见上），仅追加静态占位。
+	if [ "${NB_DRY_RUN:-0}" = "1" ]; then
+		echo "DRY_RUN: $bin $*$psk_disp"
+		logger -t "$TAG" "dry-run: netbird $*$psk_disp"
+		return 0
+	fi
+
+	# 先 down 再 up：netbird up 对「已连接」daemon 会短路（"Already connected"），
+	# 接口级参数（WG 端口 / 接口名等）不会重配。down 让接口重建以使新参数生效
+	# （接口级参数变了须 down→up 才生效；apply 是显式动作，短暂断连可接受）。
+	# down 幂等：未连接时非零退出也无妨，忽略其退出码。
+	_bounded 5s "$bin" down >/dev/null 2>&1
+
+	logger -t "$TAG" "applying: netbird $*$psk_disp"
+	tmp="$(mktemp 2>/dev/null || echo /tmp/nb-settings-$$.log)"
+	# PSK 不在 $@ 里，仅在执行时作为位置参数追加（防注入）；其值绝不进上面的日志串。
+	if [ -n "$psk" ]; then
+		_bounded 30s "$bin" "$@" --preshared-key "$psk" >"$tmp" 2>&1
+	else
+		_bounded 30s "$bin" "$@" >"$tmp" 2>&1
+	fi
+	rc=$?
+	# 把 netbird 输出回灌 logread（截断防刷屏）。netbird 正常不回显 PSK，但万一回显命令行形态，
+	# 仍经 _redact_psk 兜底脱敏（防御纵深；非主防线——主防线是 PSK 根本不进渲染串）。
+	[ -s "$tmp" ] && head -c 4096 "$tmp" | _redact_psk | logger -t "$TAG"
+	rm -f "$tmp"
+	if [ "$rc" -eq 124 ]; then
+		logger -t "$TAG" "netbird up timed out after 30s"
+	fi
+	return $rc
+}
+
+# ── 接口名变更 → 同步 netbird firewall zone 的 device（zone 设备直绑设计;避免修死引用断网）─────
+# 背景：interface_name 是单一事实源，被两处消费：
+#   (a) 本脚本 netbird up --interface-name <name>（daemon 据此命名 WG 设备 wt0/wt3…）；
+#   (b)「网络」Tab 的 setup_firewall_zone 把它写成 firewall.netbird 的 `list device`。
+# 在「设置」页改接口名只走 (a)，(b) 不自动跟随 → zone 仍绑旧设备名(iifname 匹配不到新设备)，
+# 内网互通失效。本函数把 (b) 同步到当前接口名，自动消除 desync。
+#
+# zone 直接设备绑定(不建 network 接口),**不再有 network.netbird 接口**。故本函数
+# 只改 firewall.netbird.device + **只 reload firewall、绝不 reload network** → 即便接口名
+# 变更也零 flush(旧版还要 reload network 才能让接口 device 跟随,会 flush wtX;现彻底消除)。
+#
+# 写入约定：
+#   - 仅当 firewall.netbird zone **已存在**（用户在「网络」Tab 建过）才同步；不存在不创建（尊重 opt-in）；
+#   - 本函数只改 device 一个 list option（delete + add_list 重置为单元素）；zone 创建仍归 netbird.uc；
+#   - device 已一致则免动（普通设置保存不触发 firewall reload）。
+# 调用时机（关键）：在 _render_and_apply（netbird down→up）**之前**调用，让 netbird 在 fw
+#   变更**之后**才最后 re-establish——否则 fw reload 打断 netbird 转发、需手动 down/up 才恢复
+#   。fw4 用 iifname 按名匹配，新设备未建也能先配好 zone。
+_sync_openwrt_zone_device() {
+	local want="$1" cur
+	# 接口名格式校验（与 settings.js / netbird.uc _nb_interface_name 同规则），非法不写 UCI
+	echo "$want" | grep -qE '^[a-zA-Z][a-zA-Z0-9_-]{0,14}$' || return 0
+	# 仅同步已存在的 netbird firewall zone（opt-in；未建则与 OpenWRT 网络无关）
+	[ "$(uci -q get firewall.netbird 2>/dev/null)" = "zone" ] || return 0
+	cur="$(uci -q get firewall.netbird.device 2>/dev/null)"
+	[ "$cur" = "$want" ] && return 0
+	# device 是 list option：先删后 add_list 重置为单元素，确保不残留旧设备名。
+	uci -q delete firewall.netbird.device 2>/dev/null
+	uci -q add_list firewall.netbird.device="$want" || return 0
+	uci -q commit firewall
+	/etc/init.d/firewall reload >/dev/null 2>&1
+	logger -t "$TAG" "synced firewall.netbird.device: ${cur:-<unset>} -> $want"
+}
+
+# ── procd 钩子 ────────────────────────────────────────────────────────────────
+# config-only：无 daemon instance（daemon 生命周期归上游 /etc/init.d/netbird）。
+# 关键：**不要**在 start_service 里 procd_open_service/procd_close_service —— rc.common 的
+# rc_procd 包装已在调用 start_service 前后各 open/close 一次（`procd_open_service … "$@" …
+# procd_close_service`）。这里再 open/close，会让我们这次 close 先 dump + json_cleanup 清空
+# buffer，随后 rc_procd 的二次 close 落在空 buffer 上 dump 出 `{ }` → 刷屏的
+# `Command failed: ubus call service set { } (Invalid argument)`（无害但难看）。
+# triggers 由下方 service_triggers() 注册（rc_procd 的 procd_close_service 会调用它），
+# 故 start_service 保持空操作即可（对标 firewall/system 等 instance-less 服务的标准写法）。
+start_service() {
+	return 0
+}
+
+# Save&Apply 改 /etc/config/netbird → procd 调本函数。
+service_triggers() {
+	procd_add_reload_trigger "netbird"
+}
+
+# reload_service —— 应用入口（被 reload / Save&Apply 触发调用）。
+reload_service() {
+	local bin rc
+
+	bin="$(_resolve_bin)" || {
+		echo "$TAG: netbird binary not found" >&2
+		logger -t "$TAG" "netbird binary not found, abort apply"
+		return 1
+	}
+
+	# service_enabled=0：断开 + 停 + disable daemon，不 apply up。默认开(0)。
+	if ! _bool service_enabled 0; then
+		logger -t "$TAG" "service_enabled=0: down + stop + disable netbird daemon"
+		_bounded 5s "$bin" down >/dev/null 2>&1
+		if [ -x "$NB_SERVICE" ]; then
+			"$NB_SERVICE" stop >/dev/null 2>&1
+			"$NB_SERVICE" disable >/dev/null 2>&1
+		fi
+		return 0
+	fi
+
+	# service_enabled=1：确保 daemon enable + running，再 apply up flags。
+	if [ -x "$NB_SERVICE" ]; then
+		"$NB_SERVICE" enabled >/dev/null 2>&1 || "$NB_SERVICE" enable >/dev/null 2>&1
+		"$NB_SERVICE" start >/dev/null 2>&1
+	fi
+
+	# 先把 netbird firewall zone 的 device 同步到当前接口名（+ 重载 firewall;设备直绑不动 network），
+	# **再** _render_and_apply 让 netbird 最后 down→up 重建。顺序关键：netbird 必须在 fw 变更
+	# **之后**才 re-establish，否则 fw reload 打断转发、需手动 down/up 才恢复。
+	# 仅接口名变更时才真正动 firewall（device 一致则 no-op）。
+	_sync_openwrt_zone_device "$(_get interface_name wt0)"
+
+	# 渲染 + 应用 up flags；捕获真实退出码并透传（失败码上抛）。
+	_render_and_apply "$bin"
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		echo "$TAG: netbird up failed (exit $rc)" >&2
+		logger -t "$TAG" "netbird up failed, exit $rc"
+		return "$rc"
+	fi
+	logger -t "$TAG" "apply ok"
+	return 0
+}
+# 注：不自定义 reload() —— /etc/rc.common 在 reload_service 存在时自动暴露
+# `/etc/init.d/netbird-settings reload` 并透传退出码（Save&Apply 经 procd reload trigger 触发 / dev 手动调试）。

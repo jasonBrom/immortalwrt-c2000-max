@@ -1,0 +1,24 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+
+USE_PROCD=1
+
+start_service() {
+	procd_open_instance
+	# Keep the management plane responsive on 512 MiB routers.  The shell
+	# writes its own score then execs NetBird, so the final daemon keeps the
+	# preference without an extra resident wrapper process.
+	procd_set_param command /bin/sh -c \
+		'echo 500 > /proc/self/oom_score_adj 2>/dev/null; exec /usr/bin/netbird service run'
+	procd_set_param nice 10
+	procd_set_param respawn 3600 5 5
+
+	procd_set_param env NB_STATE_DIR="/root/.config/netbird"
+	procd_append_param env NB_DISABLE_SSH_CONFIG="1"
+	procd_append_param env NB_DNS_STATE_FILE="/var/lib/netbird/state.json"
+
+	procd_set_param pidfile /var/run/netbird.pid
+	procd_close_instance
+}

@@ -1,0 +1,26 @@
+#!/bin/sh
+
+case "$ACTION" in
+	ifup|ifdown|connected|disconnected) ;;
+	*) exit 0 ;;
+esac
+[ "$(uci -q get c2000max.ethernet.role)" = wan ] || exit 0
+[ "$(uci -q get c2000max.ethernet.wan_mode)" = ethernet_5g_balance ] || exit 0
+[ ! -e /var/run/c2000max-port-role.switching ] || exit 0
+
+wan="$(uci -q get c2000max.ethernet.wan4)"
+[ -n "$wan" ] || wan=c2000_wan
+cellular="$(uci -q get c2000max.ethernet.cellular_interface)"
+if [ "$INTERFACE" != "$wan" ] &&
+   { [ -z "$cellular" ] || [ "$INTERFACE" != "$cellular" ]; }; then
+	exit 0
+fi
+
+(
+	sleep 3
+	[ ! -e /var/run/c2000max-port-role.switching ] || exit 0
+	/usr/sbin/c2000max-port-role uplink-event "$INTERFACE" "$ACTION" \
+		>/dev/null 2>&1
+) &
+
+exit 0

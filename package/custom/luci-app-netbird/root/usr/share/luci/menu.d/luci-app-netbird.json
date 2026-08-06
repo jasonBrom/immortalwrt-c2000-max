@@ -1,0 +1,78 @@
+{
+	"admin/services/netbird": {
+		"title": "NetBird",
+		"order": 45,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-netbird" ]
+		}
+	},
+	"admin/services/netbird/overview": {
+		"title": "Authentication",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "netbird/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-netbird" ]
+		}
+	},
+	"admin/services/netbird/versions": {
+		"title": "Versions",
+		"order": 15,
+		"action": {
+			"type": "view",
+			"path": "netbird/versions"
+		},
+		"depends": {
+			"acl": [ "luci-app-netbird" ]
+		}
+	},
+	"admin/services/netbird/settings": {
+		"title": "Settings",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "netbird/settings"
+		},
+		"depends": {
+			"acl": [ "luci-app-netbird" ]
+		}
+	},
+	"admin/services/netbird/status": {
+		"title": "Status",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "netbird/status"
+		},
+		"depends": {
+			"acl": [ "luci-app-netbird" ]
+		}
+	},
+	"admin/services/netbird/network": {
+		"title": "Network",
+		"order": 35,
+		"action": {
+			"type": "view",
+			"path": "netbird/setup"
+		},
+		"depends": {
+			"acl": [ "luci-app-netbird" ]
+		}
+	},
+	"admin/services/netbird/logs": {
+		"title": "Logs",
+		"order": 40,
+		"action": {
+			"type": "view",
+			"path": "netbird/logs"
+		},
+		"depends": {
+			"acl": [ "luci-app-netbird" ]
+		}
+	}
+}

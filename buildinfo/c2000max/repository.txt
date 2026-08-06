@@ -1,0 +1,3 @@
+repository=https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git
+branch=25.12-dev-wifi7
+commit=ed8826fe488c72fbec35d42a965d5862b12a36ed

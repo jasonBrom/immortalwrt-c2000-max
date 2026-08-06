@@ -1,0 +1,13 @@
+{
+	"admin/services/netbird/overview": {
+		"title": "Authentication",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "c2000max/netbird_async_v353"
+		},
+		"depends": {
+			"acl": [ "c2000max" ]
+		}
+	}
+}

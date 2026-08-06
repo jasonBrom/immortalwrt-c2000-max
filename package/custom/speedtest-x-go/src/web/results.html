@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width,initial-scale=1">
+	<title>内网测速记录</title>
+	<link rel="stylesheet" href="style.css">
+</head>
+<body>
+	<main>
+		<header>
+			<div>
+				<p class="eyebrow">C2000-MAX · SPEEDTEST-X</p>
+				<h1>测速记录</h1>
+				<p class="subtitle">记录仅保存在服务进程内存中，重启服务后自动清空。</p>
+			</div>
+			<a class="history" href="index.html">返回测速</a>
+		</header>
+		<section class="panel table-panel">
+			<div class="table-wrap">
+				<table>
+					<thead><tr><th>时间</th><th>客户端</th><th>下载</th><th>上传</th><th>延迟</th><th>抖动</th></tr></thead>
+					<tbody id="rows"><tr><td colspan="6">正在读取……</td></tr></tbody>
+				</table>
+			</div>
+		</section>
+	</main>
+	<script>
+	fetch('backend/results-api.php', { cache: 'no-store' }).then(function(r) {
+		return r.json();
+	}).then(function(items) {
+		var rows = document.getElementById('rows');
+		rows.replaceChildren();
+		if (!Array.isArray(items) || !items.length) {
+			var tr = document.createElement('tr');
+			var td = document.createElement('td');
+			td.colSpan = 6;
+			td.textContent = '暂无测速记录';
+			tr.appendChild(td);
+			rows.appendChild(tr);
+			return;
+		}
+		items.forEach(function(item) {
+			var values = [
+				new Date(item.updated_at).toLocaleString(),
+				item.ip || '-',
+				(item.download || '0') + ' Mbps',
+				(item.upload || '0') + ' Mbps',
+				(item.ping || '0') + ' ms',
+				(item.jitter || '0') + ' ms'
+			];
+			var tr = document.createElement('tr');
+			values.forEach(function(value) {
+				var td = document.createElement('td');
+				td.textContent = value;
+				tr.appendChild(td);
+			});
+			rows.appendChild(tr);
+		});
+	}).catch(function() {
+		document.getElementById('rows').textContent = '读取记录失败';
+	});
+	</script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+#!/bin/sh
+
+repositories=/etc/apk/repositories.d/distfeeds.list
+
+[ -f "$repositories" ] || exit 0
+sed -i '\#/video/packages[.]adb$#d' "$repositories"
+
+exit 0

@@ -1,5 +1,14 @@
 #!/bin/sh
 
+. /lib/functions.sh
+
+uci -q batch <<-EOF >"/dev/null"
+	delete ucitrack.@turboacc[-1]
+	add ucitrack turboacc
+	set ucitrack.@turboacc[-1].init=turboacc
+	commit ucitrack
+EOF
+
 [ "$(uci -q get "turboacc.global.set")" -eq "1" ] && exit 0
 
 cat <<-EOF > "/etc/config/turboacc"
@@ -14,7 +23,12 @@ EOF
 
 kernel_ver="$(uname -r)"
 
-if [ -e "/lib/modules/$kernel_ver/mtkhnat.ko" ]; then
+if [ "$(board_name)" = "nradio,c2000-max" ]; then
+	uci -q set "turboacc.config.fastpath"="mediatek_hnat"
+	uci -q set "turboacc.config.fastpath_fo_hw"="0"
+	uci -q set "turboacc.config.fastpath_mh_bind_rate"="30"
+	uci -q set "turboacc.config.fastpath_mh_update_nfct"="0"
+elif [ -e "/lib/modules/$kernel_ver/mtkhnat.ko" ]; then
 	uci -q set "turboacc.config.fastpath"="mediatek_hnat"
 	uci -q set "turboacc.config.fastpath_mh_bind_rate"="30"
 	uci -q set "turboacc.config.fastpath_mh_update_nfct"="0"
@@ -33,12 +47,5 @@ else
 fi
 
 uci -q commit "turboacc"
-
-uci -q batch <<-EOF >"/dev/null"
-	delete ucitrack.@turboacc[-1]
-	add ucitrack turboacc
-	set ucitrack.@turboacc[-1].init=turboacc
-	commit ucitrack
-EOF
 
 exit 0

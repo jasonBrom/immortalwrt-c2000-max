@@ -1,0 +1,1126 @@
+# NetBird LuCI Application - 简体中文翻译
+# Copyright (C) 2026 luci-app-netbird contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-netbird 1.0\n"
+"Report-Msgid-Bugs-To: https://github.com/piotr-pietras/luci-app-netbird\n"
+"POT-Creation-Date: 2026-06-16 00:00+0000\n"
+"PO-Revision-Date: 2026-06-16 00:00+0000\n"
+"Last-Translator: luci-app-netbird contributors\n"
+"Language-Team: Chinese Simplified <zh-hans@li.org>\n"
+"Language: zh_Hans\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"X-Generator: manually\n"
+
+msgid "(%d total)"
+msgstr "（共 %d 个）"
+
+msgid "%d / %d available"
+msgstr "%d / %d 可用"
+
+msgid "%d / %d connected"
+msgstr "%d / %d 已连接"
+
+msgid "%d d ago"
+msgstr "%d 天前"
+
+msgid "%d entries"
+msgstr "%d 条记录"
+
+msgid "%d h ago"
+msgstr "%d 小时前"
+
+msgid "%d min ago"
+msgstr "%d 分钟前"
+
+msgid "%d s ago"
+msgstr "%d 秒前"
+
+msgid "Accept Client Routes"
+msgstr "接受客户端路由"
+
+msgid "Accept Server Routes"
+msgstr "接受服务器路由"
+
+msgid "Accept WireGuard connections from peers that do not have Rosenpass enabled."
+msgstr "接受未启用 Rosenpass 的对等节点发起的 WireGuard 连接。"
+
+msgid "Access LAN"
+msgstr "接入局域网"
+
+msgid "Act as a router for server routes received from the management service."
+msgstr "作为路由器处理从管理服务接收到的服务器路由。"
+
+msgid "Active exit node"
+msgstr "当前出口节点"
+
+msgid "All internet traffic from this router and devices routed through it will go through \"%s\"."
+msgstr "本路由器及经其转发的设备的全部互联网流量将改经 \"%s\" 出口。"
+
+msgid "All severities"
+msgstr "所有级别"
+
+msgid "Allow access to local networks (LAN) when this peer acts as a router or exit node."
+msgstr "当本节点作为路由或出口节点时，允许访问本地网络（LAN）。"
+
+msgid "Allow hosts on your LAN to reach NetBird peers (src=lan, dest=netbird)."
+msgstr "允许局域网设备访问 NetBird 对等节点（src=lan，dest=netbird）。"
+
+msgid "Allow local port forwarding through the SSH server. Requires netbird 0.72.x."
+msgstr "允许通过 SSH 服务器进行本地端口转发。需要 netbird 0.72.x。"
+
+msgid "Allow remote port forwarding through the SSH server. Requires netbird 0.72.x."
+msgstr "允许通过 SSH 服务器进行远程端口转发。需要 netbird 0.72.x。"
+
+msgid "Allow root login via the NetBird SSH server. Requires netbird 0.72.x; ignored on older versions."
+msgstr "允许通过 NetBird SSH 服务器以 root 身份登录。需要 netbird 0.72.x；旧版本忽略。"
+
+msgid "Apply exit node"
+msgstr "应用出口节点"
+
+msgid "Apply forwarding"
+msgstr "应用转发规则"
+
+msgid "Authentication"
+msgstr "认证"
+
+msgid "Backend state"
+msgstr "后端状态"
+
+msgid "Block Inbound"
+msgstr "阻断入站"
+
+msgid "Cancel"
+msgstr "取消"
+
+msgid "CLI version"
+msgstr "CLI 版本"
+
+msgid "Configured"
+msgstr "已配置"
+
+msgid "Connect"
+msgstr "连接"
+
+msgid "Connected"
+msgstr "已连接"
+
+msgid "Connected to NetBird."
+msgstr "已连接到 NetBird。"
+
+msgid "Connection"
+msgstr "连接"
+
+msgid "Connection and behavior settings applied via \"netbird up\". Forward semantics: a checked box enables the feature."
+msgstr "通过 \"netbird up\" 应用的连接和行为设置。正向语义：勾选即启用对应功能。"
+
+msgid "Connection control"
+msgstr "连接控制"
+
+msgid "Connection failed."
+msgstr "连接失败。"
+
+msgid "Could not determine the NetBird service state."
+msgstr "无法获取 NetBird 服务状态。"
+
+msgid "Could not read exit nodes:"
+msgstr "读取出口节点失败："
+
+msgid "Current configuration"
+msgstr "当前配置"
+
+msgid "Daemon version"
+msgstr "守护进程版本"
+
+msgid "Device name reported to NetBird. Applied only when the peer first registers; to rename an already registered device, edit it in the NetBird management console. Leave blank to use the system hostname."
+msgstr "上报给 NetBird 的设备名称，仅在设备首次注册时生效；已注册设备如需改名，请在 NetBird 管理控制台中编辑。留空则使用系统主机名。"
+
+msgid "Disconnect"
+msgstr "断开连接"
+
+msgid "Disconnect keeps your credentials; Log out removes the local NetBird identity (requires a setup key to reconnect)."
+msgstr "断开连接保留凭据；注销将删除本地 NetBird 身份（重新连接需要安装密钥）。"
+
+msgid "Disconnected"
+msgstr "已断开"
+
+msgid "DNS"
+msgstr "DNS"
+
+msgid "Enable and start"
+msgstr "启用并启动"
+
+msgid "Enable DNS"
+msgstr "启用 DNS"
+
+msgid "Enable Firewall"
+msgstr "启用防火墙"
+
+msgid "Enable IPv6"
+msgstr "启用 IPv6"
+
+msgid "Enable Rosenpass"
+msgstr "启用 Rosenpass"
+
+msgid "Enable SSH"
+msgstr "启用 SSH"
+
+msgid "Enable SSH Authentication"
+msgstr "启用 SSH 认证"
+
+msgid "Enable the NetBird service and start it now."
+msgstr "启用 NetBird 服务并立即启动。"
+
+msgid "Enable the SFTP subsystem. Requires netbird 0.72.x; ignored on older versions."
+msgstr "启用 SFTP 子系统。需要 netbird 0.72.x；旧版本忽略。"
+
+msgid "Enabled"
+msgstr "已启用"
+
+msgid "Enabling forwarding exposes your LAN to NetBird mesh peers (and vice-versa)."
+msgstr "启用转发将使您的局域网对 NetBird 网格节点可见（反之亦然）。"
+
+msgid "Exit node"
+msgstr "出口节点"
+
+msgid "Exit node switched to \"%s\"."
+msgstr "出口节点已切换为 \"%s\"。"
+
+msgid "Exit node turned off."
+msgstr "出口节点已关闭。"
+
+msgid "Failed to set up the firewall zone."
+msgstr "防火墙区域设置失败。"
+
+msgid "Failed to switch the exit node."
+msgstr "切换出口节点失败。"
+
+msgid "Failed to update forwarding."
+msgstr "转发规则更新失败。"
+
+msgid "Firewall"
+msgstr "防火墙"
+
+msgid "Forwarding LAN → NetBird"
+msgstr "转发：LAN → NetBird"
+
+msgid "Forwarding NetBird → LAN"
+msgstr "转发：NetBird → LAN"
+
+msgid "Forwarding rules"
+msgstr "转发规则"
+
+msgid "Forwarding updated: LAN→NetBird %s, NetBird→LAN %s."
+msgstr "转发规则已更新：LAN→NetBird %s，NetBird→LAN %s。"
+
+msgid "FQDN"
+msgstr "FQDN"
+
+msgid "General"
+msgstr "常规"
+
+msgid "Hostname"
+msgstr "主机名"
+
+msgid "Install the netbird package (e.g. via %s), then reload this page."
+msgstr "请先安装 netbird 软件包（例如通过 %s），然后刷新本页面。"
+
+msgid "Interface name \"%s\" looks like a reserved/blacklisted prefix (\"%s\"); it may conflict with other services. Use \"wt0\" if unsure."
+msgstr "接口名 \"%s\" 看起来像保留/黑名单前缀（\"%s\"），可能与其他服务冲突。不确定时请使用 \"wt0\"。"
+
+msgid "Interface type"
+msgstr "接口类型"
+
+msgid "Invalid interface name. Use 1-15 chars: start with a letter, then letters/digits/_/-."
+msgstr "无效的接口名称。请使用 1-15 个字符：以字母开头，后跟字母/数字/_/-。"
+
+msgid "IP"
+msgstr "IP"
+
+msgid "IPv6"
+msgstr "IPv6"
+
+msgid "Kernel"
+msgstr "内核"
+
+msgid "LAN → NetBird"
+msgstr "LAN → NetBird"
+
+msgid "LAN ↔ NetBird forwarding"
+msgstr "LAN ↔ NetBird 转发"
+
+msgid "Last handshake"
+msgstr "最近握手"
+
+msgid "Latency"
+msgstr "延迟"
+
+msgid "Lazy connection"
+msgstr "懒连接"
+
+msgid "Leave blank if already logged in"
+msgstr "已登录则留空"
+
+msgid "Let NetBird configure DNS. Off by default on OpenWrt to avoid competing with dnsmasq for port 53."
+msgstr "让 NetBird 管理 DNS 配置。OpenWrt 上默认关闭，避免与 dnsmasq 争用 53 端口。"
+
+msgid "Loading…"
+msgstr "加载中…"
+
+msgid "Log Level"
+msgstr "日志层级"
+
+msgid "Log output truncated to last %d lines."
+msgstr "日志输出已截断，仅显示最后 %d 行。"
+
+msgid "Logged out. The local NetBird identity was removed."
+msgstr "已注销。本地 NetBird 身份已移除。"
+
+msgid "Logging"
+msgstr "日志"
+
+msgid "Login required"
+msgstr "需要登录"
+
+msgid "Logs"
+msgstr "日志"
+
+msgid "NetBird is not connected. Connect from the Authentication page first."
+msgstr "NetBird 未连接。请先在「认证」页连接。"
+
+msgid "NetBird is not running. Start it and connect from the Authentication page first."
+msgstr "NetBird 未运行。请先在「认证」页启动并连接。"
+
+msgid "No exit nodes are available. Set up a peer as an exit node in the NetBird management console first."
+msgstr "当前没有可用的出口节点。请先在 NetBird 管理控制台中将某个节点设置为出口节点。"
+
+msgid "Route all internet traffic from this router and its clients through a NetBird peer. Exit nodes are defined in the NetBird management console. Changes take effect immediately and are remembered by the NetBird daemon."
+msgstr "将本路由器及其客户端的全部互联网流量经由某个 NetBird 节点转发。出口节点在 NetBird 管理控制台中定义。切换立即生效，并由 NetBird 守护进程持久保存。"
+
+msgid "Switch exit node"
+msgstr "切换出口节点"
+
+msgid "Switch exit node?"
+msgstr "切换出口节点？"
+
+msgid "Switch to"
+msgstr "切换为"
+
+msgid "Switching the exit node changes the default route. Connections may drop briefly, and remote management sessions that do not run over NetBird can be cut off."
+msgstr "切换出口节点会改变默认路由。连接可能短暂中断；不经由 NetBird 的远程管理会话可能因此断开。"
+
+msgid "The exit node will be turned off; internet traffic will go out directly again."
+msgstr "将关闭出口节点，互联网流量恢复直接出网。"
+
+msgid "luci-app-netbird"
+msgstr "luci-app-netbird"
+
+msgid "Management server"
+msgstr "管理服务器"
+
+msgid "Management URL"
+msgstr "管理 URL"
+
+msgid "Master switch. When off, NetBird disconnects and the service is stopped and disabled."
+msgstr "主开关。关闭时 NetBird 断开连接，服务将停止并禁用。"
+
+msgid "Message"
+msgstr "消息"
+
+msgid "Name"
+msgstr "名称"
+
+msgid "Needs login"
+msgstr "需要登录"
+
+msgid "NetBird"
+msgstr "NetBird"
+
+msgid "NetBird → LAN"
+msgstr "NetBird → LAN"
+
+msgid "NetBird disconnected."
+msgstr "NetBird 已断开连接。"
+
+msgid "NetBird IP"
+msgstr "NetBird IP"
+
+msgid "NetBird IPv6"
+msgstr "NetBird IPv6"
+
+msgid "NetBird is connected to the management server."
+msgstr "NetBird 已连接到管理服务器。"
+
+msgid "NetBird not installed"
+msgstr "NetBird 未安装"
+
+msgid "NetBird service enabled and started."
+msgstr "NetBird 服务已启用并启动。"
+
+msgid "Network"
+msgstr "网络"
+
+msgid "Networks"
+msgstr "网络"
+
+msgid "No"
+msgstr "否"
+
+msgid "No connection details (%s)."
+msgstr "无连接详情（%s）。"
+
+msgid "No log entries match the current filter."
+msgstr "没有符合当前过滤条件的日志。"
+
+msgid "No NetBird log entries in syslog ring buffer."
+msgstr "syslog 环形缓冲区中没有 NetBird 日志。"
+
+msgid "No peers."
+msgstr "没有对等节点。"
+
+msgid "Not configured"
+msgstr "未配置"
+
+msgid "Not installed"
+msgstr "未安装"
+
+msgid "off"
+msgstr "关"
+
+msgid "Off"
+msgstr "关"
+
+msgid "Off (direct internet access)"
+msgstr "关闭（直连互联网）"
+
+msgid "on"
+msgstr "开"
+
+msgid "On"
+msgstr "开"
+
+msgid "One-click setup"
+msgstr "一键配置"
+
+msgid "Key from the NetBird console — one-time use, not shown again."
+msgstr "控制台生成的密钥，一次性使用，之后不再显示。"
+
+msgid "Operation failed."
+msgstr "操作失败。"
+
+msgid "page"
+msgstr "页"
+
+msgid "Peer details unavailable."
+msgstr "对等节点详情不可用。"
+
+msgid "Peers"
+msgstr "对等节点"
+
+msgid "Post-Quantum"
+msgstr "后量子"
+
+msgid "Post-quantum secure the connection via Rosenpass (experimental)."
+msgstr "通过 Rosenpass 进行后量子安全加固（实验性）。"
+
+msgid "Process"
+msgstr "进程"
+
+msgid "Process client routes received from the management service."
+msgstr "处理从管理服务接收到的客户端路由。"
+
+msgid "Profile"
+msgstr "配置文件"
+
+msgid "Quantum resistance"
+msgstr "量子抗性"
+
+msgid "Received"
+msgstr "已接收"
+
+msgid "Refresh"
+msgstr "刷新"
+
+msgid "Relays"
+msgstr "中继"
+
+msgid "Renaming can avoid conflicts with other WireGuard services on this router (default wt0)."
+msgstr "重命名可避免与路由器上其他 WireGuard 服务冲突（默认 wt0）。"
+
+msgid "Request and use an IPv6 overlay address. Requires netbird 0.72.x; ignored on older versions."
+msgstr "请求并使用 IPv6 覆盖地址。需要 netbird 0.72.x；旧版本忽略。"
+
+msgid "Require authentication for the NetBird SSH server. Requires netbird 0.72.x; ignored on older versions."
+msgstr "要求对 NetBird SSH 服务器进行身份认证。需要 netbird 0.72.x；旧版本忽略。"
+
+msgid "Rosenpass Permissive"
+msgstr "Rosenpass 宽容模式"
+
+msgid "Routing"
+msgstr "路由"
+
+msgid "Run the NetBird SSH server on this peer."
+msgstr "在本节点上运行 NetBird SSH 服务器。"
+
+msgid "Running"
+msgstr "运行中"
+
+msgid "Search logs…"
+msgstr "搜索日志…"
+
+msgid "Management server URL — self-hosted or the official one."
+msgstr "管理服务器 URL，自托管或官方 URL。"
+
+msgid "Sent"
+msgstr "已发送"
+
+msgid "Service disabled"
+msgstr "服务已禁用"
+
+msgid "Logs unavailable: %s"
+msgstr "无法获取日志：%s"
+
+msgid "Service stopped"
+msgstr "服务已停止"
+
+msgid "Settings"
+msgstr "设置"
+
+msgid "Setup Key"
+msgstr "安装密钥"
+
+msgid "Severity"
+msgstr "级别"
+
+msgid "Signal server"
+msgstr "信令服务器"
+
+msgid "SSH"
+msgstr "SSH"
+
+msgid "SSH Local Port Forwarding"
+msgstr "SSH 本地端口转发"
+
+msgid "SSH Remote Port Forwarding"
+msgstr "SSH 远程端口转发"
+
+msgid "SSH Root Login"
+msgstr "SSH Root 登录"
+
+msgid "SSH SFTP"
+msgstr "SSH SFTP"
+
+msgid "Status"
+msgstr "状态"
+
+msgid "Status details are available only when the NetBird service is running. See the Authentication tab to enable, start, or log in."
+msgstr "仅当 NetBird 服务运行时才显示状态详情。请前往认证标签页以启用、启动或登录。"
+
+msgid "The NetBird binary was not found. Install the netbird package, then return here."
+msgstr "未找到 NetBird 二进制文件。请先安装 netbird 软件包，然后返回此页面。"
+
+msgid "The NetBird service is installed and enabled but not running."
+msgstr "NetBird 服务已安装并启用，但未在运行。"
+
+msgid "The NetBird service is installed but disabled. Enable and start it to continue."
+msgstr "NetBird 服务已安装但已禁用。请启用并启动以继续。"
+
+msgid "The %s package is the fallback baseline; the latest official build has more complete features."
+msgstr "%s 软件包为保底版本；最新官方版功能更完整。"
+
+msgid "The current session is disconnected, but your login identity is kept. Click Connect below to reconnect; no setup key is needed."
+msgstr "已断开当前连接，登录身份仍保留。点下方「连接」重连，无需安装密钥。"
+
+msgid "Not connected to the server. Enter the management URL and key below to connect."
+msgstr "未连接服务端。请在下方输入管理 URL 与密钥进行连接。"
+
+msgid "This will deregister this device and remove the local NetBird identity. You will need a setup key to log in again. This is different from \"Disconnect\", which keeps your credentials."
+msgstr "此操作将注销本设备并删除本地 NetBird 身份。再次登录需要安装密钥。这与\"断开连接\"不同，断开连接会保留凭据。"
+
+msgid "Time"
+msgstr "时间"
+
+msgid "UDP listening port for the WireGuard interface (default 51820)."
+msgstr "WireGuard 接口的 UDP 监听端口（默认 51820）。"
+
+msgid "Unknown"
+msgstr "未知"
+
+msgid "Update"
+msgstr "更新"
+
+msgid "Userspace"
+msgstr "用户空间"
+
+msgid "Verbosity of the NetBird log."
+msgstr "NetBird 日志的详细程度。"
+
+msgid "Caution:"
+msgstr "警告："
+
+msgid "WireGuard interface name"
+msgstr "WireGuard 接口名"
+
+msgid "WireGuard port"
+msgstr "WireGuard 端口"
+
+msgid "Yes"
+msgstr "是"
+
+msgid "No NetBird daemon log entries yet."
+msgstr "暂无 NetBird 守护进程日志。"
+
+msgid "NetBird service is not running; no logs are available."
+msgstr "NetBird 服务未运行，暂无日志。"
+
+msgid "Peer"
+msgstr "对等节点"
+
+msgid "Logged in, leave blank to keep the current identity"
+msgstr "已登录，留空即保持当前身份"
+
+msgid "Last used:"
+msgstr "上次使用："
+
+msgid "All times"
+msgstr "所有时间"
+
+msgid "Last 15 minutes"
+msgstr "近 15 分钟"
+
+msgid "Last hour"
+msgstr "近 1 小时"
+
+msgid "Last 24 hours"
+msgstr "近 24 小时"
+
+msgid "WireGuard pre-shared key"
+msgstr "WireGuard 预共享密钥"
+
+msgid "Optional extra encryption layer for WireGuard; if set, all peers must use the same key."
+msgstr "可选，此处为 WireGuard 额外加密，若填写，则所有对等节点须使用相同密钥。"
+
+msgid "A key is configured; leave blank to keep it"
+msgstr "已配置密钥;留空即保持不变"
+
+msgid "No key set"
+msgstr "未设置密钥"
+
+msgid "The pre-shared key must not contain spaces."
+msgstr "预共享密钥不能包含空格。"
+
+msgid "Remove automation"
+msgstr "移除自动化配置"
+
+msgid "Remove NetBird network automation?"
+msgstr "移除 NetBird 网络自动化配置？"
+
+msgid "This will remove the following from OpenWrt:"
+msgstr "将从 OpenWrt 移除以下内容："
+
+msgid "the dedicated firewall zone"
+msgstr "(专用防火墙区域)"
+
+msgid "both forwarding rules"
+msgstr "(两条转发规则)"
+
+msgid "Your LAN/WAN configuration is not touched. The NetBird daemon keeps running and its wtX device stays up."
+msgstr "不会触碰您的 LAN/WAN 配置。NetBird 守护进程继续运行，其 wtX 设备保持在线。"
+
+msgid "Remove"
+msgstr "移除"
+
+msgid "NetBird network automation removed. If you later change network settings and NetBird loses connectivity, reconnect once from the Authentication page to restore it."
+msgstr "已移除 NetBird 网络自动化配置。如之后修改网络设置导致 NetBird 连接异常，在「认证」页点一次「连接」重连即可恢复。"
+
+msgid "Failed to remove automation."
+msgstr "移除自动化配置失败。"
+
+# ── 二进制来源管理 / 日志阈值 / 网络文案 ──
+
+msgid "Versions"
+msgstr "版本管理"
+
+msgid "Binary source"
+msgstr "二进制来源"
+
+msgid "Custom download URL"
+msgstr "自定义下载链接"
+
+msgid "Current"
+msgstr "当前"
+
+msgid "Active source"
+msgstr "当前来源"
+
+msgid "Running version"
+msgstr "运行版本"
+
+msgid "Architecture"
+msgstr "架构"
+
+msgid "This is the official NetBird Release build."
+msgstr "这是 NetBird 官方 Release 版本。"
+
+msgid "Version"
+msgstr "版本"
+
+msgid "Path"
+msgstr "路径"
+
+msgid "Check for updates"
+msgstr "检测更新"
+
+msgid "This is the OpenWrt package-repository build."
+msgstr "这是 OpenWrt 软件仓库版本。"
+
+msgid "Not installed / not in %s database"
+msgstr "未安装 / 不在 %s 数据库中"
+
+msgid "Switch to this source"
+msgstr "切换到此来源"
+
+msgid "Checking…"
+msgstr "检测中…"
+
+msgid "Check for updates failed."
+msgstr "检测更新失败。"
+
+msgid "Could not reach GitHub to check the latest version."
+msgstr "无法连接 GitHub 获取最新版本。"
+
+msgid "Latest official: v%s"
+msgstr "最新官方版：v%s"
+
+msgid "Already on the latest official version (v%s)."
+msgstr "已是最新官方版(v%s)。"
+
+msgid "Package upgrade available: v%s (run \"%s\")."
+msgstr "软件包有可升级版本：v%s（执行「%s」）。"
+
+msgid "No package upgrade found in the cached package lists."
+msgstr "缓存的软件包列表里没有可升级版本。"
+
+msgid "Download anyway"
+msgstr "仍要下载"
+
+msgid "Downloading NetBird binary"
+msgstr "正在下载 NetBird 二进制"
+
+msgid "Download/install failed: %s"
+msgstr "下载/安装失败：%s"
+
+msgid "Switch binary source"
+msgstr "切换二进制来源"
+
+msgid "Switch the active NetBird binary to %s? The NetBird service will restart briefly."
+msgstr "将 NetBird 活动二进制切换到 %s? NetBird 服务会短暂重启。"
+
+msgid "Switch"
+msgstr "切换"
+
+msgid "Switching binary source"
+msgstr "正在切换二进制来源"
+
+msgid "Switching and restarting NetBird…"
+msgstr "正在切换并重启 NetBird…"
+
+msgid "Active source is now %s (running v%s)."
+msgstr "当前来源已切换为 %s(运行 v%s)。"
+
+msgid "Switch failed."
+msgstr "切换失败。"
+
+msgid "The severity filter is a minimum threshold: choosing a level also shows all more severe levels. To capture DEBUG or TRACE lines, raise the log level on the Settings page and reconnect."
+msgstr "严重性过滤是「最低级别」阈值：选某级也会显示所有更严重的级别。要看到 DEBUG / TRACE 行，请在设置页提高日志级别并重新连接。"
+
+# 版本管理相关串
+
+msgid "Custom download"
+msgstr "自定义下载"
+
+msgid "Update now (v%s)"
+msgstr "立即更新(v%s)"
+
+msgid "Download"
+msgstr "下载"
+
+msgid "Downloaded versions"
+msgstr "已下载版本"
+
+msgid "Switch to this version"
+msgstr "切换到此版本"
+
+msgid "Delete"
+msgstr "删除"
+
+msgid "Delete version"
+msgstr "删除版本"
+
+msgid "Delete failed."
+msgstr "删除失败。"
+
+msgid "In use"
+msgstr "使用中"
+
+msgid "Binary installed: v%s."
+msgstr "已安装二进制：v%s。"
+
+msgid "Deleted version v%s."
+msgstr "已删除版本 v%s。"
+
+msgid "Enter a custom download URL first."
+msgstr "请先填入自定义下载链接。"
+
+msgid "If no local copy is kept, it will be fetched from the %s feed first."
+msgstr "若本机未保留副本，将先从 %s 软件源获取。"
+
+msgid "Delete downloaded custom version v%s? This only removes the stored binary file."
+msgstr "删除已下载的自定义版本 v%s?仅删除存储的二进制文件。"
+
+msgid "No custom versions downloaded yet. Enter a URL above and click Download."
+msgstr "尚无已下载的自定义版本。在上方填入链接并点击「下载」。"
+
+msgid "No local %s binary copy is kept; switching will fetch it from the %s feed automatically (%s)."
+msgstr "本机未保留 %s 二进制副本;切换时将自动从 %s 软件源获取(%s)。"
+
+msgid "The %s feed does not provide netbird on this device, so switching is unavailable. Check your package sources."
+msgstr "本机 %s 软件源未提供 netbird,无法切换。请检查软件源配置。"
+
+msgid "Download the NetBird client from a custom URL, kept by version so you can roll back anytime."
+msgstr "从自定义链接下载 NetBird 客户端，按版本号保存，随时可退回。"
+
+msgid "A NetBird tarball or a direct binary URL; after download it is checked against this CPU architecture."
+msgstr "NetBird 压缩包或二进制直链，下载后会自动校验包是否符合当前 CPU。"
+
+# 撞词消歧 + 防火墙澄清
+
+msgid "Allow NetBird peers to reach your LAN (src=netbird, dest=lan). Higher exposure, enable with care. No effect if Block Inbound is enabled on the Settings Firewall tab."
+msgstr "允许 NetBird 对等节点访问您的局域网(src=netbird,dest=lan)。安全风险较高，请谨慎启用。若「设置 ▸ 防火墙」开启了「阻断入站」，本转发不生效。"
+
+msgid "Block all inbound connections to this machine and routed networks (overrides management policies). This also blocks the NetBird to LAN forwarding on the Network tab."
+msgstr "阻断所有到本机及路由网络的入站连接(优先级高于管理策略)。这也会阻断「网络」标签页的 NetBird → LAN 转发。"
+
+msgid "NetBird's own firewall rules (mesh ACL) — separate from the OpenWrt zone and forwarding on the Network tab."
+msgstr "NetBird 自身的防火墙规则（mesh ACL），与「网络」标签页的 OpenWrt 区域和转发是不同层。"
+
+msgid "Select source"
+msgstr "选择来源"
+
+msgid "Switch source"
+msgstr "切换"
+
+# 网络自动化:设备绑定 zone(去 network 接口概念)
+
+msgid "Configure the OpenWrt firewall zone and forwarding rules for NetBird, and select the exit node."
+msgstr "为 NetBird 配置 OpenWrt 防火墙区域和转发规则，并选择出口节点。"
+
+msgid "Creates a dedicated firewall zone bound to the NetBird device so NetBird traffic can flow."
+msgstr "创建一个绑定到 NetBird 设备的专用防火墙区域，使 NetBird 流量得以通行。"
+
+msgid "add/update zone %s bound to the NetBird device (input/output/forward=ACCEPT, masq, mtu_fix)."
+msgstr "添加/更新绑定 NetBird 设备的区域 %s（input/output/forward=ACCEPT、masq、mtu_fix）。"
+
+msgid "Create firewall zone"
+msgstr "创建防火墙区域"
+
+msgid "Remove firewall zone"
+msgstr "移除防火墙区域"
+
+msgid "Removes the NetBird firewall zone and both forwarding rules from OpenWrt. It does not stop the NetBird daemon or remove its wtX device; only the OpenWrt firewall plumbing is removed. Use this before uninstalling, or to undo the setup."
+msgstr "从 OpenWrt 移除 NetBird 防火墙区域和两条转发规则。不会停止 NetBird 守护进程，也不会移除其 wtX 设备；仅移除 OpenWrt 防火墙配置。卸载前或撤销配置时使用。"
+
+msgid "The NetBird firewall zone already exists."
+msgstr "NetBird 防火墙区域已存在。"
+
+msgid "The NetBird firewall zone does not exist yet. Use the \"Create firewall zone\" button below."
+msgstr "NetBird 防火墙区域尚未创建。请使用下方的「创建防火墙区域」按钮。"
+
+msgid "Firewall zone (bound device)"
+msgstr "防火墙区域(绑定设备)"
+
+msgid "The NetBird firewall zone is configured (device: %s)."
+msgstr "NetBird 防火墙区域已配置(设备:%s)。"
+
+msgid "The NetBird firewall zone was auto-created (prerequisite for forwarding)."
+msgstr "已自动创建 NetBird 防火墙区域(转发的前置依赖)。"
+
+# 状态页对端连接列标签:Connection -> Connection mode(连接模式,更准确)
+msgid "Connection mode"
+msgstr "连接模式"
+
+# 认证页"重新连接"按钮(已连接态;do_down→do_up,转发流自愈)
+msgid "Reconnect"
+msgstr "重新连接"
+
+msgid "NetBird reconnected."
+msgstr "NetBird 已重新连接。"
+
+msgid "Reconnect re-establishes the NetBird session while keeping your identity (down then up)."
+msgstr "重新连接会断开后重新建立 NetBird 会话(down 再 up),登录身份保留。"
+
+msgid "Invalid management URL (expected http(s)://host[:port])."
+msgstr "管理 URL 格式非法（应为 http(s)://host[:port]）。"
+
+msgid "The custom URL must start with http:// or https://."
+msgstr "自定义链接必须以 http:// 或 https:// 开头。"
+
+msgid "Could not fetch or parse the latest version from GitHub (network failure or unexpected format)."
+msgstr "无法从 GitHub 获取或解析最新版本号（网络失败或格式异常）。"
+
+msgid "The downloaded file is not a valid ELF executable; installation aborted."
+msgstr "下载的文件不是合法的 ELF 可执行文件，已中止安装。"
+
+msgid "The netbird daemon did not stop in time; replacement aborted to protect the current binary."
+msgstr "netbird 守护进程未能及时停止，已中止替换以保护当前二进制。"
+
+msgid "source must be release, opkg, or custom."
+msgstr "source 必须是 release、opkg 或 custom。"
+
+msgid "The release binary is not downloaded yet — use \"Check for updates / Update now\" first."
+msgstr "Release 二进制尚未下载——请先用「检测更新 / 立即更新」安装。"
+
+msgid "Switching to the custom source requires a valid version."
+msgstr "切换到自定义来源需指定合法的版本号。"
+
+msgid "The system package feed does not provide netbird, so its binary cannot be fetched automatically. Check your package sources, or use the release or custom source."
+msgstr "系统软件源未提供 netbird，无法自动获取其二进制。请检查软件源，或改用 release / 自定义来源。"
+
+msgid "The netbird daemon did not stop in time; switch aborted (the binary was not touched)."
+msgstr "netbird 守护进程未能及时停止，已中止切换（未改动二进制）。"
+
+msgid "The version is missing or invalid."
+msgstr "版本号为空或非法。"
+
+msgid "The netbird binary is not installed."
+msgstr "netbird 二进制未安装。"
+
+msgid "The binary path is empty."
+msgstr "二进制路径为空。"
+
+msgid "\"status --json\" did not return JSON."
+msgstr "「status --json」返回的不是 JSON。"
+
+msgid "Another binary operation is in progress; please wait and try again."
+msgstr "另一个二进制操作正在进行，请稍后重试。"
+
+msgid "Insecure download"
+msgstr "不安全的下载"
+
+msgid "Settings were saved, but the firewall reload did not complete; they will take effect on the next firewall reload or reboot."
+msgstr "设置已保存，但防火墙重载未完成；将在下次防火墙重载或重启后生效。"
+
+msgid "Checksum (optional)"
+msgstr "校验值"
+
+msgid "Checksum verification failed; the download was rejected."
+msgstr "校验值不匹配，已拒绝下载。"
+
+msgid "Not enough storage space. Delete unused downloaded versions and try again."
+msgstr "存储空间不足。请删除未使用的已下载版本后重试。"
+
+msgid "optional — md5 / sha1 / sha256 / sha512 hex"
+msgstr "可选——md5 / sha1 / sha256 / sha512 十六进制"
+
+msgid "If set, the download must match this checksum or it is rejected. Use sha256 or stronger for tamper protection; md5/sha1 only guard against corruption."
+msgstr "若填写，下载物强制校验，否则自动拒绝。抗篡改请用 sha256 及以上；md5/sha1 仅能防意外损坏。"
+
+msgid "Enter a valid checksum: md5 (32), sha1 (40), sha256 (64) or sha512 (128) hex characters."
+msgstr "请输入合法校验和：md5（32）、sha1（40）、sha256（64）或 sha512（128）位十六进制字符。"
+
+msgid "This is a plain http:// URL with no checksum. The downloaded file is executed as root, so a malicious mirror or a man-in-the-middle could run arbitrary code. Prefer https://, or paste a checksum above."
+msgstr "这是明文 http:// 链接且未填校验和。下载物会以 root 执行，恶意镜像或中间人可借此运行任意代码。建议改用 https://，或在上方填入校验和。"
+
+msgid "The checksum must be md5 (32), sha1 (40), sha256 (64) or sha512 (128) hexadecimal characters."
+msgstr "校验和必须是 md5（32）、sha1（40）、sha256（64）或 sha512（128）位十六进制字符。"
+
+msgid "Deregister"
+msgstr "注销"
+
+msgid "Deregister this NetBird device?"
+msgstr "注销此 NetBird 设备？"
+
+msgid "Deregister failed"
+msgstr "注销失败"
+
+msgid "The management server could not deregister this device — it may be unreachable, rebuilt, or it no longer knows this peer. You can remove the local identity only and then log in again with a new setup key. If the device is still listed on the server, remove it there manually."
+msgstr "管理服务器无法注销此设备——服务器可能不可达、已重建，或已不认识本机。你可以仅清除本地身份，然后用新的安装密钥重新登录。如果设备仍显示在服务器上，请到服务器控制台手动删除。"
+
+msgid "Remove local identity only"
+msgstr "仅清除本地身份"
+
+msgid "Local NetBird identity removed. Use a setup key to log in again."
+msgstr "本地 NetBird 身份已清除。请使用安装密钥重新登录。"
+
+msgid "Daemon version is the running daemon; CLI version is the binary on disk. They match unless the binary was switched without restarting the daemon."
+msgstr "守护进程版本为正在运行的 daemon；CLI 版本为磁盘上的二进制。二者通常相同，仅在切换二进制后未重启 daemon 时不同。"
+
+msgid "netbird down failed"
+msgstr "netbird down 执行失败"
+
+msgid "netbird deregister failed"
+msgstr "netbird deregister 执行失败"
+
+msgid "init enable returned a non-zero exit code"
+msgstr "init enable 返回非零退出码"
+
+msgid "init start returned a non-zero exit code"
+msgstr "init start 返回非零退出码"
+
+msgid "Never"
+msgstr "从未"
+
+msgid "Connecting"
+msgstr "连接中"
+
+msgid "Idle"
+msgstr "空闲"
+
+msgid "Preparing download..."
+msgstr "正在准备下载……"
+
+msgid "Downloading..."
+msgstr "正在下载……"
+
+msgid "Download complete. Verifying..."
+msgstr "下载完成，正在校验……"
+
+msgid "Verifying checksum and architecture..."
+msgstr "正在校验校验和与 CPU 架构……"
+
+msgid "Extracting binary..."
+msgstr "正在解压二进制……"
+
+msgid "Installing binary..."
+msgstr "正在安装二进制……"
+
+msgid "Stopping download..."
+msgstr "正在停止下载……"
+
+msgid "Download stopped."
+msgstr "下载已停止。"
+
+msgid "Binary installed."
+msgstr "二进制已安装。"
+
+msgid "Download failed."
+msgstr "下载失败。"
+
+msgid "Downloaded"
+msgstr "已下载"
+
+msgid "Speed"
+msgstr "速度"
+
+msgid "Elapsed"
+msgstr "耗时"
+
+msgid "Stop download"
+msgstr "停止下载"
+
+msgid "Stopping..."
+msgstr "正在停止……"
+
+msgid "Download/install did not complete. Check the device logs and try again."
+msgstr "下载/安装未完成。请检查设备日志后重试。"
+
+msgid "Could not start the download worker."
+msgstr "无法启动下载后台任务。"
+
+msgid "Update luci-app-netbird"
+msgstr "更新 luci-app-netbird"
+
+msgid "luci-app-netbird update available: v%s"
+msgstr "luci-app-netbird 有可用更新：v%s"
+
+msgid "luci-app-netbird is already up to date (v%s)."
+msgstr "luci-app-netbird 已是最新版本（v%s）。"
+
+msgid "Update luci-app-netbird from v%s to v%s?"
+msgstr "将 luci-app-netbird 从 v%s 更新到 v%s？"
+
+msgid "Packages will be downloaded from %s. The page may need to be reloaded after installation."
+msgstr "将从 %s 下载安装包。安装后可能需要重新加载页面。"
+
+msgid "Updating luci-app-netbird"
+msgstr "正在更新 luci-app-netbird"
+
+msgid "Downloading and installing luci-app-netbird packages…"
+msgstr "正在下载并安装 luci-app-netbird 软件包……"
+
+msgid "luci-app-netbird updated to v%s. Reload this page to use the new UI."
+msgstr "luci-app-netbird 已更新到 v%s。请重新加载此页面以使用新版界面。"
+
+msgid "luci-app-netbird update failed: %s"
+msgstr "luci-app-netbird 更新失败：%s"
+
+msgid "unknown error"
+msgstr "未知错误"
+
+msgid "Could not fetch luci-app-netbird package index."
+msgstr "无法获取 luci-app-netbird 软件包索引。"
+
+msgid "Could not parse luci-app-netbird package index."
+msgstr "无法解析 luci-app-netbird 软件包索引。"
+
+msgid "The package index does not contain a valid luci-app-netbird version."
+msgstr "软件包索引中没有合法的 luci-app-netbird 版本。"
+
+msgid "luci-app-netbird is already up to date."
+msgstr "luci-app-netbird 已是最新版本。"
+
+msgid "Could not determine luci-app-netbird package filename."
+msgstr "无法确定 luci-app-netbird 软件包文件名。"
+
+msgid "Hint:"
+msgstr "提示："
+
+msgid "The NetBird operation is still running or took too long. Check the Logs tab, then try again."
+msgstr "NetBird 操作仍在运行或耗时过长。请查看“日志”页后重试。"
+
+msgid "Last authentication error:"
+msgstr "上次认证失败原因："
+
+msgid "Authentication failed: the setup key was rejected by the NetBird management server."
+msgstr "认证失败：NetBird 管理服务器拒绝了此安装密钥。"
+
+msgid "NetBird was stopped to avoid retrying forever. Generate a new setup key and connect again."
+msgstr "已停止 NetBird，避免无限重试。请生成新的安装密钥后重新连接。"
+
+msgid "Authentication failed: NetBird did not receive a valid setup key."
+msgstr "认证失败：NetBird 没有收到有效的安装密钥。"
+
+msgid "NetBird was stopped to avoid retrying forever. Enter a new setup key and connect — re-registering does not require deregistering first, even if the server was rebuilt or this device was removed there."
+msgstr "已停止 NetBird，避免无限重试。请输入新的安装密钥并连接——重新注册无需先注销；即使服务器已重建或设备已在服务器上被移除，同样适用。"
+
+msgid "Authentication failed: this peer is no longer accepted by the management server."
+msgstr "认证失败：管理服务器不再接受此节点。"
+
+msgid "NetBird was stopped to avoid retrying forever. Generate a new setup key and connect again — no need to deregister first; this also recovers a device orphaned by a rebuilt management server."
+msgstr "已停止 NetBird，避免无限重试。请生成新的安装密钥后重新连接——无需先注销；管理服务器重建后残留的旧身份也可用此方式恢复。"
+
+msgid "Authentication failed: the management server rejected this peer."
+msgstr "认证失败：管理服务器拒绝了此节点。"
+
+msgid "NetBird was stopped to avoid retrying forever. Check whether the setup key is valid or whether this device was removed from NetBird."
+msgstr "已停止 NetBird，避免无限重试。请检查安装密钥是否有效，或此设备是否已从 NetBird 移除。"
+
+msgid "The management server is temporarily unreachable."
+msgstr "暂时无法连接管理服务器。"
+
+msgid "Automatic reconnect will keep trying while the desired state is connected."
+msgstr "只要期望状态为已连接，自动重连会继续尝试恢复。"
+
+msgid "NetBird did not become connected before the timeout."
+msgstr "NetBird 未能在超时前进入已连接状态。"
+
+msgid "Check the Logs tab for the last NetBird message, then try again."
+msgstr "请查看“日志”页中的最后一条 NetBird 消息，然后重试。"
+
+msgid "Login failed before NetBird accepted the setup key."
+msgstr "NetBird 接受安装密钥前登录失败。"

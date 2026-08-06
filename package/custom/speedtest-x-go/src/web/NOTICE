@@ -1,0 +1,12 @@
+The Web speed-test engine is derived from Speedtest-X and LibreSpeed.
+
+Speedtest-X:
+  https://github.com/MortyFx/speedtest-x
+  Audited source commit: dd8bbe1080cdfb960307540cff47e76080e4083e
+
+LibreSpeed:
+  Copyright (C) Federico Dossena and contributors
+  https://github.com/librespeed/speedtest
+
+The original JavaScript assets and their notices are retained under the
+GNU Lesser General Public License. See LICENSE in this directory.

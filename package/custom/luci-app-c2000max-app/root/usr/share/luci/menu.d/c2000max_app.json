@@ -1,0 +1,13 @@
+{
+	"admin/system/c2000max-app": {
+		"title": "APP 支持",
+		"order": 95,
+		"action": {
+			"type": "view",
+			"path": "c2000max/app"
+		},
+		"depends": {
+			"acl": [ "c2000max-app" ]
+		}
+	}
+}

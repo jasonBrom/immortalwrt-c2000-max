@@ -1,0 +1,5 @@
+{
+	"admin/system/reboot": {
+		"order": 9999
+	}
+}

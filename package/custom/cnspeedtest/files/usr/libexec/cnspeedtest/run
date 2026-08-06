@@ -1,0 +1,60 @@
+#!/bin/sh
+
+. /lib/functions.sh
+. /usr/libexec/cnspeedtest/identity
+
+ensure_identity
+
+config_load cnspeedtest
+
+config_get listen main listen '0.0.0.0:8787'
+config_get_bool auto main auto 1
+config_get host main host '111.8.9.157'
+config_get port main port '65499'
+config_get duration main duration '15'
+config_get bandwidth main bandwidth '2000'
+config_get download_threads main download_threads '16'
+config_get upload_threads main upload_threads '8'
+config_get probe_count main probe_count '10'
+config_get ping_count main ping_count '4'
+config_get connect_timeout main connect_timeout '1s'
+config_get_bool download main download 1
+config_get_bool upload main upload 1
+config_get_bool no_download_probe main no_download_probe 0
+config_get_bool force_download main force_download 0
+config_get_bool insecure_discovery main insecure_discovery 1
+config_get log_file main log_file '/var/log/cnspeedtest.log'
+
+mkdir -p "$(dirname "$log_file")"
+touch "$log_file"
+
+set -- /usr/bin/cnspeedtest \
+	--web=true \
+	--listen "$listen" \
+	--duration "${duration}s" \
+	--bandwidth "$bandwidth" \
+	--download-threads "$download_threads" \
+	--upload-threads "$upload_threads" \
+	--probe-count "$probe_count" \
+	--ping-count "$ping_count" \
+	--connect-timeout "$connect_timeout" \
+	--download="$download" \
+	--upload="$upload" \
+	--no-download-probe="$no_download_probe" \
+	--force-download="$force_download" \
+	--insecure-discovery="$insecure_discovery" \
+	--imei "$IMEI" \
+	--android-ua "$ANDROID_UA" \
+	--machine-id "$MACHINE_ID"
+
+if [ "$auto" = "1" ]; then
+	set -- "$@" --auto=true
+else
+	set -- "$@" --auto=false --host "$host" --port "$port"
+fi
+
+{
+	echo "==== CNSpeedTest started at $(date '+%Y-%m-%d %H:%M:%S') ===="
+	echo "identity: machine_id=$MACHINE_ID imei=$IMEI android_ua=$ANDROID_UA"
+	exec "$@"
+} >> "$log_file" 2>&1

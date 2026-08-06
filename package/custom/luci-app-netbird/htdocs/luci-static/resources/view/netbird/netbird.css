@@ -1,0 +1,71 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* luci-app-netbird 视图样式:由 dom-helpers.js 注入(只注一次)。 */
+
+/* 标签—值行:左列定宽对齐,右列自适应。解决标签与值贴在一起的问题。 */
+.nb-pair {
+	display: flex;
+	align-items: baseline;
+	padding: 3px 0;
+	gap: 1em;
+}
+.nb-pair-label {
+	flex: 0 0 14em;
+	font-weight: 600;
+	color: #555;
+}
+.nb-pair-value {
+	flex: 1 1 auto;
+	word-break: break-word;
+}
+.nb-pair-value-block {
+	display: block;
+}
+
+/* 连接状态胶囊。 */
+.nb-pill {
+	display: inline-block;
+	padding: 2px 12px;
+	border-radius: 11px;
+	font-weight: 600;
+	font-size: 90%;
+	color: #fff;
+	line-height: 1.6;
+	white-space: nowrap;
+}
+.nb-pill-connected     { background: #2e7d32; }  /* 绿:已连接 */
+.nb-pill-running       { background: #2e7d32; }
+.nb-pill-connecting    { background: #1565c0; }  /* 蓝:连接中 */
+.nb-pill-disconnected  { background: #c62828; }  /* 红:已断开 */
+.nb-pill-error         { background: #c62828; }
+.nb-pill-needs_login   { background: #ef6c00; }  /* 橙:需登录 */
+.nb-pill-service_stopped   { background: #ef6c00; }
+.nb-pill-service_disabled  { background: #ef6c00; }
+.nb-pill-not_installed { background: #757575; }  /* 灰:未安装 */
+.nb-pill-unknown       { background: #757575; }
+
+/* 顶部状态横幅。 */
+.nb-banner {
+	display: flex;
+	align-items: center;
+	gap: 0.75em;
+	padding: 6px 0;
+}
+.nb-banner-hint { color: #666; }
+
+/* 认证页「上次使用」打码密钥提示：等宽 + muted，便于辨认打码串。 */
+.nb-key-hint { font-family: monospace; color: #888; }
+
+/* 连接信息块容器留点上边距。 */
+.nb-conn-info { margin-top: 4px; }
+
+/* 日志 Tab 表格列样式。 */
+.nb-log-time  { white-space: nowrap; font-size: 0.85em; color: #555; min-width: 160px; }
+.nb-log-sev   { font-weight: 600; white-space: nowrap; min-width: 60px; }
+.nb-log-proc  { font-family: monospace; font-size: 0.88em; white-space: nowrap; min-width: 120px; }
+.nb-log-msg   { word-break: break-word; font-family: monospace; font-size: 0.88em; }
+
+/* 严重性着色。 */
+.nb-sev-error { color: #c62828; }
+.nb-sev-warn  { color: #e65100; }
+.nb-sev-info  { color: #1565c0; }
+.nb-sev-debug { color: #757575; }

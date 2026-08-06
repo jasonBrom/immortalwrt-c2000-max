@@ -1,0 +1,6 @@
+#!/bin/sh
+
+PRIVATE_RUNTIME=/usr/lib/c2000max-rweb-compat
+export LD_LIBRARY_PATH="$PRIVATE_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+exec "$PRIVATE_RUNTIME/wget-ssl" "$@"

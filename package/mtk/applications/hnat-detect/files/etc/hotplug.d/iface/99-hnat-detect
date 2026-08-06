@@ -1,5 +1,28 @@
 #!/bin/sh
-[ "$ACTION" = "ifup" ] || [ "$ACTION" = "update" ] || exit 0
+
+. /lib/functions.sh
+
 [ "$INTERFACE" = "loopback" ] && exit 0
 
-/usr/bin/ucode /usr/share/ucode/hnat/detect.uc
+if [ "$(board_name)" = "nradio,c2000-max" ]; then
+	case "$ACTION" in
+		ifup|ifdown|update) ;;
+		*) exit 0 ;;
+	esac
+	ROLE_LIB=/usr/lib/c2000max/port-role.sh
+	if [ ! -r "$ROLE_LIB" ]; then
+		[ ! -w /sys/kernel/debug/hnat/hook_toggle ] ||
+			echo 0 > /sys/kernel/debug/hnat/hook_toggle
+		exit 1
+	fi
+	. "$ROLE_LIB"
+	# The board transaction owns convergence while its marker is present.
+	# Outside that window, every relevant network event runs the single
+	# controller so direct UCI edits also turn stale HNAT hooks off.
+	[ ! -e "$C2000_SWITCHING" ] || exit 0
+	exec /etc/init.d/c2000max-hnat reload
+fi
+
+[ "$ACTION" = "ifup" ] || [ "$ACTION" = "update" ] || exit 0
+export HNAT_DETECT_STRICT=1
+exec /usr/bin/ucode /usr/share/ucode/hnat/detect.uc

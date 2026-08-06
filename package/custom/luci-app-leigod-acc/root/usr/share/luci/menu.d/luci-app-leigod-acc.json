@@ -1,0 +1,59 @@
+{
+	"admin/services/acc": {
+		"title": "雷神加速器",
+		"order": 50,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"fs": {
+				"/usr/sbin/leigod/acc-gw.linux.arm64": "executable"
+			}
+		}
+	},
+
+	"admin/services/acc/service": {
+		"title": "基本设置",
+		"order": 10,
+		"action": {
+			"type": "cbi",
+			"path": "leigod/service"
+		}
+	},
+
+	"admin/services/acc/device": {
+		"title": "设备管理",
+		"order": 20,
+		"action": {
+			"type": "cbi",
+			"path": "leigod/device"
+		}
+	},
+
+	"admin/services/acc/app": {
+		"title": "客户端",
+		"order": 30,
+		"action": {
+			"type": "cbi",
+			"path": "leigod/app"
+		}
+	},
+
+	"admin/services/acc/notice": {
+		"title": "使用说明",
+		"order": 40,
+		"action": {
+			"type": "cbi",
+			"path": "leigod/notice"
+		}
+	},
+
+	"admin/services/acc/status": {
+		"action": {
+			"type": "call",
+			"module": "luci.controller.acc",
+			"function": "get_acc_status"
+		},
+		"firstchild_ineligible": true
+	}
+}

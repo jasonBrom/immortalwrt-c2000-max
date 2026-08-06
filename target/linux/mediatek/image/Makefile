@@ -6,6 +6,13 @@
 include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/image.mk
 
+# The C2000-MAX kernel can mount an ARM-BCJ SquashFS but fails while reading
+# filtered XZ streams. Keep plain XZ for this device so normal `make` output is
+# directly usable and does not require post-build rootfs repacking.
+ifeq ($(CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_nradio_c2000-max),y)
+SQUASHFSCOMP := xz $(LZMA_XZ_OPTIONS)
+endif
+
 DEVICE_VARS += NETGEAR_ENC_MODEL NETGEAR_ENC_REGION NETGEAR_ENC_HW_ID_LIST NETGEAR_ENC_MODEL_LIST
 
 loadaddr-$(CONFIG_TARGET_mediatek_mt7622) := 0x44000000
@@ -46,4 +53,3 @@ define Image/Build
 endef
 
 $(eval $(call BuildImage))
-

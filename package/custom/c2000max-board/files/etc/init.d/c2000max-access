@@ -1,0 +1,25 @@
+#!/bin/sh /etc/rc.common
+
+START=21
+STOP=88
+USE_PROCD=1
+
+start_service()
+{
+	/usr/sbin/c2000max-access apply
+}
+
+reload_service()
+{
+	/usr/sbin/c2000max-access apply
+}
+
+stop_service()
+{
+	/usr/sbin/c2000max-access stop
+}
+
+service_triggers()
+{
+	procd_add_reload_trigger c2000max
+}

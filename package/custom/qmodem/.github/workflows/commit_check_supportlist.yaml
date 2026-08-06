@@ -1,0 +1,44 @@
+name: "Update Support List"
+on:
+    push:
+        branches:
+            - 'main'
+        # only run when "luci/luci-app-qmodem/root/usr/share/qmodem/modem_support.json" is changed
+        paths:
+            - 'application/qmodem/files/usr/share/qmodem/modem_support.json'
+
+env:
+    TZ: Asia/Shanghai
+
+jobs:
+    update_support_list:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v2
+              env:
+                GH_TOKEN: ${{ github.token }}
+                branch_name: ${{ github.ref_name }}
+              with:
+                path: 'qmodem'
+
+
+            - name: Update Modem_support_list
+              id: update_modem_support_list
+              run: |
+                cd qmodem
+                is_json_invalid=0
+                is_diff=0
+                python3 ./scripts/update_support_list.py temp_support_list ./application/qmodem/files/usr/share/qmodem/modem_support.json || is_json_invalid=1
+                diff ./temp_support_list.md ./docs/support_list.md -u > /tmp/file_diff.txt || is_diff=1
+                if [ "$is_json_invalid" == "1" ];then
+                    exit 1
+                fi
+                if [ "$is_diff" == "1" ];then 
+                    mv temp_support_list.md ./docs/support_list.md
+                    git config --global user.name "GitHub Action"
+                    git config --global user.email "github-action@users.noreply.github.com"
+                    git add ./docs/support_list.md
+                    git commit -m "Update support list"
+                    git push origin ${{ env.branch_name }}
+                fi

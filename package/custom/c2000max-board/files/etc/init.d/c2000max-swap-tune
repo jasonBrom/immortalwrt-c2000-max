@@ -1,0 +1,14 @@
+#!/bin/sh /etc/rc.common
+
+START=16
+
+start()
+{
+	/usr/sbin/c2000max-swap tune >/dev/null 2>&1 ||
+		logger -t c2000max-swap "无法应用 vm.swappiness 设置"
+}
+
+reload()
+{
+	start
+}

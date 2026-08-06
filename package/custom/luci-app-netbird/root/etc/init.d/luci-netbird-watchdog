@@ -1,0 +1,19 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: Apache-2.0
+#
+# luci-netbird-watchdog — LuCI 层轻量自动重连守护。
+# 只负责在用户期望保持连接(desired_connected=1)时恢复瞬时断线;认证 fatal 交给脚本停重试。
+
+START=99
+USE_PROCD=1
+
+PROG=/usr/share/netbird/netbird-autoreconnect.sh
+
+start_service() {
+	[ -x "$PROG" ] || return 0
+
+	procd_open_instance
+	procd_set_param command "$PROG"
+	procd_set_param respawn 3600 5 5
+	procd_close_instance
+}

@@ -1,0 +1,57 @@
+{
+	"admin/modem/c2000max": {
+		"title": "SIM 卡切换",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "c2000max/sim_v8"
+		},
+		"depends": {
+			"acl": [ "c2000max" ]
+		}
+	},
+	"admin/system/c2000max-fan": {
+		"title": "智能风扇控制",
+		"order": 55,
+		"action": {
+			"type": "view",
+			"path": "c2000max/fan"
+		},
+		"depends": {
+			"acl": [ "c2000max" ]
+		}
+	},
+	"admin/system/c2000max-swap": {
+		"title": "SWAP / ZRAM",
+		"order": 56,
+		"action": {
+			"type": "view",
+			"path": "c2000max/swap_v352"
+		},
+		"depends": {
+			"acl": [ "c2000max" ]
+		}
+	},
+	"admin/network/c2000max-port-role": {
+		"title": "网口 LAN / WAN",
+		"order": 90,
+		"action": {
+			"type": "view",
+			"path": "c2000max/port_role_v31"
+		},
+		"depends": {
+			"acl": [ "c2000max" ]
+		}
+	},
+	"admin/network/c2000max-access": {
+		"title": "设备上网控制",
+		"order": 91,
+		"action": {
+			"type": "view",
+			"path": "c2000max/access_v352"
+		},
+		"depends": {
+			"acl": [ "c2000max" ]
+		}
+	}
+}

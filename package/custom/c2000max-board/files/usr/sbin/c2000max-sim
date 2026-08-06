@@ -1,0 +1,670 @@
+#!/bin/sh
+
+if [ "${C2000MAX_SIM_LIBRARY_ONLY:-0}" != 1 ]; then
+	. /usr/share/libubox/jshn.sh
+	. /usr/share/qmodem/modem_util.sh
+fi
+
+TAG="c2000max-sim"
+LOCK="/var/lock/c2000max-sim.lock"
+GPIO_SIM="/sys/class/gpio/cpe-sel0/value"
+GPIO_POWER="/sys/class/gpio/cpe-pwr/value"
+LAST_ERROR=""
+SWITCH_MESSAGE=""
+HUAWEI_ACTIVATION_WARNING=0
+SIM_LOCK_HELD=0
+AT_TRANSACTION_HELD=0
+AT_TRANSACTION_PORT=
+
+log() {
+	logger -t "$TAG" "$*"
+}
+
+fail() {
+	LAST_ERROR="$*"
+	log "$LAST_ERROR"
+	return 1
+}
+
+first_qmodem_section() {
+	uci -q show qmodem 2>/dev/null |
+		sed -n 's/^qmodem\.\([^.]*\)\.at_port=.*/\1/p' |
+		sed -n '1p'
+}
+
+qmodem_get() {
+	local section="$1" option="$2"
+	[ -n "$section" ] && uci -q get "qmodem.$section.$option"
+}
+
+resolve_port() {
+	local section="$1" configured candidate
+	configured="$(uci -q get c2000max.sim.at_port)"
+	if [ -n "$configured" ] && [ "$configured" != auto ]; then
+		echo "$configured"
+		return
+	fi
+
+	if [ -n "$section" ]; then
+		configured="$(qmodem_get "$section" override_at_port)"
+		[ -n "$configured" ] || configured="$(qmodem_get "$section" at_port)"
+		[ -n "$configured" ] && {
+			echo "$configured"
+			return
+		}
+	fi
+
+	for candidate in /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB0 \
+		/dev/ttyACM0 /dev/mhi_DUN /dev/wwan0at0; do
+		[ -c "$candidate" ] && {
+			echo "$candidate"
+			return
+		}
+	done
+}
+
+wait_for_port() {
+	local port="$1" retries="${2:-20}"
+	while [ "$retries" -gt 0 ]; do
+		[ -c "$port" ] && return 0
+		sleep 1
+		retries=$((retries - 1))
+	done
+	return 1
+}
+
+send_at() {
+	local port="$1" command="$2"
+	# Never open the modem TTY beside QModem.  at_timeout() enters the shared
+	# per-port/global queue, or recognises the surrounding SIM transaction.
+	QMODEM_AT_BACKEND=ubus at_timeout "$port" "$command" 10
+}
+
+begin_at_transaction() {
+	local port="$1"
+	[ "$AT_TRANSACTION_HELD" = 0 ] || return 0
+	AT_TRANSACTION_PORT="$port"
+	AT_TRANSACTION_HELD=1
+	if ! qmodem_at_transaction_begin "$port"; then
+		end_at_transaction
+		return 1
+	fi
+}
+
+end_at_transaction() {
+	[ "$AT_TRANSACTION_HELD" = 1 ] || return 0
+	qmodem_at_transaction_end "$AT_TRANSACTION_PORT"
+	AT_TRANSACTION_HELD=0
+	AT_TRANSACTION_PORT=
+}
+
+cleanup_locks() {
+	end_at_transaction
+	if [ "$SIM_LOCK_HELD" = 1 ]; then
+		lock -u "$LOCK"
+		SIM_LOCK_HELD=0
+	fi
+}
+
+at_response_ok() {
+	printf '%s\n' "$1" | tr -d '\r' | grep -qx 'OK'
+}
+
+clean_identity() {
+	printf '%s\n' "$1" | tr -d '\r' |
+		sed -e '/^[[:space:]]*$/d' \
+		    -e '/^[[:space:]]*AT[+^]/d' \
+		    -e '/^[[:space:]]*OK[[:space:]]*$/d' \
+		    -e '/^[[:space:]]*ERROR[[:space:]]*$/d' \
+		    -e 's/^[+^][A-Z0-9_-]*:[[:space:]]*//' \
+		    -e 's/^"//' -e 's/"$//' |
+		sed -n '1p'
+}
+
+resolve_model() {
+	local section="$1" port="$2" model
+	for option in name model modem_name; do
+		model="$(qmodem_get "$section" "$option")"
+		[ -n "$model" ] && {
+			echo "$model"
+			return
+		}
+	done
+	model="$(clean_identity "$(send_at "$port" 'AT+CGMM' 2>/dev/null)")"
+	[ -n "$model" ] || model="$(clean_identity "$(send_at "$port" 'AT+CGMM?' 2>/dev/null)")"
+	echo "${model:-未知模组}"
+}
+
+resolve_vendor() {
+	local section="$1" port="$2" model="$3" configured manufacturer identity
+	configured="$(uci -q get c2000max.sim.vendor)"
+	case "$configured" in
+		huawei|fibocom|quectel) echo "$configured"; return ;;
+	esac
+
+	manufacturer="$(qmodem_get "$section" manufacturer)"
+	identity="$(printf '%s %s' "$manufacturer" "$model" | tr '[:upper:]' '[:lower:]')"
+	case "$identity" in
+		*huawei*|*tdtech*|*td\ tech*|*mt5700*) echo huawei; return ;;
+		*fibocom*|*fm350*) echo fibocom; return ;;
+		*quectel*|*rm520*) echo quectel; return ;;
+	esac
+
+	manufacturer="$(clean_identity "$(send_at "$port" 'AT+CGMI' 2>/dev/null)")"
+	identity="$(printf '%s %s' "$manufacturer" "$model" | tr '[:upper:]' '[:lower:]')"
+	case "$identity" in
+		*huawei*|*tdtech*|*td\ tech*|*mt5700*) echo huawei ;;
+		*fibocom*|*fm350*) echo fibocom ;;
+		*quectel*|*rm520*) echo quectel ;;
+		*) echo unknown ;;
+	esac
+}
+
+normalize_slot() {
+	case "$1" in
+		internal|embedded1) echo internal ;;
+		external1|sim1) echo external1 ;;
+		external2|sim2) echo external2 ;;
+	esac
+}
+
+gpio_sim_value() {
+	case "$1" in
+		external1) echo 0 ;;
+		external2|internal) echo 1 ;;
+	esac
+}
+
+module_channel() {
+	case "$1" in
+		external2) echo 1 ;;
+		external1|internal) echo 2 ;;
+	esac
+}
+
+read_gpio_mux() {
+	cat "$GPIO_SIM" 2>/dev/null
+}
+
+write_gpio_mux() {
+	local value="$1"
+	[ -w "$GPIO_SIM" ] || {
+		fail "SIM 复用 GPIO 不可用"
+		return 1
+	}
+	echo "$value" > "$GPIO_SIM" || {
+		fail "无法写入 SIM 复用 GPIO"
+		return 1
+	}
+}
+
+force_gpio_slot() {
+	local requested="$1" slot target_mux current_mux
+	slot="$(normalize_slot "$requested")"
+	case "$slot" in
+		external1|external2) ;;
+		*)
+			fail "强制 GPIO 模式仅允许选择两个外置卡槽"
+			return 1
+			;;
+	esac
+	target_mux="$(gpio_sim_value "$slot")"
+	[ -w "$GPIO_SIM" ] || {
+		fail "SIM 复用 GPIO 不可用"
+		return 1
+	}
+	current_mux="$(read_gpio_mux)"
+	write_gpio_mux "$target_mux" || return 1
+	uci -q set "c2000max.sim.last_forced_slot=$slot"
+	uci -q set "c2000max.sim.last_forced_gpio=$target_mux"
+	uci -q commit c2000max
+	log "forced GPIO SIM mux: $current_mux -> $target_mux (requested=$slot, no modem AT command)"
+}
+
+query_huawei_channel() {
+	local response selector
+	response="$(send_at "$1" 'AT^SCICHG?' 2>/dev/null | tr -d '\r')"
+	selector="$(printf '%s\n' "$response" |
+		sed -n 's/.*\^SCICHG:[[:space:]]*\([01]\)[[:space:]]*,[[:space:]]*\([01]\).*/\1,\2/p' |
+		sed -n '1p')"
+	case "$selector" in
+		0,1) echo 1 ;;
+		1,0) echo 2 ;;
+	esac
+}
+
+query_fibocom_channel() {
+	local response value
+	response="$(send_at "$1" 'AT+GTDUALSIM?' 2>/dev/null | tr -d '\r')"
+	value="$(printf '%s\n' "$response" |
+		sed -n 's/.*+GTDUALSIM:[[:space:]]*\([01]\).*/\1/p' | sed -n '1p')"
+	# A few older Fibocom firmware branches report MAIN/SUB instead of the
+	# numeric FM350 format. Accept both without changing the canonical mapping.
+	if [ -z "$value" ]; then
+		case "$(printf '%s\n' "$response" | tr '[:lower:]' '[:upper:]')" in
+			*+GTDUALSIM:*MAIN*) value=0 ;;
+			*+GTDUALSIM:*SUB*) value=1 ;;
+		esac
+	fi
+	case "$value" in
+		0) echo 1 ;;
+		1) echo 2 ;;
+	esac
+}
+
+query_quectel_channel() {
+	local value
+	value="$(send_at "$1" 'AT+QUIMSLOT?' 2>/dev/null | tr -d '\r' |
+		sed -n 's/.*+\(QUIMSLOT\|QUSIMSLOT\):[[:space:]]*\([12]\).*/\2/p' | sed -n '1p')"
+	case "$value" in
+		1) echo 1 ;;
+		2) echo 2 ;;
+	esac
+}
+
+query_module_channel() {
+	case "$1" in
+		huawei) query_huawei_channel "$2" ;;
+		fibocom) query_fibocom_channel "$2" ;;
+		quectel) query_quectel_channel "$2" ;;
+	esac
+}
+
+route_from_state() {
+	local channel="$1" gpio="$2"
+	case "$channel-$gpio" in
+		1-0|1-1) echo external2 ;;
+		2-0) echo external1 ;;
+		2-1) echo internal ;;
+		*) echo unknown ;;
+	esac
+}
+
+query_hvsst() {
+	send_at "$1" 'AT^HVSST?' 2>/dev/null | tr -d '\r' |
+		sed -n 's/.*\^HVSST:[[:space:]]*\([0-9]\)[[:space:]]*,[[:space:]]*\([0-9]\)[[:space:]]*,[[:space:]]*\([0-9]\)[[:space:]]*,[[:space:]]*\([0-9]\).*/\1,\2,\3,\4/p' |
+		sed -n '1p'
+}
+
+query_cpin() {
+	send_at "$1" 'AT+CPIN?' 2>/dev/null | tr -d '\r' |
+		sed -n 's/.*+CPIN:[[:space:]]*//p' | sed -n '1p'
+}
+
+extract_iccid() {
+	# MT5700 firmware may expose raw BCD nibbles (for example the verified
+	# 898600C82525CA018033), while Fibocom/Quectel normally return digits only.
+	printf '%s\n' "$1" | tr -d '\r "' | grep -Eo '[0-9A-Fa-f]{18,22}' |
+		sed -n '1p' | tr 'a-f' 'A-F' | sed 's/F$//'
+}
+
+query_iccid() {
+	local vendor="$1" port="$2" command response iccid
+	case "$vendor" in
+		huawei) commands='AT^ICCID? AT+CCID' ;;
+		fibocom) commands='AT+CCID? AT+ICCID?' ;;
+		quectel) commands='AT+QCCID AT+CCID' ;;
+		*) commands='AT+CCID AT+ICCID?' ;;
+	esac
+	for command in $commands; do
+		response="$(send_at "$port" "$command" 2>/dev/null)"
+		iccid="$(extract_iccid "$response")"
+		[ -n "$iccid" ] && {
+			echo "$iccid"
+			return
+		}
+	done
+}
+
+carrier_by_iccid() {
+	case "$1" in
+		898600*|898602*|898604*|898607*|898608*) echo 中国移动 ;;
+		898601*|898606*|898609*) echo 中国联通 ;;
+		898603*|898605*|898611*) echo 中国电信 ;;
+		898615*) echo 中国广电 ;;
+		'') echo 未检测到 ;;
+		*) echo 未知运营商 ;;
+	esac
+}
+
+switch_huawei() {
+	local port="$1" target_channel="$2" target_mux="$3"
+	local current_channel current_mux desired response channel_changed=0 mux_changed=0
+	HUAWEI_ACTIVATION_WARNING=0
+	current_channel="$(query_huawei_channel "$port")"
+	current_mux="$(read_gpio_mux)"
+	[ "$current_channel" != "$target_channel" ] && channel_changed=1
+	[ "$current_mux" != "$target_mux" ] && mux_changed=1
+	[ "$channel_changed" = 1 ] || [ "$mux_changed" = 1 ] || return 0
+
+	# GPIO48 only drives the external-SIM1/internal-SIM mux on module channel 2.
+	# Deactivate that SIM interface before changing the mux, exactly as verified
+	# on MT5700M-CN with AT^HVSST. An empty or already inactive slot may reject
+	# HVSST=1,0; that does not prevent SCICHG/GPIO from selecting a new route.
+	if [ "$current_channel" = 2 ] || [ "$target_channel" = 2 ]; then
+		response="$(send_at "$port" 'AT^HVSST=1,0' 2>/dev/null)"
+		at_response_ok "$response" ||
+			log "MT5700 current SIM interface was already inactive; continuing route switch"
+		sleep 1
+	fi
+
+	[ "$mux_changed" = 0 ] || write_gpio_mux "$target_mux" || return 1
+
+	if [ "$channel_changed" = 1 ]; then
+		case "$target_channel" in
+			1) desired='0,1' ;;
+			2) desired='1,0' ;;
+		esac
+		response="$(send_at "$port" "AT^SCICHG=$desired" 2>/dev/null)"
+		if ! at_response_ok "$response"; then
+			# GPIO may have been prepared for channel 2 before SCICHG. Restore
+			# the exact previous mux when the critical channel command fails.
+			[ "$mux_changed" = 0 ] || write_gpio_mux "$current_mux" >/dev/null 2>&1
+			send_at "$port" 'AT^HVSST=1,1' >/dev/null 2>&1
+			return 1
+		fi
+	fi
+
+	if [ "$current_channel" = 2 ] || [ "$target_channel" = 2 ]; then
+		sleep 1
+		response="$(send_at "$port" 'AT^HVSST=1,1' 2>/dev/null)"
+		if ! at_response_ok "$response"; then
+			# Selecting an empty external tray is valid. MT5700 reports an
+			# activation error because no SIM can be powered, while SCICHG and
+			# GPIO already identify the requested physical slot.
+			HUAWEI_ACTIVATION_WARNING=1
+			log "MT5700 route selected but target SIM interface did not activate (slot may be empty)"
+		fi
+	fi
+
+	# A full radio reinitialization after changing module channels was verified
+	# on the target hardware and avoids leaving the old registration context.
+	if [ "$channel_changed" = 1 ]; then
+		send_at "$port" 'AT+CFUN=0' >/dev/null 2>&1
+		sleep 3
+		send_at "$port" 'AT+CFUN=1' >/dev/null 2>&1
+	fi
+	return 0
+}
+
+switch_fibocom() {
+	local port="$1" target_channel="$2" target_mux="$3"
+	local current_channel current_mux target_value response
+	current_channel="$(query_fibocom_channel "$port")"
+	current_mux="$(read_gpio_mux)"
+	[ "$current_channel" = "$target_channel" ] && [ "$current_mux" = "$target_mux" ] && return 0
+
+	# For a GPIO-only change the active SIM2 interface must first be powered down.
+	if [ "$current_channel" = 2 ] && [ "$target_channel" = 2 ]; then
+		send_at "$port" 'AT+CFUN=0' >/dev/null 2>&1
+		sleep 2
+		write_gpio_mux "$target_mux" || return 1
+		send_at "$port" 'AT+CFUN=1' >/dev/null 2>&1
+		return 0
+	fi
+
+	# When entering channel 2, prepare the inactive mux before switching. When
+	# leaving it, switch the modem first and only then restore canonical GPIO=1.
+	[ "$target_channel" != 2 ] || write_gpio_mux "$target_mux" || return 1
+	case "$target_channel" in
+		1) target_value=0 ;;
+		2) target_value=1 ;;
+	esac
+	response="$(send_at "$port" "AT+GTDUALSIM=$target_value" 2>/dev/null)"
+	at_response_ok "$response" || return 1
+	[ "$target_channel" != 1 ] || write_gpio_mux "$target_mux" || return 1
+	return 0
+}
+
+switch_quectel() {
+	local port="$1" target_channel="$2" target_mux="$3"
+	local current_channel current_mux response
+	current_channel="$(query_quectel_channel "$port")"
+	current_mux="$(read_gpio_mux)"
+	[ "$current_channel" = "$target_channel" ] && [ "$current_mux" = "$target_mux" ] && return 0
+
+	if [ "$current_channel" = 2 ] && [ "$target_channel" = 2 ]; then
+		send_at "$port" 'AT+CFUN=0' >/dev/null 2>&1
+		sleep 2
+		write_gpio_mux "$target_mux" || return 1
+		send_at "$port" 'AT+CFUN=1' >/dev/null 2>&1
+		return 0
+	fi
+
+	[ "$target_channel" != 2 ] || write_gpio_mux "$target_mux" || return 1
+	response="$(send_at "$port" "AT+QUIMSLOT=$target_channel" 2>/dev/null)"
+	at_response_ok "$response" || return 1
+	[ "$target_channel" != 1 ] || write_gpio_mux "$target_mux" || return 1
+	return 0
+}
+
+wait_for_route() {
+	local vendor="$1" port="$2" target="$3" retries=15 channel gpio route
+	while [ "$retries" -gt 0 ]; do
+		channel="$(query_module_channel "$vendor" "$port")"
+		gpio="$(read_gpio_mux)"
+		route="$(route_from_state "$channel" "$gpio")"
+		[ "$route" = "$target" ] && return 0
+		sleep 1
+		retries=$((retries - 1))
+	done
+	return 1
+}
+
+apply_slot() {
+	local requested="$1" slot section port model vendor target_mux target_channel
+	SWITCH_MESSAGE=""
+	HUAWEI_ACTIVATION_WARNING=0
+	slot="$(normalize_slot "$requested")"
+	[ -n "$slot" ] || {
+		fail "无效卡槽：$requested"
+		return 1
+	}
+	section="$(first_qmodem_section)"
+	port="$(resolve_port "$section")"
+	[ -n "$port" ] || {
+		fail "QModem 尚未发现 AT 串口"
+		return 1
+	}
+	wait_for_port "$port" 30 || {
+		fail "AT 串口 $port 未就绪"
+		return 1
+	}
+	[ -w "$GPIO_SIM" ] || {
+		fail "SIM 复用 GPIO 不可用"
+		return 1
+	}
+
+	model="$(resolve_model "$section" "$port")"
+	vendor="$(resolve_vendor "$section" "$port" "$model")"
+	case "$vendor" in
+		huawei|fibocom|quectel) ;;
+		*) fail "暂不支持模组：$model" ; return 1 ;;
+	esac
+
+	target_mux="$(gpio_sim_value "$slot")"
+	target_channel="$(module_channel "$slot")"
+	case "$vendor" in
+		huawei) switch_huawei "$port" "$target_channel" "$target_mux" || fail "MT5700 SIM 切换命令失败" ;;
+		fibocom) switch_fibocom "$port" "$target_channel" "$target_mux" || fail "FM350 SIM 切换命令失败" ;;
+		quectel) switch_quectel "$port" "$target_channel" "$target_mux" || fail "RM520 SIM 切换命令失败" ;;
+	esac
+	[ -z "$LAST_ERROR" ] || return 1
+
+	wait_for_route "$vendor" "$port" "$slot" || fail "切换后的 GPIO/模组槽位校验失败"
+	[ -z "$LAST_ERROR" ] || return 1
+	if [ "$vendor" = huawei ] && [ "$HUAWEI_ACTIVATION_WARNING" = 1 ]; then
+		SWITCH_MESSAGE="卡槽已切换；目标卡槽未能立即激活 SIM（空槽时属于正常状态）"
+	fi
+	uci -q set "c2000max.sim.slot=$slot"
+	uci -q delete c2000max.sim.last_forced_slot
+	uci -q delete c2000max.sim.last_forced_gpio
+	uci -q commit c2000max
+	if [ -n "$section" ] && [ -x /etc/init.d/qmodem_network ]; then
+		/etc/init.d/qmodem_network redial "$section" >/dev/null 2>&1 &
+	fi
+	log "selected $slot (mux=$target_mux, module-channel=$target_channel, modem=$model, port=$port)"
+}
+
+status_json() {
+	local success="$1" message="$2" section port model manufacturer platform vendor
+	local gpio channel route route_state hvsst h_enable h_slot cpin iccid carrier configured selector
+	local forced_slot forced_gpio
+	section="$(first_qmodem_section)"
+	port="$(resolve_port "$section")"
+	configured="$(uci -q get c2000max.sim.slot)"
+	forced_slot="$(uci -q get c2000max.sim.last_forced_slot)"
+	forced_gpio="$(uci -q get c2000max.sim.last_forced_gpio)"
+	manufacturer="$(qmodem_get "$section" manufacturer)"
+	platform="$(qmodem_get "$section" platform)"
+	if [ -n "$port" ] && [ -c "$port" ]; then
+		model="$(resolve_model "$section" "$port")"
+		vendor="$(resolve_vendor "$section" "$port" "$model")"
+		gpio="$(read_gpio_mux)"
+		channel="$(query_module_channel "$vendor" "$port")"
+		route="$(route_from_state "$channel" "$gpio")"
+		cpin="$(query_cpin "$port")"
+		iccid="$(query_iccid "$vendor" "$port")"
+		carrier="$(carrier_by_iccid "$iccid")"
+		[ "$channel" = 1 ] && selector="channel1"
+		[ "$channel" = 2 ] && selector="channel2"
+		if [ "$route" = unknown ] || [ -z "$channel" ]; then
+			route_state=unknown
+		elif [ "$channel" = 1 ] && [ "$gpio" != 1 ]; then
+			route_state=noncanonical
+		else
+			route_state=stable
+		fi
+		if [ "$vendor" = huawei ]; then
+			hvsst="$(query_hvsst "$port")"
+			if [ -n "$hvsst" ]; then
+				h_enable="$(printf '%s' "$hvsst" | cut -d, -f2)"
+				h_slot="$(printf '%s' "$hvsst" | cut -d, -f3)"
+				[ "$h_enable" = 1 ] || route_state=inactive
+				[ -z "$channel" ] || [ "$h_slot" = $((channel - 1)) ] || route_state=inconsistent
+			fi
+		fi
+	else
+		model="$(qmodem_get "$section" name)"
+		vendor=unknown
+		route=unknown
+		route_state=offline
+		carrier=未检测到
+	fi
+
+	json_init
+	[ -z "$success" ] || json_add_boolean success "$success"
+	[ -z "$message" ] || json_add_string message "$message"
+	json_add_boolean available "$([ -n "$port" ] && [ -c "$port" ] && echo 1 || echo 0)"
+	json_add_string qmodem_section "${section:-未发现}"
+	json_add_string at_port "${port:-未发现}"
+	json_add_string model "${model:-未知模组}"
+	json_add_string manufacturer "${manufacturer:-未知}"
+	json_add_string platform "${platform:-未知}"
+	json_add_string vendor "${vendor:-unknown}"
+	json_add_string configured_slot "${configured:-external2}"
+	json_add_string current_slot "${route:-unknown}"
+	json_add_string route_state "${route_state:-unknown}"
+	json_add_string gpio_mux "${gpio:-}"
+	json_add_string module_channel "${channel:-}"
+	json_add_string selector "${selector:-}"
+	json_add_string hvsst "${hvsst:-}"
+	json_add_string cpin "${cpin:-未知}"
+	json_add_string iccid "${iccid:-}"
+	json_add_string carrier "${carrier:-未知运营商}"
+	json_add_string forced_slot "${forced_slot:-}"
+	json_add_string forced_gpio "${forced_gpio:-}"
+	json_dump
+}
+
+serialized_status_json() {
+	local section port rc held_here=0
+	section="$(first_qmodem_section)"
+	port="$(resolve_port "$section")"
+	if [ -n "$port" ] && [ -c "$port" ] &&
+		! qmodem_at_transaction_active "$port"; then
+		begin_at_transaction "$port" || {
+			status_json 0 "QModem AT 队列不可用"
+			return 1
+		}
+		held_here=1
+	fi
+	status_json "$@"
+	rc=$?
+	[ "$held_here" = 0 ] || end_at_transaction
+	return "$rc"
+}
+
+reset_modem() {
+	[ -w "$GPIO_POWER" ] || fail "模组电源 GPIO 不可用"
+	echo 0 > "$GPIO_POWER"
+	sleep 1
+	echo 1 > "$GPIO_POWER"
+	log "modem hard reset requested"
+}
+
+[ "${C2000MAX_SIM_LIBRARY_ONLY:-0}" = 1 ] && return 0 2>/dev/null
+
+command="${1:-apply}"
+case "$command" in
+	apply|switch)
+		slot="${2:-$(uci -q get c2000max.sim.slot)}"
+		# BusyBox lock(1) takes no timeout argument. Its -w option merely waits
+		# for an existing lock to disappear without acquiring it, so the old
+		# "-w 90" invocation was invalid and every switch was reported busy.
+		# Acquire the real SIM lock non-blockingly instead.
+		lock -n "$LOCK" || {
+			serialized_status_json 0 "SIM 切换正忙"
+			exit 1
+		}
+		SIM_LOCK_HELD=1
+		trap cleanup_locks EXIT
+		trap 'exit 128' INT TERM
+		section="$(first_qmodem_section)"
+		at_port="$(resolve_port "$section")"
+		if [ -n "$at_port" ] && wait_for_port "$at_port" 30; then
+			begin_at_transaction "$at_port" || {
+				serialized_status_json 0 "QModem AT 队列正忙"
+				exit 1
+			}
+		fi
+			if apply_slot "${slot:-external2}"; then
+				sleep 2
+				status_json 1 "${SWITCH_MESSAGE:-SIM 卡切换成功}"
+		else
+			status_json 0 "${LAST_ERROR:-SIM 卡切换失败}"
+			exit 1
+		fi
+		;;
+	force)
+		slot="$2"
+		lock -n "$LOCK" || {
+			serialized_status_json 0 "SIM 切换正忙"
+			exit 1
+		}
+		SIM_LOCK_HELD=1
+		trap cleanup_locks EXIT
+		trap 'exit 128' INT TERM
+		if force_gpio_slot "$slot"; then
+			serialized_status_json 1 "GPIO 已强制切换；未发送任何模组 AT 命令，必要时请手动复位模组"
+		else
+			serialized_status_json 0 "${LAST_ERROR:-强制 GPIO 切换失败}"
+			exit 1
+		fi
+		;;
+	status)
+		serialized_status_json
+		;;
+	reset)
+		if reset_modem; then
+			serialized_status_json 1 "模组已执行硬复位"
+		else
+			serialized_status_json 0 "$LAST_ERROR"
+			exit 1
+		fi
+		;;
+	*)
+		echo "Usage: $0 {status|switch [internal|external1|external2]|force [external1|external2]|reset}" >&2
+		exit 2
+		;;
+esac

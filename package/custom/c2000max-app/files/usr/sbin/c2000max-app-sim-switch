@@ -1,0 +1,68 @@
+#!/bin/sh
+
+. /usr/share/libubox/jshn.sh
+
+slot="$1"
+case "$slot" in
+	external1|external2|internal) ;;
+	*) exit 2 ;;
+esac
+
+mode="${2:-}"
+case "$mode" in
+	''|0|1) ;;
+	*) exit 2 ;;
+esac
+
+state_dir=/var/run/c2000max-app
+state_file="$state_dir/sim-switch.state"
+temporary="$state_file.$$"
+mkdir -p "$state_dir" || exit 1
+chmod 0755 "$state_dir" 2>/dev/null || true
+
+case "$slot" in
+	external1) request='{"slot":"external1"}' ;;
+	external2) request='{"slot":"external2"}' ;;
+	internal) request='{"slot":"internal"}' ;;
+esac
+
+output="$(ubus call c2000max sim_switch "$request" 2>&1)"
+result=$?
+
+# Keep the official APP's AUTO/MANUAL selection in the same persistent state
+# used by the local /cpesel response.  Do not publish a new mode when the
+# physical board switch failed.
+if [ "$result" -eq 0 ] && [ -n "$mode" ]; then
+	if ! uci -q set "c2000max_app.main.sim_mode=$mode" ||
+	   ! uci -q commit c2000max_app; then
+		result=1
+		output="${output}${output:+ }SIM mode persistence failed"
+	fi
+fi
+
+# A completed switch invalidates the APP snapshots used by the remote status
+# reporter.  Fixed paths keep this cleanup bounded and independent of input.
+rm -f "$state_dir/cache/modems.json" \
+	"$state_dir/cache/selector.json" \
+	"$state_dir/cache/fast_"*.json \
+	"$state_dir/cache/carrier_"*.json 2>/dev/null || true
+
+json_init
+json_add_string state "$([ "$result" -eq 0 ] && echo completed || echo failed)"
+json_add_string slot "$slot"
+[ -n "$mode" ] && json_add_int mode "$mode"
+json_add_int code "$result"
+json_add_int updated "$(date +%s)"
+json_add_string result "$output"
+json_dump > "$temporary" || exit 1
+chmod 0600 "$temporary" 2>/dev/null || true
+mv -f "$temporary" "$state_file"
+
+if [ "$result" -eq 0 ]; then
+	logger -t c2000max-app \
+		"remote SIM switch completed: $slot${mode:+ mode=$mode}"
+else
+	logger -t c2000max-app \
+		"remote SIM switch failed: $slot${mode:+ mode=$mode} ($result)"
+fi
+exit "$result"

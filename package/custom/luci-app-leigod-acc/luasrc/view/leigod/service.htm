@@ -1,0 +1,61 @@
+<!-- acc service state
+<fieldset class="cbi-section">
+  <table class="cbi-section-table" id="acc_service_state_table">
+    <tr class="cbi-section-table-title">
+      <th class="cbi-section-table-cell">服务名称</th>
+      <th class="cbi-section-table-cell">运行状态</th>
+      <th class="cbi-section-table-cell">操作</th>
+    </tr>
+    <tr>
+      <td>雷神加速服务</td>
+      <td id="acc_service_state_cell">运行状态</td>
+      <td id="acc_service_state_button">操作</td>
+    </tr>
+  </table>
+</fieldset> -->
+  
+<!-- acc catalog state -->
+<fieldset class="cbi-section">
+  <legend>设备加速状态</legend>
+  <table class="cbi-section-table" id="acc_catalog_state_table">
+    <tr class="cbi-section-table-title">
+      <th class="cbi-section-table-cell">设备类别</th>
+      <th class="cbi-section-table-cell">加速状态</th>
+    </tr>
+  </table>
+</fieldset>
+
+
+<script type="text/javascript">//<![CDATA[
+    // start acc service
+    function start_acc_service() {
+      XHR.get('<%=luci.dispatcher.build_url("admin", "services", "acc", "start_acc_service")%>', null, function(x) {});
+    }
+      // start acc service
+    function stop_acc_service() {
+      XHR.get('<%=luci.dispatcher.build_url("admin", "services", "acc", "stop_acc_service")%>', null, function(x) {});
+    }
+
+    XHR.poll(5, '<%=url('admin/services/acc/status')%>', null, function(x, st) {
+      var service_cell = document.getElementById("acc_service_state_cell");
+      var button_cell = document.getElementById("acc_service_state_button");
+      if (st && service_cell && button_cell) {
+        service_cell.innerHTML = st["service"];
+        if (st["service"] == "加速服务已启动")
+          button_cell.innerHTML = '<input type="button" class="btn cbi-button cbi-button-apply" value="停止加速服务" onclick="return stop_acc_service()"/>';
+        else
+          button_cell.innerHTML = '<input type="button" class="btn cbi-button cbi-button-apply" value="启动加速服务" onclick="return start_acc_service()"/>';
+      }
+      var catalog_table = document.getElementById("acc_catalog_state_table");
+      if (st && catalog_table) {
+        while(catalog_table.rows.length > 1)
+          catalog_table.deleteRow(1);
+        var status_map = st["state"];
+        for (var typ in status_map) {
+          var tr = catalog_table.insertRow(-1);
+          tr.insertCell(-1).innerHTML = typ;
+          tr.insertCell(-1).innerHTML = status_map[typ];
+        }
+      }
+    });
+//]]></script>

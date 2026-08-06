@@ -22,7 +22,7 @@ MESON_HOST_ARGS += \
 	-Dauto_features=disabled \
 	-Dbuild-hexdump=enabled \
 	-Dbuild-libuuid=enabled \
-	-Dncurses=enabled \
+	-Dncurses=disabled \
 	-Dprogram-tests=false
 
 $(eval $(call HostBuild))

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+	<title>C2000-MAX 内网测速</title>
+	<link rel="stylesheet" href="style.css">
+	<script src="speedtest.js"></script>
+</head>
+<body>
+	<main>
+		<header>
+			<div>
+				<p class="eyebrow">C2000-MAX · SPEEDTEST-X</p>
+				<h1>内网测速</h1>
+				<p class="subtitle">直接测试终端与路由器之间的局域网吞吐、延迟和抖动。</p>
+			</div>
+			<a class="history" href="results.html">测速记录</a>
+		</header>
+
+		<p class="reference-notice">结果仅供参考：此内网测速链路不经过路由器网络加速，速度可能与实际转发或上网速度存在差异。</p>
+
+		<section class="panel">
+			<button id="startStop" type="button">开始测速</button>
+			<div class="progress"><i id="progress"></i></div>
+			<div class="metrics">
+				<div><span>下载</span><strong id="download">0.00</strong><small>Mbps</small></div>
+				<div><span>上传</span><strong id="upload">0.00</strong><small>Mbps</small></div>
+				<div><span>延迟</span><strong id="ping">0.00</strong><small>ms</small></div>
+				<div><span>抖动</span><strong id="jitter">0.00</strong><small>ms</small></div>
+			</div>
+			<p class="client">客户端：<span id="client">等待测速</span></p>
+		</section>
+
+		<footer>
+			基于 <a href="https://github.com/MortyFx/speedtest-x">Speedtest-X</a> /
+			<a href="https://github.com/librespeed/speedtest">LibreSpeed</a>，后端由轻量 Go 服务实现。
+		</footer>
+	</main>
+
+	<script>
+	'use strict';
+	var test = new Speedtest();
+	var running = false;
+	var last = {};
+	var button = document.getElementById('startStop');
+
+	test.setParameter('getIp_ispInfo', true);
+	test.setParameter('telemetry_level', 'disabled');
+
+	function value(id, input, fallback) {
+		document.getElementById(id).textContent = (input === '' || input == null) ? fallback : input;
+	}
+
+	test.onupdate = function(data) {
+		last = data || {};
+		value('download', data.dlStatus, '0.00');
+		value('upload', data.ulStatus, '0.00');
+		value('ping', data.pingStatus, '0.00');
+		value('jitter', data.jitterStatus, '0.00');
+		value('client', data.clientIp, '正在识别');
+		var p = (Number(data.dlProgress) * 2 + Number(data.ulProgress) * 2 + Number(data.pingProgress)) / 5;
+		document.getElementById('progress').style.width = Math.max(0, Math.min(100, p * 100)) + '%';
+	};
+
+	test.onend = function(aborted) {
+		running = false;
+		button.textContent = '再次测速';
+		button.classList.remove('running');
+		if (aborted)
+			return;
+		var ipParts = String(last.clientIp || '').split(' - ');
+		var body = new URLSearchParams({
+			key: Date.now() + '_' + (ipParts[0] || ''),
+			ip: ipParts[0] || '',
+			isp: ipParts[1] || 'LAN',
+			addr: ipParts[2] || '',
+			dspeed: last.dlStatus || '0',
+			uspeed: last.ulStatus || '0',
+			ping: last.pingStatus || '0',
+			jitter: last.jitterStatus || '0'
+		});
+		fetch('backend/report.php', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: body.toString()
+		}).catch(function() {});
+	};
+
+	button.addEventListener('click', function() {
+		if (running) {
+			test.abort();
+			return;
+		}
+		running = true;
+		button.textContent = '停止测速';
+		button.classList.add('running');
+		document.getElementById('progress').style.width = '0%';
+		test.start();
+	});
+	</script>
+</body>
+</html>

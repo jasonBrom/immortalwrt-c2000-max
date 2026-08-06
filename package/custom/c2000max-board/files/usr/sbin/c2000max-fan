@@ -1,0 +1,209 @@
+#!/bin/sh
+
+. /usr/share/libubox/jshn.sh
+
+TAG="c2000max-fan"
+GPIO_FAN="/sys/class/gpio/fan-hw/value"
+STATE_FILE="/var/run/c2000max-fan.state"
+LAST_LEVEL=0
+LAST_SPEED=0
+PWM_PATH=
+
+log() {
+	logger -t "$TAG" "$*"
+}
+
+find_pwm() {
+	local pwm
+	for pwm in /sys/class/hwmon/hwmon*/pwm1 /sys/devices/platform/pwm-fan/hwmon/hwmon*/pwm1; do
+		[ -w "$pwm" ] && {
+			echo "$pwm"
+			return
+		}
+	done
+}
+
+normalize_temp() {
+	local value="$1"
+	case "$value" in ''|*[!0-9-]*) return 1 ;; esac
+	[ "$value" -gt 300 ] || value=$((value * 1000))
+	echo "$value"
+}
+
+read_temperatures() {
+	local zone input value name cpu=0 wifi=0 seen="" real
+	for zone in /sys/class/thermal/thermal_zone*; do
+		[ -r "$zone/temp" ] || continue
+		value="$(normalize_temp "$(cat "$zone/temp" 2>/dev/null)")" || continue
+		[ "$value" -le "$cpu" ] || cpu="$value"
+	done
+	for input in /sys/class/ieee80211/phy*/device/hwmon/hwmon*/temp1_input; do
+		[ -r "$input" ] || continue
+		real="$(readlink -f "$input" 2>/dev/null)"
+		case " $seen " in *" $real "*) continue ;; esac
+		seen="$seen $real"
+		value="$(normalize_temp "$(cat "$input" 2>/dev/null)")" || continue
+		[ "$value" -le "$wifi" ] || wifi="$value"
+	done
+	for input in /sys/class/hwmon/hwmon*/temp1_input; do
+		[ -r "$input" ] || continue
+		name="$(cat "${input%/temp1_input}/name" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+		case "$name" in *mt799*|*wifi*|*wireless*) ;; *) continue ;; esac
+		real="$(readlink -f "$input" 2>/dev/null)"
+		case " $seen " in *" $real "*) continue ;; esac
+		seen="$seen $real"
+		value="$(normalize_temp "$(cat "$input" 2>/dev/null)")" || continue
+		[ "$value" -le "$wifi" ] || wifi="$value"
+	done
+	echo "$cpu $wifi"
+}
+
+set_speed() {
+	local percent="$1" pwm="$PWM_PATH" raw
+	[ -n "$pwm" ] || pwm="$(find_pwm)"
+	case "$percent" in ''|*[!0-9]*) percent=0 ;; esac
+	[ "$percent" -le 100 ] || percent=100
+	[ "$percent" -ge 0 ] || percent=0
+	raw=$((percent * 255 / 100))
+
+	if [ "$percent" -eq 0 ]; then
+		[ -z "$pwm" ] || echo 0 > "$pwm" 2>/dev/null
+		[ ! -w "$GPIO_FAN" ] || echo 0 > "$GPIO_FAN" 2>/dev/null
+	else
+		[ ! -w "$GPIO_FAN" ] || echo 1 > "$GPIO_FAN" 2>/dev/null
+		if [ "$LAST_SPEED" -eq 0 ] && [ -n "$pwm" ]; then
+			echo 255 > "$pwm" 2>/dev/null
+			sleep 1
+		fi
+		[ -z "$pwm" ] || echo "$raw" > "$pwm" 2>/dev/null
+	fi
+
+	if [ "$LAST_SPEED" != "$percent" ]; then
+		log "fan speed ${LAST_SPEED}% -> ${percent}%"
+	fi
+	LAST_SPEED="$percent"
+}
+
+write_state() {
+	local enabled="$1" mode="$2" cpu="$3" wifi="$4" effective="$5" speed="$6" pwm raw=0
+	pwm="$PWM_PATH"
+	[ -n "$pwm" ] || pwm="$(find_pwm)"
+	[ -z "$pwm" ] || raw="$(cat "$pwm" 2>/dev/null)"
+	case "$raw" in ''|*[!0-9]*) raw=0 ;; esac
+	json_init
+	json_add_boolean enabled "$([ "$enabled" = 1 ] && echo 1 || echo 0)"
+	json_add_string mode "$mode"
+	json_add_boolean pwm_available "$([ -n "$pwm" ] && echo 1 || echo 0)"
+	json_add_boolean power_gpio_available "$([ -w "$GPIO_FAN" ] && echo 1 || echo 0)"
+	json_add_int cpu_temp "${cpu:-0}"
+	json_add_int wifi_temp "${wifi:-0}"
+	json_add_int control_temp "${effective:-0}"
+	json_add_int speed "${speed:-0}"
+	json_add_int pwm "$raw"
+	json_dump > "${STATE_FILE}.new"
+	mv "${STATE_FILE}.new" "$STATE_FILE"
+}
+
+smart_level() {
+	local temp="$1" low="$2" medium="$3" high="$4" hysteresis="$5"
+	case "$LAST_LEVEL" in
+		3)
+			[ "$temp" -lt $((high - hysteresis)) ] && LAST_LEVEL=2
+			;;
+		2)
+			if [ "$temp" -ge "$high" ]; then LAST_LEVEL=3
+			elif [ "$temp" -lt $((medium - hysteresis)) ]; then LAST_LEVEL=1
+			fi
+			;;
+		1)
+			if [ "$temp" -ge "$high" ]; then LAST_LEVEL=3
+			elif [ "$temp" -ge "$medium" ]; then LAST_LEVEL=2
+			elif [ "$temp" -lt $((low - hysteresis)) ]; then LAST_LEVEL=0
+			fi
+			;;
+		*)
+			if [ "$temp" -ge "$high" ]; then LAST_LEVEL=3
+			elif [ "$temp" -ge "$medium" ]; then LAST_LEVEL=2
+			elif [ "$temp" -ge "$low" ]; then LAST_LEVEL=1
+			else LAST_LEVEL=0
+			fi
+			;;
+	esac
+	SMART_LEVEL="$LAST_LEVEL"
+}
+
+status() {
+	if [ -s "$STATE_FILE" ]; then
+		cat "$STATE_FILE"
+		return
+	fi
+	temps="$(read_temperatures)"
+	write_state 0 off "${temps%% *}" "${temps#* }" 0 0
+	cat "$STATE_FILE"
+}
+
+run_daemon() {
+	local enabled mode interval low medium high hysteresis speed_low speed_medium speed_high
+	local manual temps cpu wifi effective level speed
+	trap 'exit 0' INT TERM
+	trap 'set_speed 0' EXIT
+
+	# procd restarts this process on a c2000max UCI reload, so configuration and
+	# the PWM device can be resolved once instead of spawning eleven uci(1)
+	# commands every five seconds.
+	enabled="$(uci -q get c2000max.fan.enabled)"
+	[ "$enabled" = 1 ] || return 0
+	mode="$(uci -q get c2000max.fan.mode)"
+	interval="$(uci -q get c2000max.fan.interval)"
+	low="$(uci -q get c2000max.fan.temp_low)"
+	medium="$(uci -q get c2000max.fan.temp_medium)"
+	high="$(uci -q get c2000max.fan.temp_high)"
+	hysteresis="$(uci -q get c2000max.fan.hysteresis)"
+	speed_low="$(uci -q get c2000max.fan.speed_low)"
+	speed_medium="$(uci -q get c2000max.fan.speed_medium)"
+	speed_high="$(uci -q get c2000max.fan.speed_high)"
+	manual="$(uci -q get c2000max.fan.manual_speed)"
+	PWM_PATH="$(find_pwm)"
+
+	case "$interval" in ''|*[!0-9]*) interval=5 ;; esac
+	case "$low" in ''|*[!0-9]*) low=55 ;; esac
+	case "$medium" in ''|*[!0-9]*) medium=65 ;; esac
+	case "$high" in ''|*[!0-9]*) high=75 ;; esac
+	case "$hysteresis" in ''|*[!0-9]*) hysteresis=3 ;; esac
+	case "$speed_low" in ''|*[!0-9]*) speed_low=35 ;; esac
+	case "$speed_medium" in ''|*[!0-9]*) speed_medium=65 ;; esac
+	case "$speed_high" in ''|*[!0-9]*) speed_high=100 ;; esac
+	case "$manual" in ''|*[!0-9]*) manual=50 ;; esac
+
+	while true; do
+		temps="$(read_temperatures)"
+		cpu="${temps%% *}"
+		wifi="${temps#* }"
+		effective="$cpu"
+		[ "$wifi" -le "$effective" ] || effective="$wifi"
+		speed=0
+
+		case "$mode" in
+			manual)
+				speed="$manual"
+				LAST_LEVEL=0
+				;;
+			*)
+				smart_level $((effective / 1000)) "$low" "$medium" "$high" "$hysteresis"
+				level="$SMART_LEVEL"
+				case "$level" in 1) speed="$speed_low" ;; 2) speed="$speed_medium" ;; 3) speed="$speed_high" ;; *) speed=0 ;; esac
+				mode=smart
+				;;
+		esac
+
+		set_speed "$speed"
+		write_state "$enabled" "$mode" "$cpu" "$wifi" "$effective" "$speed"
+		sleep "$interval"
+	done
+}
+
+case "${1:-daemon}" in
+	status) status ;;
+	stop) set_speed 0 ;;
+	*) run_daemon ;;
+esac

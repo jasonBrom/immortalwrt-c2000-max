@@ -1,0 +1,315 @@
+#!/bin/sh
+
+LOCK="${C2000_SWAP_LOCK:-/var/lock/c2000max-swap.lock}"
+PROC_SWAPS="${C2000_SWAP_PROC_SWAPS:-/proc/swaps}"
+ZRAM_SYS="${C2000_SWAP_ZRAM_SYS:-/sys/block/zram0}"
+ZRAM_INIT="${C2000_SWAP_INIT:-/etc/init.d/zram}"
+SWAPPINESS_PROC="${C2000_SWAP_SWAPPINESS_PROC:-/proc/sys/vm/swappiness}"
+
+json_escape()
+{
+	printf '%s' "$1" | sed \
+		-e 's/\\/\\\\/g' \
+		-e 's/"/\\"/g' \
+		-e 's/	/\\t/g' \
+		-e ':a;N;$!ba;s/\n/\\n/g'
+}
+
+json_result()
+{
+	printf '{"success":%s,"message":"%s"}\n' \
+		"$1" "$(json_escape "$2")"
+}
+
+valid_uint()
+{
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	return 0
+}
+
+normalize_enabled()
+{
+	case "$1" in
+		1|true) printf 1 ;;
+		0|false) printf 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+supported_algo()
+{
+	local algo="$1"
+	case "$algo" in lzo|lzo-rle|lz4|zstd) ;; *) return 1 ;; esac
+	if [ -r "$ZRAM_SYS/comp_algorithm" ]; then
+		tr '[]' '  ' < "$ZRAM_SYS/comp_algorithm" |
+			tr ' ' '\n' | grep -qx "$algo"
+	else
+		[ "$algo" = lzo ]
+	fi
+}
+
+zram_active()
+{
+	[ -r "$PROC_SWAPS" ] &&
+		awk 'NR > 1 && $1 ~ /\/zram[0-9]+$/ { found=1 } END { exit !found }' \
+			"$PROC_SWAPS"
+}
+
+read_swap_stat()
+{
+	if [ -r "$PROC_SWAPS" ]; then
+		awk 'NR > 1 && $1 ~ /\/zram[0-9]+$/ {
+			printf "%s %s %s %s", $1, $3, $4, $5; exit
+		}' "$PROC_SWAPS"
+	fi
+}
+
+restore_uci()
+{
+	local enabled="$1" size="$2" algo="$3" priority="$4" swappiness="$5"
+	uci -q set c2000max.swap='swap'
+	uci -q set "c2000max.swap.enabled=$enabled"
+	uci -q set "c2000max.swap.size_mb=$size"
+	uci -q set "c2000max.swap.comp_algo=$algo"
+	uci -q set "c2000max.swap.priority=$priority"
+	uci -q set "c2000max.swap.swappiness=$swappiness"
+	uci -q set "system.@system[0].zram_size_mb=$size"
+	uci -q set "system.@system[0].zram_comp_algo=$algo"
+	uci -q set "system.@system[0].zram_priority=$priority"
+	uci -q commit c2000max
+	uci -q commit system
+}
+
+service_enable()
+{
+	"$ZRAM_INIT" enable >/dev/null 2>&1
+}
+
+service_disable()
+{
+	"$ZRAM_INIT" disable >/dev/null 2>&1
+}
+
+service_start()
+{
+	"$ZRAM_INIT" start >/dev/null 2>&1
+}
+
+service_stop()
+{
+	"$ZRAM_INIT" stop >/dev/null 2>&1
+}
+
+set_swappiness()
+{
+	[ -w "$SWAPPINESS_PROC" ] &&
+		printf '%s\n' "$1" > "$SWAPPINESS_PROC"
+}
+
+tune_swappiness()
+{
+	local swappiness
+	swappiness="$(uci -q get c2000max.swap.swappiness)"
+	valid_uint "$swappiness" && [ "$swappiness" -le 200 ] || swappiness=150
+	if set_swappiness "$swappiness"; then
+		json_result true "vm.swappiness 已应用"
+	else
+		json_result false "无法写入 vm.swappiness"
+		return 1
+	fi
+}
+
+apply_swap()
+{
+	local enabled size algo priority swappiness
+	local old_enabled old_size old_algo old_priority old_swappiness
+	local old_runtime_swappiness old_active=0 old_boot=0
+	enabled="$(normalize_enabled "$1")" || {
+		json_result false "SWAP 开关参数无效"
+		return 1
+	}
+	size="$2"
+	algo="$3"
+	priority="$4"
+	swappiness="$5"
+	valid_uint "$size" && [ "$size" -ge 64 ] && [ "$size" -le 1024 ] || {
+		json_result false "SWAP 大小必须是 64–1024 MB 的整数"
+		return 1
+	}
+	supported_algo "$algo" || {
+		json_result false "当前内核不支持所选压缩算法"
+		return 1
+	}
+	valid_uint "$priority" && [ "$priority" -ge 1 ] &&
+		[ "$priority" -le 32767 ] || {
+		json_result false "SWAP 优先级必须是 1–32767 的整数"
+		return 1
+	}
+	valid_uint "$swappiness" && [ "$swappiness" -le 200 ] || {
+		json_result false "换出倾向必须是 0–200 的整数"
+		return 1
+	}
+	[ -x "$ZRAM_INIT" ] || {
+		json_result false "ZRAM 服务未安装"
+		return 1
+	}
+	[ -r "$PROC_SWAPS" ] || {
+		json_result false "当前内核未启用 SWAP"
+		return 1
+	}
+	[ -w "$SWAPPINESS_PROC" ] || {
+		json_result false "当前内核不允许调整 vm.swappiness"
+		return 1
+	}
+
+	old_enabled="$(uci -q get c2000max.swap.enabled)"
+	old_size="$(uci -q get c2000max.swap.size_mb)"
+	old_algo="$(uci -q get c2000max.swap.comp_algo)"
+	old_priority="$(uci -q get c2000max.swap.priority)"
+	old_swappiness="$(uci -q get c2000max.swap.swappiness)"
+	old_runtime_swappiness="$(cat "$SWAPPINESS_PROC" 2>/dev/null)"
+	case "$old_enabled" in 0|1) ;; *) old_enabled=1 ;; esac
+	valid_uint "$old_size" || old_size=256
+	supported_algo "$old_algo" || old_algo=lzo
+	valid_uint "$old_priority" || old_priority=100
+	valid_uint "$old_swappiness" && [ "$old_swappiness" -le 200 ] ||
+		old_swappiness=150
+	valid_uint "$old_runtime_swappiness" &&
+		[ "$old_runtime_swappiness" -le 200 ] ||
+		old_runtime_swappiness="$old_swappiness"
+	zram_active && old_active=1
+	"$ZRAM_INIT" enabled >/dev/null 2>&1 && old_boot=1
+
+	if [ "$old_active" = 1 ]; then
+		service_stop
+		if zram_active; then
+			json_result false "内存不足，无法安全释放当前 ZRAM；设置未更改"
+			return 1
+		fi
+	fi
+
+	if ! restore_uci "$enabled" "$size" "$algo" "$priority" "$swappiness"; then
+		restore_uci "$old_enabled" "$old_size" "$old_algo" "$old_priority" \
+			"$old_swappiness" >/dev/null 2>&1
+		if [ "$old_boot" = 1 ]; then service_enable; else service_disable; fi
+		[ "$old_active" = 1 ] && service_start
+		json_result false "无法保存 SWAP 设置"
+		return 1
+	fi
+	if ! set_swappiness "$swappiness"; then
+		restore_uci "$old_enabled" "$old_size" "$old_algo" "$old_priority" \
+			"$old_swappiness" >/dev/null 2>&1
+		set_swappiness "$old_runtime_swappiness" >/dev/null 2>&1
+		if [ "$old_boot" = 1 ]; then service_enable; else service_disable; fi
+		[ "$old_active" = 1 ] && service_start
+		json_result false "无法应用换出倾向，已恢复原设置"
+		return 1
+	fi
+
+	if [ "$enabled" = 1 ]; then
+		service_enable
+		service_start
+		if ! zram_active; then
+			restore_uci "$old_enabled" "$old_size" "$old_algo" "$old_priority" \
+				"$old_swappiness" >/dev/null 2>&1
+			set_swappiness "$old_runtime_swappiness" >/dev/null 2>&1
+			if [ "$old_boot" = 1 ]; then service_enable; else service_disable; fi
+			[ "$old_active" = 1 ] && service_start
+			json_result false "ZRAM 启动失败，已恢复原设置"
+			return 1
+		fi
+		json_result true "ZRAM SWAP 已应用"
+	else
+		service_disable
+		json_result true "ZRAM SWAP 已关闭"
+	fi
+}
+
+status_swap()
+{
+	local enabled size algo priority active=false stat device="" total=0 used=0 active_priority=0
+	local available_algorithms="" item first=1
+	local swappiness current_swappiness
+	local original=0 compressed=0 memory=0 current_algo="$(
+		sed -n 's/.*\\[\([^]]*\\)\\].*/\1/p' "$ZRAM_SYS/comp_algorithm" 2>/dev/null
+	)"
+	enabled="$(uci -q get c2000max.swap.enabled)"
+	size="$(uci -q get c2000max.swap.size_mb)"
+	algo="$(uci -q get c2000max.swap.comp_algo)"
+	priority="$(uci -q get c2000max.swap.priority)"
+	swappiness="$(uci -q get c2000max.swap.swappiness)"
+	current_swappiness="$(cat "$SWAPPINESS_PROC" 2>/dev/null)"
+	case "$enabled" in 0|1) ;; *) enabled=1 ;; esac
+	valid_uint "$size" || size=256
+	supported_algo "$algo" || algo=lzo
+	valid_uint "$priority" || priority=100
+	valid_uint "$swappiness" && [ "$swappiness" -le 200 ] || swappiness=150
+	valid_uint "$current_swappiness" && [ "$current_swappiness" -le 200 ] ||
+		current_swappiness="$swappiness"
+	if zram_active; then
+		active=true
+		stat="$(read_swap_stat)"
+		device="${stat%% *}"
+		stat="${stat#* }"
+		total="${stat%% *}"
+		stat="${stat#* }"
+		used="${stat%% *}"
+		active_priority="${stat##* }"
+	fi
+	if [ -r "$ZRAM_SYS/mm_stat" ]; then
+		read -r original compressed memory _ < "$ZRAM_SYS/mm_stat"
+	fi
+	if [ -r "$ZRAM_SYS/comp_algorithm" ]; then
+		available_algorithms="$(tr '[]' '  ' < "$ZRAM_SYS/comp_algorithm")"
+	fi
+	[ -n "$available_algorithms" ] || available_algorithms=lzo
+	for value in size priority total used active_priority original compressed memory; do
+		eval "current=\${$value}"
+		valid_uint "$current" || eval "$value=0"
+	done
+	printf '{"success":true,"enabled":%s,"active":%s,' \
+		"$([ "$enabled" = 1 ] && printf true || printf false)" "$active"
+	printf '"size_mb":%s,"comp_algo":"%s","current_algo":"%s","priority":%s,' \
+		"$size" "$(json_escape "$algo")" "$(json_escape "${current_algo:-$algo}")" "$priority"
+	printf '"swappiness":%s,"current_swappiness":%s,' \
+		"$swappiness" "$current_swappiness"
+	printf '"device":"%s","total_kib":%s,"used_kib":%s,"active_priority":%s,' \
+		"$(json_escape "$device")" "$total" "$used" "$active_priority"
+	printf '"original_bytes":%s,"compressed_bytes":%s,"memory_bytes":%s,' \
+		"$original" "$compressed" "$memory"
+	printf '"supported_algorithms":['
+	for item in $available_algorithms; do
+		case "$item" in lzo|lzo-rle|lz4|zstd)
+			[ "$first" = 1 ] || printf ','
+			printf '"%s"' "$item"
+			first=0
+			;;
+		esac
+	done
+	printf ']}\n'
+}
+
+mkdir -p "${LOCK%/*}"
+: >> "$LOCK" || {
+	json_result false "无法创建 SWAP 设置锁"
+	exit 1
+}
+exec 9<>"$LOCK" || exit 1
+flock -x 9 || exit 1
+
+case "${1:-status}" in
+	status)
+		status_swap
+		;;
+	apply)
+		shift
+		apply_swap "$@"
+		;;
+	tune)
+		tune_swappiness
+		;;
+	*)
+		json_result false "不支持的操作"
+		exit 1
+		;;
+esac

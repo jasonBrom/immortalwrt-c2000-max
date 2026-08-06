@@ -1,0 +1,15 @@
+{
+	"c2000max": {
+		"description": "Grant access to C2000-MAX NetBird asynchronous controls",
+		"read": {
+			"ubus": {
+				"c2000max": [ "netbird_status", "netbird_job_status" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"c2000max": [ "netbird_job_start" ]
+			}
+		}
+	}
+}

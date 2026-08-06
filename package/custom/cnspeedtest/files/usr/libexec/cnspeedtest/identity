@@ -1,0 +1,77 @@
+#!/bin/sh
+
+IDENTITY_DIR="/etc/cnspeedtest"
+IDENTITY_FILE="$IDENTITY_DIR/identity.conf"
+
+first_mac() {
+	for path in /sys/class/net/*/address; do
+		[ -r "$path" ] || continue
+		case "$path" in
+			*/lo/*) continue ;;
+		esac
+		mac="$(cat "$path" 2>/dev/null)"
+		[ "$mac" = "00:00:00:00:00:00" ] && continue
+		echo "$mac"
+		return
+	done
+	echo "00:00:00:00:00:00"
+}
+
+hash_hex() {
+	printf '%s' "$1" | md5sum | awk '{print toupper($1)}'
+}
+
+pick_by_hash() {
+	list="$1"
+	hex="$2"
+	count="$(printf '%s\n' "$list" | sed '/^$/d' | wc -l)"
+	[ "$count" -gt 0 ] || return
+	idx=$(( 0x${hex} % count + 1 ))
+	printf '%s\n' "$list" | sed -n "${idx}p"
+}
+
+ensure_identity() {
+	mkdir -p "$IDENTITY_DIR"
+	chmod 700 "$IDENTITY_DIR"
+
+	if [ -r "$IDENTITY_FILE" ]; then
+		. "$IDENTITY_FILE"
+	fi
+
+	if [ -n "$IMEI" ] && [ -n "$ANDROID_UA" ] && [ -n "$MACHINE_ID" ]; then
+		return
+	fi
+
+	if [ -z "$IMEI" ] || [ -z "$ANDROID_UA" ]; then
+		board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+		model="$(cat /tmp/sysinfo/model 2>/dev/null)"
+		machine="$(cat /etc/machine-id 2>/dev/null)"
+		hostname="$(cat /proc/sys/kernel/hostname 2>/dev/null)"
+		mac="$(first_mac)"
+		seed="$machine|$hostname|$board|$model|$mac|cnspeedtest"
+		sum="$(hash_hex "$seed")"
+		ua_sum="$(hash_hex "ua|$seed")"
+
+		IMEI="TS$(printf '%s' "$sum" | cut -c1-16)"
+		android="$(pick_by_hash "$(printf '10\n11\n12\n13\n14\n')" "$(printf '%s' "$ua_sum" | cut -c1-2)")"
+		device="$(pick_by_hash "$(printf 'M2012K11AC Build/RKQ1.201112.002\nV2164A Build/TP1A.220624.014\nPGT-AN00 Build/HONORPGT-AN00\nSM-G9910 Build/TP1A.220624.014\nRMX3708 Build/UKQ1.230924.001\n22081212C Build/TKQ1.221114.001\n')" "$(printf '%s' "$ua_sum" | cut -c3-4)")"
+		ANDROID_UA="Dalvik/2.1.0 (Linux; U; Android ${android}; ${device})"
+	fi
+
+	if [ -z "$MACHINE_ID" ]; then
+		id_sum="$(hash_hex "machine|$IMEI|$ANDROID_UA|cnspeedtest")"
+		MACHINE_ID="CN$(printf '%s' "$id_sum" | cut -c1-24)"
+	fi
+
+	cat > "$IDENTITY_FILE" <<EOF
+MACHINE_ID='$MACHINE_ID'
+IMEI='$IMEI'
+ANDROID_UA='$ANDROID_UA'
+EOF
+	chmod 600 "$IDENTITY_FILE"
+}
+
+if [ "${0##*/}" = "identity" ]; then
+	ensure_identity
+	[ -r "$IDENTITY_FILE" ] && cat "$IDENTITY_FILE"
+fi

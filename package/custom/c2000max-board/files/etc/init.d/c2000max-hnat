@@ -1,0 +1,522 @@
+#!/bin/sh /etc/rc.common
+
+START=20
+STOP=89
+USE_PROCD=1
+
+HNAT_LOCK="${C2000_HNAT_LOCK:-/var/lock/c2000max-hnat.lock}"
+ROLE_LOCK="${C2000_ROLE_LOCK:-/var/lock/c2000max-port-role.lock}"
+PORT_SWITCHING="${C2000_SWITCHING:-/var/run/c2000max-port-role.switching}"
+PORT_DEGRADED="${C2000_DEGRADED:-/var/run/c2000max-port-role.degraded}"
+EFFECTIVE_STATE="${C2000_HNAT_EFFECTIVE:-/var/run/c2000max-hnat-effective}"
+WHNAT_EFFECTIVE="${C2000_WHNAT_EFFECTIVE:-/var/run/c2000max-whnat-effective}"
+SETTINGS_EFFECTIVE="${C2000_HNAT_SETTINGS_EFFECTIVE:-/var/run/c2000max-hnat-settings-effective}"
+ACCEL_DEGRADED="${C2000_ACCEL_DEGRADED:-/var/run/c2000max-hnat.degraded}"
+ROLE_LIB="${C2000_ROLE_LIB:-/usr/lib/c2000max/port-role.sh}"
+HNAT_DIR="${C2000_HNAT_DIR:-/sys/kernel/debug/hnat}"
+HNAT_TOPOLOGY="${C2000_HNAT_TOPOLOGY:-$HNAT_DIR/hnat_topology}"
+SYS_CLASS_NET="${C2000_SYS_CLASS_NET:-/sys/class/net}"
+HNAT_FLUSH_WAIT_LOOPS="${C2000_HNAT_FLUSH_WAIT_LOOPS:-5}"
+HNAT_ROLE_HELD=0
+HNAT_LOCK_HELD=0
+
+: >>"$ROLE_LOCK" || exit 1
+: >>"$HNAT_LOCK" || exit 1
+exec 4<>"$ROLE_LOCK" || exit 1
+exec 5<>"$HNAT_LOCK" || exit 1
+
+[ ! -r "$ROLE_LIB" ] || . "$ROLE_LIB"
+
+set_effective_state()
+{
+	printf '%s\n' "$1" > "$EFFECTIVE_STATE"
+}
+
+set_whnat_state()
+{
+	printf '%s\n' "$1" > "$WHNAT_EFFECTIVE"
+}
+
+sync_whnat_optional()
+{
+	# W-HNAT is an optional extension of the base MediaTek HNAT path. A radio
+	# may start after netifd/TurboACC, so register every active br-lan Wi-Fi
+	# member when possible, but never turn off Ethernet/USB PPE acceleration
+	# merely because no radio is ready yet.
+	if c2000_whnat_ready 2>/dev/null; then
+		set_whnat_state ready
+	elif c2000_sync_whnat >/dev/null 2>&1 &&
+	     c2000_whnat_ready 2>/dev/null; then
+		set_whnat_state ready
+	elif c2000_has_runtime_wifi_member 2>/dev/null; then
+		set_whnat_state unavailable
+	else
+		set_whnat_state inactive
+	fi
+	return 0
+}
+
+c2000_desired_hnat_settings()
+{
+	local bind_rate update_nfct
+
+	bind_rate="$(uci -q get turboacc.config.fastpath_mh_bind_rate)"
+	case "$bind_rate" in
+		''|*[!0-9]*) bind_rate=30 ;;
+	esac
+	[ "$bind_rate" -ge 1 ] 2>/dev/null &&
+		[ "$bind_rate" -le 30 ] 2>/dev/null || bind_rate=30
+	update_nfct="$(uci -q get turboacc.config.fastpath_mh_update_nfct)"
+	[ "$update_nfct" = 1 ] || update_nfct=0
+	printf 'bind_rate=%s update_nfct=%s\n' "$bind_rate" "$update_nfct"
+}
+
+c2000_hnat_settings_match()
+{
+	local expected actual
+
+	expected="$(c2000_desired_hnat_settings)" || return 1
+	actual="$(cat "$SETTINGS_EFFECTIVE" 2>/dev/null)" || return 1
+	[ "$actual" = "$expected" ]
+}
+
+write_hnat_setting()
+{
+	local type="$1" value="$2"
+
+	[ -w "$HNAT_DIR/hnat_setting" ] || return 1
+	printf '%s %s\n' "$type" "$value" > "$HNAT_DIR/hnat_setting"
+}
+
+sync_hnat_settings()
+{
+	local desired bind_rate update_nfct tmp
+
+	desired="$(c2000_desired_hnat_settings)" || return 1
+	bind_rate="${desired#bind_rate=}"
+	bind_rate="${bind_rate%% *}"
+	update_nfct="${desired##*update_nfct=}"
+
+	# This driver accepts commands through hnat_setting but its read callback
+	# logs registers to dmesg instead of returning the active values.  Treat
+	# successful writes as the kernel acknowledgement and publish both values
+	# atomically for deterministic user-space readback.
+	write_hnat_setting 1 "$bind_rate" &&
+		write_hnat_setting 7 "$update_nfct" || return 1
+	tmp="${SETTINGS_EFFECTIVE}.$$"
+	if ! printf '%s\n' "$desired" > "$tmp" || ! mv "$tmp" "$SETTINGS_EFFECTIVE"; then
+		rm -f "$tmp"
+		return 1
+	fi
+	c2000_hnat_settings_match
+}
+
+set_hnat_hook_state()
+{
+	local enabled="$1" expected
+
+	[ -e "$HNAT_DIR/hook_toggle" ] || return 1
+	[ -w "$HNAT_DIR/hook_toggle" ] || return 1
+	case "$enabled" in
+		0) expected=disabled ;;
+		1) expected=enabled ;;
+		*) return 1 ;;
+	esac
+	echo "$enabled" > "$HNAT_DIR/hook_toggle" || return 1
+	[ "$(cat "$HNAT_DIR/hook_toggle" 2>/dev/null)" = "$expected" ]
+}
+
+disable_hnat_hook()
+{
+	set_hnat_hook_state 0 || return 1
+
+	# hnat_disable_hook() is required to invalidate every old PPE BIND entry.
+	# Do not remap endpoints until the debugfs dump proves the table is clean.
+	wait_hnat_bind_table_empty
+}
+
+hnat_bind_table_empty()
+{
+	local rc
+
+	[ -r "$HNAT_DIR/all_entry" ] || return 1
+	grep -Fq '|state=BIND|' "$HNAT_DIR/all_entry"
+	rc=$?
+	[ "$rc" = 1 ]
+}
+
+wait_hnat_bind_table_empty()
+{
+	local i=0
+
+	while [ "$i" -lt "$HNAT_FLUSH_WAIT_LOOPS" ]; do
+		hnat_bind_table_empty && return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+reload_firewall()
+{
+	/etc/init.d/firewall reload >/dev/null 2>&1
+}
+
+write_hnat_topology()
+{
+	local role="$1" expected actual
+
+	# The kernel accepts this only with hooks fully disabled and commits the
+	# whole tuple or nothing. Never fall back to the four legacy endpoint
+	# files because their sequential writes can expose a mixed topology.
+	[ "$(cat "$HNAT_DIR/hook_toggle" 2>/dev/null)" = disabled ] || return 1
+	[ -e "$HNAT_TOPOLOGY" ] &&
+		[ -r "$HNAT_TOPOLOGY" ] &&
+		[ -w "$HNAT_TOPOLOGY" ] || return 1
+	expected="$(c2000_expected_hnat_topology "$role")" || return 1
+	printf '%s\n' "$expected" > "$HNAT_TOPOLOGY" || return 1
+	actual="$(c2000_hnat_topology_read)" || return 1
+	[ "$actual" = "$expected" ] || return 1
+	c2000_hnat_endpoints_match "$role"
+}
+
+prepare_ppe_reinjection()
+{
+	local role="$1"
+
+	c2000_is_mtk_gmac "$C2000_PORT_DEVICE" &&
+		c2000_is_mtk_gmac "$C2000_PPE_DEVICE" &&
+		c2000_ppe_device_unused &&
+		c2000_ppe_runtime_unowned || return 1
+
+	case "$role" in
+		wan)
+			ip link set dev "$C2000_PPE_DEVICE" up >/dev/null 2>&1 ||
+				return 1
+			c2000_netdev_is_up "$C2000_PPE_DEVICE" || return 1
+			;;
+		lan)
+			if c2000_netdev_is_up "$C2000_PPE_DEVICE"; then
+				ip link set dev "$C2000_PPE_DEVICE" down >/dev/null 2>&1 ||
+					return 1
+			fi
+			;;
+		*)
+			return 1
+			;;
+	esac
+	c2000_ppe_runtime_unowned
+}
+
+prepare_rxppd()
+{
+	local master driver_rx
+
+	if [ ! -d "$SYS_CLASS_NET/$C2000_RX_PPD_DEVICE" ]; then
+		ip link add dev "$C2000_RX_PPD_DEVICE" type dummy >/dev/null 2>&1 ||
+			return 1
+	fi
+
+	# If rxppd predates the HNAT notifier, recreate only this package-owned
+	# dummy while hooks are down so the driver receives NETDEV_REGISTER.
+	driver_rx="$(sed -n 's/^g_rx_ppdev=//p' \
+		"$HNAT_DIR/hnat_ppd_if" 2>/dev/null | head -n 1)"
+	if [ "$driver_rx" != "$C2000_RX_PPD_DEVICE" ]; then
+		ip -d link show dev "$C2000_RX_PPD_DEVICE" 2>/dev/null |
+			grep -qw dummy || return 1
+		ip link set dev "$C2000_RX_PPD_DEVICE" nomaster >/dev/null 2>&1 ||
+			true
+		ip link delete dev "$C2000_RX_PPD_DEVICE" >/dev/null 2>&1 ||
+			return 1
+		ip link add dev "$C2000_RX_PPD_DEVICE" type dummy >/dev/null 2>&1 ||
+			return 1
+	fi
+
+	ip link set dev "$C2000_RX_PPD_DEVICE" up >/dev/null 2>&1 || return 1
+	master="$(c2000_netdev_master "$C2000_RX_PPD_DEVICE" 2>/dev/null || true)"
+	case "$master" in
+		br-lan) ;;
+		'')
+			ip link set dev "$C2000_RX_PPD_DEVICE" master br-lan \
+				>/dev/null 2>&1 || return 1
+			;;
+		*) return 1 ;;
+	esac
+	c2000_rxppd_ready
+}
+
+fail_closed()
+{
+	if [ ! -e "$HNAT_DIR/hook_toggle" ]; then
+		set_effective_state disabled
+	elif disable_hnat_hook >/dev/null 2>&1; then
+		set_effective_state disabled
+	else
+		# Do not claim fail-closed when debugfs could not prove it.
+		set_effective_state unknown
+	fi
+	set_whnat_state disabled
+	return 1
+}
+
+converge_non_hnat()
+{
+	local fastpath="$1" desired_sw sw_changed=0
+
+	case "$fastpath" in
+		disabled) desired_sw=0 ;;
+		flow_offloading) desired_sw=1 ;;
+		*) return 1 ;;
+	esac
+
+	# Both generic software flow offload and a manual Disable selection are
+	# valid non-HNAT steady states, including before the HNAT module has ever
+	# been loaded. If the driver is present, prove that hooks are down and that
+	# no stale PPE BIND entry survived.
+	set_effective_state unknown
+	if [ -e "$HNAT_DIR/hook_toggle" ]; then
+		[ -w "$HNAT_DIR/hook_toggle" ] &&
+			disable_hnat_hook || return 1
+	fi
+
+	[ "$(uci -q get firewall.@defaults[0].flow_offloading)" = "$desired_sw" ] || {
+		uci -q set "firewall.@defaults[0].flow_offloading=$desired_sw" ||
+			return 1
+		sw_changed=1
+	}
+	[ "$(uci -q get firewall.@defaults[0].flow_offloading_hw)" = 0 ] || {
+		uci -q set firewall.@defaults[0].flow_offloading_hw='0' || return 1
+		sw_changed=1
+	}
+	if [ "$sw_changed" = 1 ]; then
+		uci -q commit firewall || return 1
+	fi
+	reload_firewall || return 1
+
+	if [ -e "$HNAT_DIR/hook_toggle" ]; then
+		[ "$(cat "$HNAT_DIR/hook_toggle" 2>/dev/null)" = disabled ] &&
+			wait_hnat_bind_table_empty || return 1
+	fi
+	[ "$(uci -q get firewall.@defaults[0].flow_offloading)" = "$desired_sw" ] &&
+		[ "$(uci -q get firewall.@defaults[0].flow_offloading_hw)" = 0 ] ||
+		return 1
+	rm -f "$ACCEL_DEGRADED"
+	set_effective_state "$fastpath"
+	set_whnat_state disabled
+	return 0
+}
+
+hnat_signal_abort()
+{
+	trap '' HUP INT TERM
+	# Do not touch hardware while merely waiting behind another owner.  Once
+	# this process owns HNAT, fail closed before releasing the lock.
+	if [ "$HNAT_LOCK_HELD" = 1 ]; then
+		fail_closed >/dev/null 2>&1 || true
+		flock -u 5 >/dev/null 2>&1 || true
+		HNAT_LOCK_HELD=0
+	fi
+	if [ "$HNAT_ROLE_HELD" = 1 ]; then
+		flock -u 4 >/dev/null 2>&1 || true
+		HNAT_ROLE_HELD=0
+	fi
+	exit 1
+}
+
+apply_mode_locked()
+{
+	local requested fastpath role access_enabled sw_changed=0
+
+	if ! command -v c2000_actual_role >/dev/null 2>&1; then
+		fail_closed
+		return $?
+	fi
+
+	role="$(c2000_actual_role)"
+	requested="$(uci -q get turboacc.config.fastpath)"
+	case "$requested" in
+		disabled|flow_offloading|mediatek_hnat) ;;
+		*)
+			fail_closed
+			return $?
+			;;
+	esac
+	fastpath="$(c2000_effective_fastpath "$role" "$requested")"
+
+	# Device access control is enforced in nftables before fw4's forward hook.
+	# MediaTek PPE and generic flowtables can retain or bypass established
+	# flows, so suspend both while the policy is enabled. The user's TurboACC
+	# selection remains untouched and is restored when access control is off.
+	access_enabled="$(uci -q get c2000max.access_control.enabled)"
+	if [ "$access_enabled" = 1 ]; then
+		converge_non_hnat disabled
+		return $?
+	fi
+
+	case "$fastpath" in
+		disabled|flow_offloading)
+			converge_non_hnat "$fastpath"
+			return $?
+			;;
+		mediatek_hnat) ;;
+		*)
+			fail_closed
+			return $?
+			;;
+	esac
+
+	# Only enable the verified LAN endpoint tuple. Both WAN modes are handled
+	# by the non-HNAT branch above; a saved HNAT preference becomes software
+	# flow offload until the port returns to LAN.
+	case "$role" in lan) ;; *)
+		fail_closed
+		return $?
+	esac
+	# Avoid flushing healthy flows on unrelated iface hotplug events.
+	if [ "$(uci -q get firewall.@defaults[0].flow_offloading)" = 0 ] &&
+	   [ "$(uci -q get firewall.@defaults[0].flow_offloading_hw)" = 0 ] &&
+	   c2000_hard_hnat_runtime_ready "$role"; then
+		# A healthy topology does not prove that a later TurboACC/EQoS parameter
+		# change reached the driver.  Synchronize the write-only command ABI and
+		# verify its effective shadow before taking the no-flush fast path.
+		if ! c2000_hnat_settings_match && ! sync_hnat_settings; then
+			fail_closed
+			return $?
+		fi
+		c2000_hnat_settings_match || {
+			fail_closed
+			return $?
+			}
+			sync_whnat_optional
+			set_effective_state mediatek_hnat
+			rm -f "$ACCEL_DEGRADED"
+		return 0
+	fi
+
+	lsmod | grep -q '^mtkhnat ' || modprobe mtkhnat >/dev/null 2>&1
+	[ -d "$HNAT_DIR" ] || {
+		fail_closed
+		return $?
+	}
+
+	# Hook-off is also the mandatory FOE/BIND flush barrier before changing
+	# any role endpoint.
+	disable_hnat_hook || {
+		set_effective_state unknown
+		return 1
+	}
+	set_effective_state disabled
+
+	[ "$(uci -q get firewall.@defaults[0].flow_offloading)" = 0 ] || {
+		uci -q set firewall.@defaults[0].flow_offloading='0' || {
+			fail_closed
+			return $?
+		}
+		sw_changed=1
+	}
+	[ "$(uci -q get firewall.@defaults[0].flow_offloading_hw)" = 0 ] || {
+		uci -q set firewall.@defaults[0].flow_offloading_hw='0' || {
+			fail_closed
+			return $?
+		}
+		sw_changed=1
+	}
+
+	if [ "$sw_changed" = "1" ]; then
+		uci -q commit firewall || {
+			fail_closed
+			return $?
+		}
+	fi
+
+	# Apply the board's explicit LAN mapping and prove every endpoint by
+	# readback before installing the hook.
+	reload_firewall &&
+		prepare_ppe_reinjection "$role" &&
+		prepare_rxppd &&
+		write_hnat_topology "$role" &&
+		hnat_bind_table_empty || {
+		fail_closed
+		return $?
+	}
+
+	sync_hnat_settings || {
+		fail_closed
+		return $?
+	}
+
+	set_hnat_hook_state 1 || {
+		fail_closed
+		return $?
+	}
+	[ "$(c2000_actual_role)" = "$role" ] &&
+		c2000_hard_hnat_runtime_ready "$role" || {
+		fail_closed
+		return $?
+	}
+
+	sync_whnat_optional
+	set_effective_state mediatek_hnat
+	rm -f "$ACCEL_DEGRADED"
+	return 0
+}
+
+apply_mode()
+{
+	local rc role_held=0
+
+	# The C2000 EQoS service holds ROLE -> HNAT across its complete QDMA/nft/tc
+	# transaction.  Its nested HNAT convergence must not reacquire either lock.
+	if [ "${C2000MAX_ACCEL_LOCKS_HELD:-0}" = "1" ]; then
+		apply_mode_locked
+		return $?
+	fi
+	trap hnat_signal_abort HUP INT TERM
+
+	# A normal TurboACC reload waits for an in-flight port transaction and then
+	# applies the newest UCI selection.  The port controller already owns this
+	# lock and uses C2000MAX_PORT_SWITCH=1, preserving role -> HNAT lock order.
+	if [ "${C2000MAX_PORT_SWITCH:-0}" != "1" ]; then
+		flock -x 4 || {
+			trap - HUP INT TERM
+			return 1
+		}
+		role_held=1
+		HNAT_ROLE_HELD=1
+	fi
+	if ! flock -x 5; then
+		if [ "$role_held" = 1 ]; then
+			flock -u 4
+			HNAT_ROLE_HELD=0
+		fi
+		trap - HUP INT TERM
+		return 1
+	fi
+	HNAT_LOCK_HELD=1
+	if [ -e "$PORT_SWITCHING" ] && [ "${C2000MAX_PORT_SWITCH:-0}" != "1" ]; then
+		# Obtaining ROLE_LOCK proves that no role transaction is still active.
+		# A leftover /var/run marker is stale and must not lock acceleration
+		# off for the rest of this boot.
+		rm -f "$PORT_SWITCHING"
+	fi
+	apply_mode_locked
+	rc=$?
+	flock -u 5
+	HNAT_LOCK_HELD=0
+	if [ "$role_held" = 1 ]; then
+		flock -u 4
+		HNAT_ROLE_HELD=0
+	fi
+	trap - HUP INT TERM
+	return "$rc"
+}
+
+start_service()
+{
+	apply_mode
+}
+
+reload_service()
+{
+	apply_mode
+}

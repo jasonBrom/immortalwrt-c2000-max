@@ -40,7 +40,7 @@ HOST_CONFIGURE_ARGS = \
 	--with-expat=$(STAGING_DIR_HOST) \
 	--disable-werror \
 	--without-uiout \
-	--enable-tui --disable-gdbtk --without-x \
+	--disable-tui --disable-gdbtk --without-x \
 	--without-included-gettext \
 	--enable-threads \
 	--disable-unit-tests \

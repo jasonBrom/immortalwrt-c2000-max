@@ -1,4 +1,4 @@
-/** 
+/**
  * turboacc backend ucode script
  * by chasey-dev <ellenyoung0912@gmail.com>
  **/
@@ -7,6 +7,7 @@
 
 import { access, open, stat, readfile } from 'fs';
 import { connect } from 'ubus';
+import * as uci from 'uci';
 
 // Persistent ubus connection
 const ubus = connect();
@@ -23,24 +24,133 @@ const module_active = (mod) => {
 	return (ref && ref !== "0");
 };
 
+const list_has = (value, needle) => {
+	if (type(value) == 'array')
+		return index(value, needle) >= 0;
+	if (type(value) == 'string')
+		return index(split(trim(value), /\s+/), needle) >= 0;
+	return false;
+};
+
+const list_values = (value) => {
+	if (type(value) == 'array')
+		return value;
+	if (type(value) == 'string')
+		return split(trim(value), /\s+/);
+	return [];
+};
+
+const token_refs_port = (token) =>
+	token == 'eth1' || match(token, /^eth1[.:]/);
+
+const no_foreign_port_refs = (network, role, bridge_name) => {
+	for (let name, section in network) {
+		let section_type = section['.type'];
+
+		for (let option in [ 'device', 'ifname', 'ports', 'name' ]) {
+			for (let token in list_values(section[option])) {
+				if (!token_refs_port(token))
+					continue;
+
+				let allowed =
+					role == 'lan' &&
+					section_type == 'device' &&
+					name == bridge_name &&
+					option == 'ports' &&
+					token == 'eth1';
+				if (!allowed)
+					allowed =
+						role == 'wan' &&
+						section_type == 'interface' &&
+						name == 'c2000_wan' &&
+						option == 'device' &&
+						token == 'eth1';
+				if (!allowed)
+					return false;
+			}
+		}
+	}
+	return true;
+};
+
+/*
+ * The role marker is display metadata only.  Derive the authoritative role
+ * from the network UCI graph so direct edits and interrupted switches fail
+ * closed instead of accidentally enabling HNAT on eth1-as-WAN.
+ */
+const actual_port_role = () => {
+	let cursor = uci.cursor();
+	let network = cursor.get_all('network') || {};
+	let bridge = null;
+	let bridge_name = null;
+
+	for (let name, section in network) {
+		if (section['.type'] == 'device' &&
+		    section.type == 'bridge' && section.name == 'br-lan') {
+			bridge = section;
+			bridge_name = name;
+			break;
+		}
+	}
+
+	let wan4 = network.c2000_wan;
+	let wan6 = network.c2000_wan6;
+	let in_lan = bridge && list_has(bridge.ports, 'eth1');
+	let wan_complete =
+		wan4?.['.type'] == 'interface' &&
+		wan4.device == 'eth1' &&
+		wan4.proto == 'dhcp' &&
+		wan4.c2000max_managed == '1' &&
+		wan6?.['.type'] == 'interface' &&
+		wan6.device == '@c2000_wan' &&
+		wan6.proto == 'dhcpv6' &&
+		wan6.c2000max_managed == '1';
+	let wan_absent = !wan4 && !wan6;
+
+	if (in_lan && !wan_complete && wan_absent &&
+	    no_foreign_port_refs(network, 'lan', bridge_name))
+		return 'lan';
+	if (!in_lan && wan_complete &&
+	    no_foreign_port_refs(network, 'wan', bridge_name))
+		return 'wan';
+	return 'inconsistent';
+};
+
 const methods = {
 	getSystemFeatures: {
 		call: function(req) {
 			const boardinfo = ubus.call('system', 'board') || {};
 			const kernel_ver = boardinfo.kernel || 'unknown';
 			const mod_path = `/lib/modules/${kernel_ver}/`;
+			const c2000max = boardinfo.board_name == 'nradio,c2000-max';
 
 			const features = {
 				hasIPV6:           access('/proc/net/ipv6_route'),
-				hasFLOWOFFLOADING: false, // Explicitly disabled for mt798x
+				hasFLOWOFFLOADING: true,
+				hasFLOWOFFLOADHW:  !c2000max,
 				hasFASTCLASSIFIER: access(`${mod_path}fast-classifier.ko`),
 				hasSHORTCUTFECM:   access(`${mod_path}shortcut-fe-cm.ko`),
 				hasMEDIATEKHNAT:   access(`${mod_path}mtkhnat.ko`),
 				hasGMAC2:          access('/sys/class/net/eth1'),
 				hasXTFULLCONENAT:  access(`${mod_path}xt_FULLCONENAT.ko`),
 				hasNFTFULLCONE:    access(`${mod_path}nft_fullcone.ko`),
-				hasTCPCCA:         read_trimmed('/proc/sys/net/ipv4/tcp_available_congestion_control')
+				hasTCPCCA:         read_trimmed('/proc/sys/net/ipv4/tcp_available_congestion_control'),
+				portRole:          null,
+				effectiveFastpath: null,
+				portSwitching:     false,
+				portDegraded:      false,
+				hardHnat:          c2000max
 			};
+			if (c2000max) {
+				features.portRole = actual_port_role();
+				features.portSwitching = access('/var/run/c2000max-port-role.switching');
+				features.portDegraded = access('/var/run/c2000max-port-role.degraded');
+				if (features.portRole == 'inconsistent' || features.portDegraded)
+					features.effectiveFastpath = 'disabled';
+				else
+					features.effectiveFastpath =
+						read_trimmed('/var/run/c2000max-hnat-effective') || 'disabled';
+			}
 
 			return features;
 		}

@@ -1,0 +1,136 @@
+#!/bin/sh
+
+case "$1" in
+	list)
+		cat <<'EOF'
+{
+	"sim_status": {},
+	"sim_switch": { "slot": "string" },
+	"sim_force": { "slot": "string" },
+	"hardware_status": {},
+	"fan_status": {},
+	"swap_status": {},
+	"swap_apply": {
+		"enabled": "bool",
+		"size_mb": "int",
+		"comp_algo": "string",
+		"priority": "int",
+		"swappiness": "int"
+	},
+	"access_status": {},
+	"access_apply": {},
+	"netbird_status": {},
+	"netbird_job_start": {
+		"action": "string",
+		"management_url": "string",
+		"setup_key": "string"
+	},
+	"netbird_job_status": { "job_id": "string" },
+	"port_status": {},
+	"port_switch": {
+		"role": "string",
+		"wan_mode": "string",
+		"ethernet_weight": "int",
+		"cellular_weight": "int",
+		"cellular_modem": "string"
+	},
+	"port_repair": {},
+	"port_job_status": { "job_id": "string" }
+}
+EOF
+		;;
+	call)
+		read -r input
+		case "$2" in
+			sim_status)
+				exec /usr/sbin/c2000max-sim status
+				;;
+			sim_switch)
+				slot="$(jsonfilter -s "$input" -e '@.slot')"
+				case "$slot" in
+					external1|external2|internal)
+						result="$(/usr/sbin/c2000max-sim switch "$slot")"
+						printf '%s\n' "$result"
+						;;
+					*)
+						echo '{"success":false,"message":"无效卡槽"}'
+						;;
+				esac
+				;;
+			sim_force)
+				slot="$(jsonfilter -s "$input" -e '@.slot')"
+				case "$slot" in
+					external1|external2)
+						result="$(/usr/sbin/c2000max-sim force "$slot")"
+						printf '%s\n' "$result"
+						;;
+					*)
+						echo '{"success":false,"message":"强制 GPIO 模式仅支持两个外置卡槽"}'
+						;;
+				esac
+				;;
+			hardware_status)
+				exec /usr/sbin/c2000max-hwmon
+				;;
+			fan_status)
+				exec /usr/sbin/c2000max-fan status
+				;;
+			swap_status)
+				exec /usr/sbin/c2000max-swap status
+				;;
+			swap_apply)
+				enabled="$(jsonfilter -s "$input" -e '@.enabled')"
+				size_mb="$(jsonfilter -s "$input" -e '@.size_mb')"
+				comp_algo="$(jsonfilter -s "$input" -e '@.comp_algo')"
+				priority="$(jsonfilter -s "$input" -e '@.priority')"
+				swappiness="$(jsonfilter -s "$input" -e '@.swappiness')"
+				exec /usr/sbin/c2000max-swap apply \
+					"$enabled" "$size_mb" "$comp_algo" "$priority" "$swappiness"
+				;;
+			access_status)
+				exec /usr/sbin/c2000max-access status
+				;;
+			access_apply)
+				exec /usr/sbin/c2000max-access apply
+				;;
+			netbird_status)
+				exec /usr/sbin/c2000max-netbird-job status
+				;;
+			netbird_job_start)
+				printf '%s\n' "$input" |
+					/usr/sbin/c2000max-netbird-job enqueue
+				;;
+			netbird_job_status)
+				job_id="$(jsonfilter -s "$input" -e '@.job_id')"
+				exec /usr/sbin/c2000max-netbird-job job-status "$job_id"
+				;;
+			port_status)
+				exec /usr/sbin/c2000max-port-role status
+				;;
+			port_switch)
+				role="$(jsonfilter -s "$input" -e '@.role')"
+				wan_mode="$(jsonfilter -s "$input" -e '@.wan_mode')"
+				ethernet_weight="$(jsonfilter -s "$input" -e '@.ethernet_weight')"
+				cellular_weight="$(jsonfilter -s "$input" -e '@.cellular_weight')"
+				cellular_modem="$(jsonfilter -s "$input" -e '@.cellular_modem')"
+				case "$role" in
+					lan|wan)
+						exec /usr/sbin/c2000max-port-role switch "$role" \
+							"$wan_mode" "$ethernet_weight" "$cellular_weight" \
+							"${cellular_modem:-auto}"
+						;;
+					*)
+						echo '{"success":false,"message":"无效网口角色"}'
+						;;
+				esac
+				;;
+			port_repair)
+				exec /usr/sbin/c2000max-port-role repair
+				;;
+			port_job_status)
+				job_id="$(jsonfilter -s "$input" -e '@.job_id')"
+				exec /usr/sbin/c2000max-port-role job-status "$job_id"
+				;;
+		esac
+		;;
+esac

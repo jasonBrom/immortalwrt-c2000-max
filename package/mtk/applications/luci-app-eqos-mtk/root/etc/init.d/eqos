@@ -1,11 +1,41 @@
 #!/bin/sh /etc/rc.common
 # Copyright (C) 2006 OpenWrt.org
 
+. /lib/functions/system.sh
+
 START=50
 USE_PROCD=1
 
 QDMA_RATE_MAX=1000000
 TOTAL_RATE_MAX=1000
+C2000_ROLE_LOCK="${C2000_ROLE_LOCK:-/var/lock/c2000max-port-role.lock}"
+C2000_HNAT_LOCK="${C2000_HNAT_LOCK:-/var/lock/c2000max-hnat.lock}"
+C2000_EQOS_ROLE_HELD=0
+C2000_EQOS_HNAT_HELD=0
+
+: >>"$C2000_ROLE_LOCK" || exit 1
+: >>"$C2000_HNAT_LOCK" || exit 1
+exec 4<>"$C2000_ROLE_LOCK" || exit 1
+exec 5<>"$C2000_HNAT_LOCK" || exit 1
+
+c2000_eqos_signal_abort() {
+	trap '' HUP INT TERM
+	# Waiting for ROLE/HNAT does not authorize changing another owner's
+	# hardware state.  Fail closed only after this operation owns HNAT.
+	if [ "$C2000_EQOS_HNAT_HELD" = 1 ]; then
+		eqos stop >/dev/null 2>&1 || true
+		if [ -w /sys/kernel/debug/hnat/hook_toggle ]; then
+			echo 0 > /sys/kernel/debug/hnat/hook_toggle 2>/dev/null || true
+		fi
+		flock -u 5 >/dev/null 2>&1 || true
+		C2000_EQOS_HNAT_HELD=0
+	fi
+	if [ "$C2000_EQOS_ROLE_HELD" = 1 ]; then
+		flock -u 4 >/dev/null 2>&1 || true
+		C2000_EQOS_ROLE_HELD=0
+	fi
+	exit 1
+}
 
 is_uinteger() {
 	case "$1" in
@@ -136,12 +166,31 @@ parse_device() {
 	fi
 }
 
-start_service() {
+eqos_start_service_locked() {
 	config_load eqos
 
 	local enabled
 	config_get_bool enabled config enabled 0
 	[ "$enabled" -eq 1 ] || return 0
+	if [ "$(board_name)" = "nradio,c2000-max" ]; then
+		local role_lib=/usr/lib/c2000max/port-role.sh role
+
+		if [ ! -r "$role_lib" ]; then
+			eqos stop >/dev/null 2>&1
+			return 1
+		fi
+		. "$role_lib"
+		role="$(c2000_actual_role)"
+		if [ "$(uci -q get turboacc.config.fastpath)" != mediatek_hnat ] ||
+		   [ "$role" != "lan" ] ||
+		   { [ "${C2000MAX_PORT_SWITCH:-0}" != "1" ] &&
+		     { [ -e "$C2000_SWITCHING" ] || [ -e "$C2000_DEGRADED" ]; }; }; then
+		# EQoS depends on the board's eth1 LAN/PPD HNAT topology.  Keep its UCI
+		# selection but pause runtime shaping unless the real topology is LAN.
+			eqos stop >/dev/null 2>&1
+			return $?
+		fi
+	fi
 
 	local download upload
 	config_get download config download
@@ -159,6 +208,13 @@ start_service() {
 	USED_SELECTORS=" "
 	config_foreach validate_device device
 	[ "$CONFIG_ERROR" -eq 0 ] || return 1
+
+	# Switch away from software flow offloading before EQoS can load or
+	# configure mtkhnat.  This avoids a transient dual-fastpath state.
+	if [ "$(board_name)" = "nradio,c2000-max" ] &&
+	   ! eqos enable; then
+		return 1
+	fi
 
 	if ! eqos start "$download" "$upload"; then
 		eqos stop >/dev/null 2>&1
@@ -178,20 +234,73 @@ start_service() {
 	fi
 }
 
-stop_service() {
+eqos_stop_service_locked() {
 	eqos stop
 }
 
-reload_service() {
+eqos_reload_service_locked() {
 	local enabled
 
 	config_load eqos
 	config_get_bool enabled config enabled 0
 	if [ "$enabled" -eq 1 ]; then
-		start_service
+		eqos_start_service_locked
 	else
-		stop_service
+		eqos_stop_service_locked
 	fi
+}
+
+c2000_eqos_run_locked() {
+	local callback="$1" rc old_locks
+
+	shift
+	if [ "$(board_name)" != "nradio,c2000-max" ] ||
+	   [ "${C2000MAX_ACCEL_LOCKS_HELD:-0}" = "1" ]; then
+		"$callback" "$@"
+		return $?
+	fi
+
+	# rc.common already serializes EQoS service calls with its procd lock.
+	# Acquire the shared acceleration locks in the one permitted order and keep
+	# them across HNAT convergence, QDMA programming, nftables and tc/IFB.
+	trap c2000_eqos_signal_abort HUP INT TERM
+	flock -x 4 || {
+		trap - HUP INT TERM
+		return 1
+	}
+	C2000_EQOS_ROLE_HELD=1
+	if ! flock -x 5; then
+		flock -u 4
+		C2000_EQOS_ROLE_HELD=0
+		trap - HUP INT TERM
+		return 1
+	fi
+	C2000_EQOS_HNAT_HELD=1
+	old_locks="${C2000MAX_ACCEL_LOCKS_HELD:-0}"
+	C2000MAX_ACCEL_LOCKS_HELD=1
+	export C2000MAX_ACCEL_LOCKS_HELD
+	"$callback" "$@"
+	rc=$?
+	C2000MAX_ACCEL_LOCKS_HELD="$old_locks"
+	export C2000MAX_ACCEL_LOCKS_HELD
+	flock -u 5
+	C2000_EQOS_HNAT_HELD=0
+	flock -u 4
+	C2000_EQOS_ROLE_HELD=0
+	trap - HUP INT TERM
+	return "$rc"
+}
+
+start_service() {
+	c2000_eqos_run_locked eqos_start_service_locked "$@"
+}
+
+stop_service() {
+	c2000_eqos_run_locked eqos_stop_service_locked "$@"
+}
+
+reload_service() {
+	c2000_eqos_run_locked eqos_reload_service_locked "$@"
 }
 
 service_triggers() {

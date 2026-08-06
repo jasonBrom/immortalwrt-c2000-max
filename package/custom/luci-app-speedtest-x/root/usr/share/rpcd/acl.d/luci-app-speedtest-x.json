@@ -1,0 +1,15 @@
+{
+	"luci-app-speedtest-x": {
+		"description": "Grant access to the Speedtest-X Go service",
+		"read": {
+			"uci": [ "speedtestx" ]
+		},
+		"write": {
+			"uci": [ "speedtestx" ],
+			"file": {
+				"/etc/init.d/speedtest-x": [ "exec" ],
+				"/usr/libexec/speedtest-x/service-control": [ "exec" ]
+			}
+		}
+	}
+}

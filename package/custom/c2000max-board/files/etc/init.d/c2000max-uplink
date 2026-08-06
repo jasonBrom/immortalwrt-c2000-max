@@ -1,0 +1,78 @@
+#!/bin/sh /etc/rc.common
+
+START=98
+STOP=10
+
+controller=/usr/sbin/c2000max-port-role
+
+start()
+{
+	local pending pending_role role mode ethernet_weight cellular_weight modem
+	local actual force=0 repair=0 job_id fallback_job status network_converged message
+
+	[ -x "$controller" ] || return 0
+	pending="$(uci -q get c2000max.ethernet.pending)"
+	status="$("$controller" status 2>/dev/null)"
+	actual="$(printf '%s' "$status" |
+		jsonfilter -e '@.actual_role' 2>/dev/null)"
+	pending_role="$(uci -q get c2000max.ethernet.pending_role)"
+
+	# The topology that is actually present in network UCI is authoritative.
+	# A stale V23 journal must never replay an abandoned WAN target and disable
+	# the working LAN/5G path on every boot.
+	case "$actual" in
+		lan|wan)
+			role="$actual"
+			;;
+		*)
+			role=lan
+			repair=1
+			force=1
+			;;
+	esac
+
+	if [ "$pending" = 1 ] && [ "$pending_role" = "$role" ]; then
+		mode="$(uci -q get c2000max.ethernet.pending_wan_mode)"
+		ethernet_weight="$(uci -q get c2000max.ethernet.pending_ethernet_weight)"
+		cellular_weight="$(uci -q get c2000max.ethernet.pending_cellular_weight)"
+		modem="$(uci -q get c2000max.ethernet.pending_cellular_modem)"
+		force=1
+	else
+		mode="$(uci -q get c2000max.ethernet.wan_mode)"
+		ethernet_weight="$(uci -q get c2000max.ethernet.ethernet_weight)"
+		cellular_weight="$(uci -q get c2000max.ethernet.cellular_weight)"
+		modem="$(uci -q get c2000max.ethernet.cellular_modem)"
+		if [ "$pending" = 1 ]; then
+			force=1
+			[ "$role" = lan ] && repair=1
+		fi
+	fi
+	case "$role" in lan|wan) ;; *) return 0 ;; esac
+	[ -n "$mode" ] || mode=ethernet_only
+	[ -n "$ethernet_weight" ] || ethernet_weight=60
+	[ -n "$cellular_weight" ] || cellular_weight=40
+	[ -n "$modem" ] || modem=auto
+	mkdir -p /var/run/c2000max-port-role || return 0
+	chmod 700 /var/run/c2000max-port-role || return 0
+	job_id="boot-$(date +%s)-$$"
+	# Run synchronously before QModem S99.  Service enable/disable intent is
+	# applied here, but modem registration and IP acquisition are deliberately
+	# allowed to continue asynchronously after boot.
+	if ! "$controller" apply "$role" "$job_id" "$mode" "$ethernet_weight" \
+		"$cellular_weight" "$modem" "$force" "$repair" >/dev/null 2>&1; then
+		status="$("$controller" status 2>/dev/null)"
+		network_converged="$(printf '%s' "$status" |
+			jsonfilter -e '@.network_converged' 2>/dev/null)"
+		if [ "$network_converged" != true ]; then
+			# Never quarantine cellular service at boot.  A final synchronous
+			# LAN repair gives the device a deterministic management path while
+			# QModem continues its normal asynchronous registration.
+			fallback_job="boot-lan-fallback-$(date +%s)-$$"
+			"$controller" apply lan "$fallback_job" ethernet_only 60 40 \
+				auto 1 1 >/dev/null 2>&1 || true
+			message="开机角色恢复未完成，已尝试恢复 LAN 与 5G；不会关闭 QModem"
+			logger -t c2000max-uplink "$message"
+		fi
+	fi
+	return 0
+}

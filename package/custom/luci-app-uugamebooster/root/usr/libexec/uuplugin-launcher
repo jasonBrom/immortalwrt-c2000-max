@@ -1,0 +1,517 @@
+#!/bin/sh
+
+RUNDIR="/tmp/uu"
+PROG="$RUNDIR/uuplugin"
+UU_CONF="$RUNDIR/uu.conf"
+GUARDIAN="$RUNDIR/xuplugin-guardian"
+XTABLES="$RUNDIR/xtables-nft-multi"
+PLATFORM_FILE="$RUNDIR/.platform"
+H3C_INFO="$RUNDIR/h3c_info"
+NETDEV_BASELINE="$RUNDIR/.netdev-before"
+STATE_FILE="/tmp/uuplugin.state"
+PLATFORM=''
+
+state() {
+	printf '%s\n' "$1" > "$STATE_FILE"
+	logger -t uuplugin "$1"
+}
+
+load_platform() {
+	PLATFORM="$(uci -q get uuplugin.uuplugin.platform 2>/dev/null)"
+	case "$PLATFORM" in
+		openwrt-aarch64|h3c-nx30pro) ;;
+		*)
+			PLATFORM='openwrt-aarch64'
+			logger -t uuplugin 'invalid platform in UCI; using openwrt-aarch64'
+			;;
+	esac
+}
+
+cleanup_stage() {
+	case "$stage" in
+		/tmp/uu-install.*) rm -rf "$stage" ;;
+	esac
+	[ -z "$archive" ] || rm -f "$archive"
+	rm -f "$PROG.new.$$" "$GUARDIAN.new.$$" "$UU_CONF.new.$$" \
+		"$XTABLES.new.$$" "$PLATFORM_FILE.new.$$" "$H3C_INFO.new.$$" \
+		"$NETDEV_BASELINE.new.$$"
+}
+
+valid_install() {
+	[ "$(cat "$PLATFORM_FILE" 2>/dev/null)" = "$PLATFORM" ] || return 1
+	[ -x "$PROG" ] && [ -x "$GUARDIAN" ] && [ -s "$UU_CONF" ] || return 1
+
+	case "$PLATFORM" in
+		openwrt-aarch64)
+			[ -x "$XTABLES" ]
+			;;
+		h3c-nx30pro)
+			# The official H3C archive contains exactly three files and uses
+			# the firmware's system xtables implementation.
+			[ ! -e "$XTABLES" ]
+			;;
+	esac
+}
+
+uu_rules_present() {
+	local objects object family name seen
+
+	[ -s /tmp/xu_nft_delete.txt ] || return 1
+	command -v nft >/dev/null 2>&1 || return 1
+	objects="$(awk '
+		($1 == "delete" || $1 == "flush") && $2 == "table" && NF >= 4 {
+			print $3 ":" $4
+		}
+	' /tmp/xu_nft_delete.txt 2>/dev/null | sort -u)"
+	[ -n "$objects" ] || return 1
+
+	seen=0
+	for object in $objects; do
+		family="${object%%:*}"
+		name="${object#*:}"
+		case "$family" in ip|ip6|inet) ;; *) return 1 ;; esac
+		printf '%s' "$name" | grep -Eq '^[A-Za-z0-9_.-]+$' || return 1
+		nft list table "$family" "$name" >/dev/null 2>&1 || return 1
+		seen=1
+	done
+	[ "$seen" -eq 1 ]
+}
+
+stack_value() {
+	local key
+
+	key="$1"
+	[ -s "$RUNDIR/uu_stack_config" ] || return 1
+	awk -v wanted="$key" '
+		{
+			line = $0
+			sub(/^[[:space:]]*export[[:space:]]+/, "", line)
+			pos = index(line, "=")
+			if (!pos) next
+			name = substr(line, 1, pos - 1)
+			gsub(/[[:space:]]/, "", name)
+			if (name != wanted) next
+			value = substr(line, pos + 1)
+			gsub(/^[[:space:]"\047]+/, "", value)
+			gsub(/[[:space:]"\047]+$/, "", value)
+			print value
+			exit
+		}
+	' "$RUNDIR/uu_stack_config"
+}
+
+valid_uu_table() {
+	printf '%s' "$1" | grep -Eq '^[0-9]+$' || return 1
+	case "$1" in 0|253|254|255) return 1 ;; esac
+	[ "$1" -gt 0 ] 2>/dev/null
+}
+
+cleanup_table() {
+	local table family tries
+
+	table="$1"
+	valid_uu_table "$table" || return 0
+	for family in -4 -6; do
+		tries=0
+		while [ "$tries" -lt 32 ] &&
+			ip "$family" rule show 2>/dev/null | \
+				grep -Eq "(lookup|table)[[:space:]]+$table([[:space:]]|$)"; do
+			ip "$family" rule del table "$table" >/dev/null 2>&1 || break
+			tries=$((tries + 1))
+		done
+		ip "$family" route flush table "$table" >/dev/null 2>&1 || true
+	done
+}
+
+cleanup_mark_to_main() {
+	local mark family tries
+
+	mark="$1"
+	printf '%s' "$mark" | \
+		grep -Eq '^(0x[0-9A-Fa-f]+|[0-9]+)(/(0x[0-9A-Fa-f]+|[0-9]+))?$' || return 0
+	case "$mark" in 0|0x0|0X0) return 0 ;; esac
+	for family in -4 -6; do
+		tries=0
+		while [ "$tries" -lt 8 ]; do
+			ip "$family" rule del fwmark "$mark" lookup main >/dev/null 2>&1 || break
+			tries=$((tries + 1))
+		done
+	done
+}
+
+cleanup_uu_tun() {
+	local tun
+
+	tun="$(stack_value UU_TUN_NAME 2>/dev/null)"
+	[ -n "$tun" ] || return 0
+	printf '%s' "$tun" | grep -Eq '^[A-Za-z0-9_.:-]{1,15}$' || return 0
+	[ -e "/sys/class/net/$tun/tun_flags" ] || return 0
+	# The pre-start snapshot proves that this TUN did not belong to another
+	# service before UU launched.  Never delete a pre-existing tun0 by name.
+	[ -s "$NETDEV_BASELINE" ] || return 0
+	grep -Fxq "$tun" "$NETDEV_BASELINE" && return 0
+	ip -4 route flush dev "$tun" >/dev/null 2>&1 || true
+	ip -6 route flush dev "$tun" >/dev/null 2>&1 || true
+	ip link delete dev "$tun" >/dev/null 2>&1 ||
+		ip tuntap del dev "$tun" mode tun >/dev/null 2>&1 || true
+}
+
+cleanup_policy_runtime() {
+	local table mark
+
+	for table in \
+		"$(stack_value UU_ROUTE_DEFAULT_TABLE 2>/dev/null)" \
+		"$(stack_value UU_ROUTE_FWMARK_TABLE 2>/dev/null)"; do
+		[ -n "$table" ] && cleanup_table "$table"
+	done
+	mark="$(stack_value UU_DEVICE_FWMARK 2>/dev/null)"
+	[ -n "$mark" ] && cleanup_mark_to_main "$mark"
+	cleanup_uu_tun
+}
+
+cleanup_h3c_xtables_links() {
+	local name source link
+
+	for name in libxt_TPROXY.so libxt_socket.so; do
+		source="/usr/lib/iptables/$name"
+		link="/lib/$name"
+		[ -L "$link" ] || continue
+		[ "$(readlink "$link" 2>/dev/null)" = "$source" ] || continue
+		rm -f "$link"
+	done
+}
+
+cleanup_rules() {
+	# uuplugin writes the inverse nft transaction before installing its rules.
+	# Replaying it is safer than guessing table, chain or policy-route names.
+	if [ -s /tmp/xu_nft_delete.txt ] && command -v nft >/dev/null 2>&1; then
+		nft -f /tmp/xu_nft_delete.txt >/dev/null 2>&1 ||
+			logger -t uuplugin 'warning: stale UU nft rules could not be removed'
+	fi
+
+	# This helper is present on H3C firmware only.  Never require or synthesize
+	# it on OpenWrt, but use it when switching away from an H3C installation.
+	if [ -x /usr/bin/uuclearnat ]; then
+		/usr/bin/uuclearnat >/dev/null 2>&1 || true
+	fi
+
+	cleanup_policy_runtime
+	cleanup_h3c_xtables_links
+	rm -f /tmp/xu_nft_create.txt /tmp/xu_nft_delete.txt \
+		"$RUNDIR/uu_stack_config" "$RUNDIR/uu_stack_config_result" \
+		"$RUNDIR/activate_status" "$RUNDIR/crash_dump" \
+		"$RUNDIR/uu_crash_dump" "$RUNDIR/h3c_info" \
+		"$RUNDIR/uu.tar.gz" "$RUNDIR/uuplugin.old" "$NETDEV_BASELINE"
+}
+
+remove_bundle() {
+	rm -f "$PROG" "$GUARDIAN" "$UU_CONF" "$XTABLES" "$PLATFORM_FILE"
+}
+
+ensure_runtime_alias() {
+	mkdir -p /var/tmp || return 1
+	if [ -L /var/tmp/uu ]; then
+		ln -sfn "$RUNDIR" /var/tmp/uu
+	elif [ ! -e /var/tmp/uu ]; then
+		ln -s "$RUNDIR" /var/tmp/uu
+	elif [ ! /var/tmp/uu -ef "$RUNDIR" ]; then
+		logger -t uuplugin 'warning: /var/tmp/uu exists and is not the UU runtime alias'
+		return 1
+	fi
+}
+
+safe_product_name() {
+	printf '%s' "$1" | LC_ALL=C tr -cd 'A-Za-z0-9 ._:+()/-' | cut -c 1-64
+}
+
+generate_h3c_info() {
+	local model mac
+
+	model="$(cat /tmp/sysinfo/model 2>/dev/null)"
+	[ -n "$model" ] || model="$(uci -q get system.@system[0].hostname 2>/dev/null)"
+	model="$(safe_product_name "$model")"
+	[ -n "$model" ] || model='C2000MAX'
+
+	mac="$(cat /sys/class/net/br-lan/address 2>/dev/null | tr 'A-F' 'a-f')"
+	printf '%s' "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || return 1
+
+	{
+		printf 'productname=%s\n' "$model"
+		printf 'ethaddr=%s\n' "$mac"
+		printf 'hardversion=VER.A\n'
+		printf 'bootversion=100\n'
+		printf 'manucode=%s\n' "$mac"
+	} > "$H3C_INFO.new.$$" || return 1
+	chmod 0600 "$H3C_INFO.new.$$" || return 1
+	mv -f "$H3C_INFO.new.$$" "$H3C_INFO"
+}
+
+ensure_h3c_xtables_links() {
+	local name source link
+
+	for name in libxt_TPROXY.so libxt_socket.so; do
+		source="/usr/lib/iptables/$name"
+		link="/lib/$name"
+		[ -f "$source" ] || return 1
+		if [ -L "$link" ]; then
+			[ "$(readlink "$link" 2>/dev/null)" = "$source" ] || return 1
+		elif [ -e "$link" ]; then
+			return 1
+		else
+			ln -s "$source" "$link" || return 1
+		fi
+	done
+}
+
+prepare_platform_runtime() {
+	case "$PLATFORM" in
+		h3c-nx30pro)
+			generate_h3c_info && ensure_h3c_xtables_links
+			;;
+		openwrt-aarch64)
+			cleanup_h3c_xtables_links
+			rm -f "$H3C_INFO"
+			;;
+	esac
+}
+
+snapshot_netdevs() {
+	local path
+
+	[ -s "$NETDEV_BASELINE" ] && return 0
+	: > "$NETDEV_BASELINE.new.$$" || return 1
+	for path in /sys/class/net/*; do
+		[ -e "$path" ] || continue
+		basename "$path" >> "$NETDEV_BASELINE.new.$$"
+	done
+	sort -u "$NETDEV_BASELINE.new.$$" -o "$NETDEV_BASELINE.new.$$" || return 1
+	mv -f "$NETDEV_BASELINE.new.$$" "$NETDEV_BASELINE"
+}
+
+handle_platform_switch() {
+	local installed
+
+	installed="$(cat "$PLATFORM_FILE" 2>/dev/null)"
+	[ -n "$installed" ] || return 0
+	[ "$installed" = "$PLATFORM" ] && return 0
+
+	state "正在从 $installed 切换到 $PLATFORM，清理旧核心和规则"
+	cleanup_rules
+	remove_bundle
+}
+
+network_ready() {
+	[ -d /sys/class/net/br-lan ] &&
+		ip -4 addr show dev br-lan 2>/dev/null | grep -q 'inet ' &&
+		ip -4 route show default 2>/dev/null | grep -q '^default '
+}
+
+network_components_ready() {
+	local module
+
+	[ -c /dev/net/tun ] || modprobe tun >/dev/null 2>&1
+	modprobe nf_conntrack_netlink >/dev/null 2>&1 || return 1
+
+	# Both backends are installed by this package.  Treat a load failure as a
+	# real initialization failure instead of reporting a live process as ready.
+	for module in nft_tproxy nft_socket xt_TPROXY xt_socket; do
+		modprobe "$module" >/dev/null 2>&1 || return 1
+	done
+
+	[ -c /dev/net/tun ] || return 1
+
+	case "$PLATFORM" in
+		openwrt-aarch64)
+			# NetEase ships this static xtables binary with the OpenWrt core.
+			"$XTABLES" iptables-nft --version 2>/dev/null | \
+				grep -q 'nf_tables' || return 1
+			"$XTABLES" iptables-nft -j TPROXY -h >/dev/null 2>&1 || return 1
+			"$XTABLES" iptables-nft -m socket -h >/dev/null 2>&1 || return 1
+			;;
+		h3c-nx30pro)
+			iptables --version >/dev/null 2>&1 || return 1
+			ip6tables --version >/dev/null 2>&1 || return 1
+			XTABLES_LIBDIR=/lib iptables -j TPROXY -h >/dev/null 2>&1 || return 1
+			XTABLES_LIBDIR=/lib iptables -m socket -h >/dev/null 2>&1 || return 1
+			[ -c /dev/natflushdev ] ||
+				logger -t uuplugin 'H3C experimental core: /dev/natflushdev is unavailable'
+			[ -x /usr/bin/uuclearnat ] ||
+				logger -t uuplugin 'H3C experimental core: /usr/bin/uuclearnat is unavailable'
+			;;
+	esac
+}
+
+normalize_download_url() {
+	case "$1" in
+		https://uurouter.gdl.netease.com/uuplugin/"$PLATFORM"/*|\
+		https://uurouter.gdl04.netease.com/uuplugin/"$PLATFORM"/*|\
+		https://uurouter-19.gdl.nieapps.com/uuplugin/"$PLATFORM"/*)
+			printf '%s\n' "$1"
+			;;
+		http://uurouter.gdl.netease.com/uuplugin/"$PLATFORM"/*|\
+		http://uurouter.gdl04.netease.com/uuplugin/"$PLATFORM"/*|\
+		http://uurouter-19.gdl.nieapps.com/uuplugin/"$PLATFORM"/*)
+			printf 'https://%s\n' "${1#http://}"
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+archive_layout_valid() {
+	local actual expected
+
+	actual="$(tar -tzf "$archive" 2>/dev/null | sed 's#^\./##; /^$/d' | sort -u)" ||
+		return 1
+	case "$PLATFORM" in
+		openwrt-aarch64)
+			expected="$(printf '%s\n' uu.conf uuplugin xtables-nft-multi xuplugin-guardian | sort)"
+			;;
+		h3c-nx30pro)
+			expected="$(printf '%s\n' uu.conf uuplugin xuplugin-guardian | sort)"
+			;;
+	esac
+	[ "$actual" = "$expected" ]
+}
+
+valid_stage_file() {
+	[ -f "$1" ] && [ ! -L "$1" ]
+}
+
+download_plugin() {
+	local response plugin_url plugin_md5 mirror actual_md5 api_url
+
+	state "正在从网易获取 $PLATFORM 核心"
+	api_url="https://router.uu.163.com/api/plugin?type=$PLATFORM"
+	response="$(curl -4 -fLsS --retry 2 --retry-all-errors --retry-delay 2 \
+		--connect-timeout 10 --max-time 30 \
+		-H 'Accept: text/plain' "$api_url" 2>/dev/null)" || return 1
+
+	plugin_url="${response%%,*}"
+	response="${response#*,}"
+	plugin_md5="${response%%,*}"
+	response="${response#*,}"
+	mirror="${response%%,*}"
+
+	plugin_url="$(normalize_download_url "$plugin_url")" || return 1
+	mirror="$(normalize_download_url "$mirror")" || mirror=''
+	echo "$plugin_md5" | grep -Eq '^[0-9a-fA-F]{32}$' || return 1
+	plugin_md5="$(printf '%s' "$plugin_md5" | tr 'A-F' 'a-f')"
+
+	archive="/tmp/uuplugin-download.$$"
+	if ! curl -4 -fLsS --retry 2 --retry-all-errors --retry-delay 2 \
+		--connect-timeout 10 --max-time 180 \
+		"$plugin_url" -o "$archive" 2>/dev/null; then
+		case "$mirror" in
+			https://*) curl -4 -fLsS --retry 2 --retry-all-errors --retry-delay 2 \
+				--connect-timeout 10 --max-time 180 \
+				"$mirror" -o "$archive" 2>/dev/null || return 1 ;;
+			*) return 1 ;;
+		esac
+	fi
+
+	actual_md5="$(md5sum "$archive" 2>/dev/null | awk '{ print $1 }')"
+	[ "$actual_md5" = "$plugin_md5" ] || return 1
+	archive_layout_valid || return 1
+
+	stage="$(mktemp -d /tmp/uu-install.XXXXXX)" || return 1
+	tar -xzf "$archive" -C "$stage" || return 1
+	valid_stage_file "$stage/uuplugin" && [ -x "$stage/uuplugin" ] || return 1
+	valid_stage_file "$stage/xuplugin-guardian" && [ -x "$stage/xuplugin-guardian" ] || return 1
+	valid_stage_file "$stage/uu.conf" && [ -s "$stage/uu.conf" ] || return 1
+	if [ "$PLATFORM" = 'openwrt-aarch64' ]; then
+		valid_stage_file "$stage/xtables-nft-multi" &&
+			[ -x "$stage/xtables-nft-multi" ] || return 1
+	fi
+	grep -Eq '^version=v[0-9]+\.[0-9]+\.[0-9]+' "$stage/uu.conf" || return 1
+	"$stage/uuplugin" -v >/dev/null 2>&1 || return 1
+
+	mkdir -p "$RUNDIR"
+	cp -f "$stage/uuplugin" "$PROG.new.$$" || return 1
+	cp -f "$stage/xuplugin-guardian" "$GUARDIAN.new.$$" || return 1
+	cp -f "$stage/uu.conf" "$UU_CONF.new.$$" || return 1
+	if [ "$PLATFORM" = 'openwrt-aarch64' ]; then
+		cp -f "$stage/xtables-nft-multi" "$XTABLES.new.$$" || return 1
+	fi
+	printf '%s\n' "$PLATFORM" > "$PLATFORM_FILE.new.$$" || return 1
+	chmod 0755 "$PROG.new.$$" "$GUARDIAN.new.$$"
+	[ "$PLATFORM" != 'openwrt-aarch64' ] || chmod 0755 "$XTABLES.new.$$"
+	chmod 0644 "$UU_CONF.new.$$"
+	# The marker is moved last.  An interrupted install can therefore never be
+	# accepted as a bundle belonging to the selected platform.
+	mv -f "$PROG.new.$$" "$PROG"
+	mv -f "$GUARDIAN.new.$$" "$GUARDIAN"
+	mv -f "$UU_CONF.new.$$" "$UU_CONF"
+	if [ "$PLATFORM" = 'openwrt-aarch64' ]; then
+		mv -f "$XTABLES.new.$$" "$XTABLES"
+	else
+		rm -f "$XTABLES"
+	fi
+	mv -f "$PLATFORM_FILE.new.$$" "$PLATFORM_FILE"
+	cleanup_stage
+	stage=''
+	archive=''
+	return 0
+}
+
+if [ "$1" = '--rules-present' ]; then
+	uu_rules_present
+	exit $?
+fi
+
+trap cleanup_stage EXIT INT TERM
+mkdir -p "$RUNDIR"
+ensure_runtime_alias || {
+	state 'UU 运行目录兼容链接创建失败，30 秒后重试'
+	sleep 30
+	exit 1
+}
+load_platform
+handle_platform_switch
+[ "$1" != '--prepare-only' ] || exit 0
+
+while :; do
+	if ! network_ready; then
+		state '等待 LAN 和 IPv4 默认路由就绪，10 秒后重试'
+		sleep 10
+		continue
+	fi
+
+	if valid_install; then
+		if ! prepare_platform_runtime; then
+			state '所选 UU 核心的平台兼容文件未就绪，30 秒后重试'
+			sleep 30
+			continue
+		fi
+		if ! network_components_ready; then
+			state 'UU 网络组件未就绪，30 秒后重试'
+			sleep 30
+			continue
+		fi
+
+		snapshot_netdevs || {
+			state 'UU 网络接口基线记录失败，30 秒后重试'
+			sleep 30
+			continue
+		}
+		if [ "$PLATFORM" = 'h3c-nx30pro' ] &&
+			{ [ ! -c /dev/natflushdev ] || [ ! -x /usr/bin/uuclearnat ]; }; then
+			state 'H3C 实验核心运行中：缺少专用 natflush 组件，网络不会标记为已就绪'
+		else
+			state "UU GameAcc ($PLATFORM) 核心运行，等待 APP 下发网络配置"
+		fi
+		cd "$RUNDIR" || exit 1
+		export PATH="$RUNDIR:/usr/sbin:/usr/bin:/sbin:/bin"
+		unset XTABLES_LIBDIR IPTABLES_LIB_DIR IP6TABLES_LIB_DIR
+		exec ./uuplugin ./uu.conf
+	fi
+
+	if ! download_plugin; then
+		cleanup_stage
+		stage=''
+		archive=''
+		state '主程序下载或校验失败，30 秒后重试'
+		sleep 30
+	fi
+done

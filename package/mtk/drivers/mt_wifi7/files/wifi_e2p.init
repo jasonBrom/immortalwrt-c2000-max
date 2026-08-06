@@ -22,6 +22,8 @@ mtk_wifi_e2p_extract() {
 	local offset=$2
 	local count=$3
 	local mtd
+	local output="/lib/firmware/$FIRMWARE"
+	local temporary="${output}.new"
 
 	. /lib/functions.sh
 
@@ -29,11 +31,11 @@ mtk_wifi_e2p_extract() {
 	mtd=`echo $mtd | sed -e 's/mtdblock/mtd/'`
 	ubi=$(find_ubi_volume $part)
 	mmc=`blkid -t PARTLABEL=factory -o device`
+	rm -f "$temporary"
 
 	if [ -n "$mtd" ]
 	then
-		nanddump $mtd -f /lib/firmware/$FIRMWARE -s $offset -l $count 2>/dev/null
-		return
+		nanddump "$mtd" -f "$temporary" -s "$offset" -l "$count" 2>/dev/null
 	elif [ -n "$ubi" ]
 	then
 		input_dev=$ubi
@@ -45,7 +47,20 @@ mtk_wifi_e2p_extract() {
 		return
 	fi
 
-	dd if=$input_dev of=/lib/firmware/$FIRMWARE bs=$count skip=$offset count=1 2>/dev/null
+	if [ -n "$input_dev" ]; then
+		if [ "$offset" -eq 0 ]; then
+			dd if="$input_dev" of="$temporary" bs="$count" count=1 2>/dev/null
+		else
+			dd if="$input_dev" of="$temporary" bs=1 skip="$offset" count="$count" 2>/dev/null
+		fi
+	fi
+
+	if [ -f "$temporary" ] && [ "$(wc -c < "$temporary")" = "$count" ]; then
+		mv -f "$temporary" "$output"
+	else
+		rm -f "$temporary"
+		mtk_wifi_e2p_die "failed to extract $count bytes from partition $part"
+	fi
 }
 
 check_e2p() {
@@ -57,7 +72,6 @@ check_e2p() {
 
 	[ "$FIRMWARE" != "" ] || FIRMWARE=$INDEX0_EEPROM_name
 	FW="/lib/firmware/$FIRMWARE"
-	[ -e "$FW" ] && return
 
 	# This is the ideal way, but driver does not follow...
 	# case "$FIRMWARE" in
@@ -79,18 +93,21 @@ check_e2p() {
 		l1_e2p_offset=`printf "%d" $INDEX2_EEPROM_offset`
 		l1_e2p_size=`printf "%d" $INDEX2_EEPROM_size`
 		final_size=`expr $l1_e2p_offset + $l1_e2p_size`
+		[ -f "$FW" ] && [ "$(wc -c < "$FW")" = "$final_size" ] && return
 		mtk_wifi_e2p_extract "Factory" 0 $final_size
 		;;
 	$INDEX1_EEPROM_name)
 		l1_e2p_offset=`printf "%d" $INDEX1_EEPROM_offset`
 		l1_e2p_size=`printf "%d" $INDEX1_EEPROM_size`
 		final_size=`expr $l1_e2p_offset + $l1_e2p_size`
+		[ -f "$FW" ] && [ "$(wc -c < "$FW")" = "$final_size" ] && return
 		mtk_wifi_e2p_extract "Factory" 0 $final_size
 		;;
 	$INDEX0_EEPROM_name)
 		l1_e2p_offset=`printf "%d" $INDEX0_EEPROM_offset`
 		l1_e2p_size=`printf "%d" $INDEX0_EEPROM_size`
 		final_size=`expr $l1_e2p_offset + $l1_e2p_size`
+		[ -f "$FW" ] && [ "$(wc -c < "$FW")" = "$final_size" ] && return
 		mtk_wifi_e2p_extract "Factory" 0 $final_size
 		;;
 	esac

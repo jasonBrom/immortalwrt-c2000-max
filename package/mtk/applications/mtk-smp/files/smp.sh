@@ -59,6 +59,23 @@ MT7990_whnat()
 	# CPU#_AFFINITY="add binding irq number here"
 	# CPU#_RPS="add binding interface name here"
 	dbg "[MT7990_whnat]"
+	if [ "$board" = "nradio,c2000-max" ] && [ "$NUM_OF_CPU" = "2" ]; then
+		# MT7987B has two CPUs and uses eth1 (LAN) plus USB-NCM eth2 (WAN).
+		# Fold all four Ethernet rings, FE TX and XHCI onto the real CPUs
+		# instead of silently leaving the generic CPU2/CPU3 assignments unused.
+		ethif1=eth1
+		ethif2=eth2
+		RPS_IF_LIST="$RPS_IF_LIST $ethif2"
+
+		CPU0_AFFINITY="$wifi1_irq $eth_rx0 $eth_rx2 $usb"
+		CPU1_AFFINITY="$wifi2_irq $eth_rx1 $eth_rx3 $eth_tx"
+
+		CPU0_RPS="$ethif1 $ethif2 $wifi1 $wifi2 $wifi1_apcli0 $wifi2_apcli0"
+		CPU1_RPS="$ethif1 $ethif2 $wifi1 $wifi2 $wifi1_apcli0 $wifi2_apcli0"
+		dbg "[C2000MAX_whnat_dualcore]"
+		return
+	fi
+
 	if [ "$num_of_wifi" = "0" ]; then
 		CPU0_AFFINITY="$wifi1_irq $eth_rx0"
 		CPU1_AFFINITY="$wifi2_irq $eth_rx1"
@@ -829,6 +846,7 @@ setup_model()
 
 	case $board in
 	glinet,gl-mt3600be|\
+	nradio,c2000-max|\
 	tenda,be12-pro|\
 	*7987*|*7988*)
 		MT7990_whnat $num_of_wifi

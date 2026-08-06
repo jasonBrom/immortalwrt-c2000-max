@@ -1,12 +1,15 @@
 --- a/src/ap/ieee802_11.c
 +++ b/src/ap/ieee802_11.c
-@@ -1158,6 +1158,18 @@ static int sae_assign_vlan(struct hostap
+@@ -1158,6 +1158,22 @@ static int sae_assign_vlan(struct hostap
  
  void sae_accept_sta(struct hostapd_data *hapd, struct sta_info *sta)
  {
 +	const u8 *pmksa_addr = sta->addr;
 +	const u8 *pmksa_link_addr = sta->addr;
-+	bool is_ml = ap_sta_has_ml_rsn(hapd, sta);
++	bool is_ml = false;
++
++#ifdef CONFIG_IEEE80211BE
++	is_ml = ap_sta_has_ml_rsn(hapd, sta);
 +
 +	if (is_ml) {
 +		u8 link_id = sta->mld_assoc_link_id;
@@ -15,6 +18,7 @@
 +		pmksa_addr = sta->mld_info.common_info.mld_addr;
 +		pmksa_link_addr = sta->mld_info.links[link_id].peer_addr;
 +	}
++#endif /* CONFIG_IEEE80211BE */
 +
  	if (sta->sae->tmp &&
  	    sae_assign_vlan(hapd, sta, sta->sae->tmp->vlan_id) < 0)

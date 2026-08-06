@@ -1,0 +1,374 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/* NRadio C2000-MAX support reconstructed from the reference SD image. */
+
+/dts-v1/;
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/leds/common.h>
+
+#include "mt7987b.dtsi"
+
+/ {
+	model = "NRadio C2000-MAX";
+	compatible = "nradio,c2000-max", "mediatek,mt7987b", "mediatek,mt7987";
+
+	/delete-node/ memory;
+
+	memory@40000000 {
+		device_type = "memory";
+		/* The retail C2000-MAX is populated with 512 MiB DDR3. */
+		reg = <0 0x40000000 0 0x20000000>;
+	};
+
+	aliases {
+		serial0 = &uart0;
+		label-mac-device = &gmac1;
+		led-boot = &led_status;
+		led-failsafe = &led_error;
+		led-running = &led_status;
+		led-upgrade = &led_status;
+	};
+
+	chosen {
+		bootargs = "console=ttyS0,115200n1 earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait rootfstype=squashfs,f2fs pci=pcie_bus_perf cpufreq.default_governor=performance";
+		stdout-path = "serial0:115200n8";
+	};
+
+	gpio-export {
+		compatible = "gpio-export";
+		#size-cells = <0>;
+
+		modem-power {
+			gpio-export,name = "cpe-pwr";
+			gpio-export,output = <0>;
+			gpios = <&pio 49 GPIO_ACTIVE_LOW>;
+		};
+
+		sim-mux {
+			gpio-export,name = "cpe-sel0";
+			gpio-export,output = <1>;
+			gpios = <&pio 48 GPIO_ACTIVE_HIGH>;
+		};
+
+		fan-power {
+			gpio-export,name = "fan-hw";
+			gpio-export,output = <0>;
+			gpios = <&pio 5 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		button-reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
+			debounce-interval = <10>;
+		};
+
+		button-wps {
+			label = "wps";
+			linux,code = <KEY_WPS_BUTTON>;
+			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
+			debounce-interval = <10>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led_status: led-status {
+			label = "blue:status";
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_STATUS;
+			gpios = <&pio 9 GPIO_ACTIVE_LOW>;
+		};
+
+		led-signal-1 {
+			label = "blue:sig1";
+			gpios = <&pio 8 GPIO_ACTIVE_LOW>;
+		};
+
+		led-signal-2 {
+			label = "blue:sig2";
+			gpios = <&pio 11 GPIO_ACTIVE_LOW>;
+		};
+
+		led-signal-3 {
+			label = "blue:sig3";
+			gpios = <&pio 10 GPIO_ACTIVE_LOW>;
+		};
+
+		led_error: led-error {
+			label = "red:error";
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_FAULT;
+			gpios = <&pio 12 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	reg_3p3v: regulator-3p3v {
+		compatible = "regulator-fixed";
+		regulator-name = "fixed-3.3V";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-boot-on;
+		regulator-always-on;
+	};
+
+	reg_usb_5v: regulator-usb-5v {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-5v";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-boot-on;
+		regulator-always-on;
+	};
+};
+
+/* MT7987B requires the CPU supply link before the MediaTek cpufreq driver
+ * can create policy0.  The shared mt7987b.dtsi already removes CPU2/CPU3.
+ */
+&cpu0 {
+	proc-supply = <&vproc>;
+};
+
+&cpu1 {
+	proc-supply = <&vproc>;
+};
+
+&eth {
+	status = "okay";
+};
+
+&fan {
+	/* Matches the vendor firmware: PWM1, 50 us period, three levels. */
+	cooling-levels = <0 128 255>;
+	pwms = <&pwm 1 50000 0>;
+	status = "okay";
+};
+
+&gmac0 {
+	nvmem-cells = <&macaddr_factory_4 0>;
+	nvmem-cell-names = "mac-address";
+	phy-handle = <&phy1>;
+	phy-mode = "2500base-x";
+	status = "okay";
+};
+
+&gmac1 {
+	nvmem-cells = <&macaddr_factory_a 0>;
+	nvmem-cell-names = "mac-address";
+	phy-handle = <&phy15>;
+	phy-mode = "internal";
+	status = "okay";
+};
+
+/*
+ * The internal MTK port is LAN (eth1); the MT5700-CN NCM interface is the
+ * external USB WAN (eth2).  chasey's RxPPD path reinjects that external WAN
+ * traffic through the real LAN GMAC, so no synthetic third GMAC is needed.
+ */
+&hnat {
+	mtketh-wan = "eth2";
+	mtketh-lan = "eth1";
+	mtketh-lan2 = "/";
+	mtketh-ppd = "eth1";
+	mtketh-rx-ppd = "rxppd";
+	mtketh-max-gmac = <2>;
+	mtketh-ppe-num = <2>;
+	ext-devices = "eth2", "eth3", "eth4", "eth5", "eth6", "eth7", "eth8", "eth9",
+		      "usb0", "usb1", "wwan0", "wwan0_1", "wwan0_2",
+		      "rmnet0", "rmnet_data0", "rmnet_data1", "rmnet_mhi0",
+		      "mhi_hwip0", "mhi0";
+	ext-devices-prefix = "wwan", "usb", "eth", "rmnet", "mhi";
+	status = "okay";
+};
+
+&mdio {
+	phy1: ethernet-phy@1 {
+		compatible = "ethernet-phy-ieee802.3-c45";
+		reg = <1>;
+		interrupt-parent = <&pio>;
+		interrupts = <41 IRQ_TYPE_LEVEL_LOW>;
+		reset-assert-us = <100000>;
+		reset-deassert-us = <100000>;
+		reset-gpios = <&pio 42 GPIO_ACTIVE_LOW>;
+	};
+
+	phy15: ethernet-phy@f {
+		compatible = "ethernet-phy-ieee802.3-c45";
+		reg = <15>;
+		interrupt-parent = <&gic>;
+		interrupts = <GIC_SPI 286 IRQ_TYPE_LEVEL_HIGH>;
+		pinctrl-names = "i2p5gbe-led";
+		pinctrl-0 = <&i2p5gbe_led0_pins>;
+	};
+};
+
+&mmc0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&sd_pins_default>;
+	pinctrl-1 = <&sd_pins_uhs>;
+	bus-width = <4>;
+	max-frequency = <48000000>;
+	cap-sd-highspeed;
+	vmmc-supply = <&reg_3p3v>;
+	vqmmc-supply = <&reg_3p3v>;
+	no-mmc;
+	no-sdio;
+	status = "okay";
+
+	card@0 {
+		compatible = "mmc-card";
+		reg = <0>;
+
+		block {
+			compatible = "block-device";
+
+			partitions {
+				block-partition-env {
+					partname = "u-boot-env";
+					nvmem-layout {
+						compatible = "u-boot,env";
+					};
+				};
+
+				block-partition-factory {
+					partname = "factory";
+
+					nvmem-layout {
+						compatible = "fixed-layout";
+						#address-cells = <1>;
+						#size-cells = <1>;
+
+						eeprom_factory_0: eeprom@0 {
+							reg = <0x0 0x1e00>;
+						};
+
+						macaddr_factory_4: macaddr@4 {
+							compatible = "mac-base";
+							reg = <0x4 0x6>;
+							#nvmem-cell-cells = <1>;
+						};
+
+						macaddr_factory_a: macaddr@a {
+							compatible = "mac-base";
+							reg = <0xa 0x6>;
+							#nvmem-cell-cells = <1>;
+						};
+					};
+				};
+			};
+		};
+	};
+};
+
+&pcie0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie0_pins>;
+	reset-gpios = <&pio 38 GPIO_ACTIVE_HIGH>;
+	status = "okay";
+
+	pcie@0,0 {
+		reg = <0x0000 0 0 0 0>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+
+		mt7990@0,0 {
+			compatible = "mediatek,mt76";
+			reg = <0x0000 0 0 0 0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/* MT7990 + MT7976 dual-band layout, as used by GL-MT3600BE. */
+			ieee80211-freq-limit = <2400000 2500000>,
+					       <5170000 5835000>;
+			nvmem-cells = <&eeprom_factory_0>;
+			nvmem-cell-names = "eeprom";
+		};
+	};
+};
+
+&pcie1 {
+	status = "disabled";
+};
+
+&pio {
+	pwm_fan_pins: pwm-fan-pins {
+		mux {
+			function = "pwm";
+			groups = "pwm1_0";
+		};
+	};
+};
+
+&pwm {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pwm_fan_pins>;
+	status = "okay";
+};
+
+/*
+ * The factory firmware boots from the board's 32 MiB SPI-NOR.  The SD image
+ * exposes only the first 64 KiB of the unit-specific bdinfo partition.  Do not
+ * register the factory firmware/rootfs partitions: OpenWrt's MTD splitters can
+ * otherwise mistake them for the active SD root filesystem and overlay.
+ *
+ * Identity reads do not need the vendor firmware's 52 MHz quad-I/O calibration
+ * path.  Keep this deliberately conservative at 10 MHz, single-I/O and
+ * read-only so a failed flash probe cannot affect the SD storage path.
+ */
+&spi2 {
+	compatible = "mediatek,ipm-spi-quad", "mediatek,spi-ipm";
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi2_pins>;
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <10000000>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@150000 {
+				label = "bdinfo";
+				reg = <0x150000 0x010000>;
+				read-only;
+			};
+		};
+	};
+};
+
+&ssusb {
+	vusb33-supply = <&reg_3p3v>;
+	vbus-supply = <&reg_usb_5v>;
+	status = "okay";
+};
+
+&tphyu3port0 {
+	status = "okay";
+};
+
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_pins>;
+	status = "okay";
+};
+
+/* The shared MT7987 DTS has a decimal-place typo (8.5 V).  MT7987B uses a
+ * fixed 0.85 V CPU rail for all OPPs, including the supported 2.0 GHz OPP. */
+&vproc {
+	regulator-min-microvolt = <850000>;
+	regulator-max-microvolt = <850000>;
+};

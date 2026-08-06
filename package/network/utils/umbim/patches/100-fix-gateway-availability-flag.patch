@@ -1,0 +1,28 @@
+From: C2000-MAX compatibility build
+Subject: cli: test the gateway availability flag when printing gateways
+
+The IP configuration response has independent address, gateway, DNS and MTU
+availability bits.  Testing the DNS bit for the gateway suppresses a valid
+gateway whenever an operator supplies no DNS servers, leaving callers with an
+address but no usable default route.
+
+--- a/cli.c
++++ b/cli.c
+@@ -257,7 +257,7 @@ mbim_config_response(void *buffer, size_t
+ 			mbim_get_ipv4(buffer, out, 4 + offset);
+ 			printf("  ipv4address: %s/%d\n", out, mbim_get_int(buffer, offset));
+ 		}
+-	if (le32toh(ip->ipv4configurationavailable) & MBIM_IP_CONFIGURATION_AVAILABLE_FLAG_DNS) {
++	if (le32toh(ip->ipv4configurationavailable) & MBIM_IP_CONFIGURATION_AVAILABLE_FLAG_GATEWAY) {
+ 		mbim_get_ipv4(buffer, out, le32toh(ip->ipv4gateway));
+ 		printf("  ipv4gateway: %s\n", out);
+ 	}
+@@ -275,7 +275,7 @@ mbim_config_response(void *buffer, size_t
+ 			mbim_get_ipv6(buffer, out, 4 + offset);
+ 			printf("  ipv6address: %s/%d\n", out, mbim_get_int(buffer, offset));
+ 		}
+-	if (le32toh(ip->ipv6configurationavailable) & MBIM_IP_CONFIGURATION_AVAILABLE_FLAG_DNS) {
++	if (le32toh(ip->ipv6configurationavailable) & MBIM_IP_CONFIGURATION_AVAILABLE_FLAG_GATEWAY) {
+ 		mbim_get_ipv6(buffer, out, le32toh(ip->ipv6gateway));
+ 		printf("  ipv6gateway: %s\n", out);
+ 	}

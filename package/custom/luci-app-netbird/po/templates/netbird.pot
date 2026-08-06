@@ -1,0 +1,1550 @@
+msgid ""
+msgstr "Content-Type: text/plain; charset=UTF-8"
+
+#: htdocs/luci-static/resources/view/netbird/status.js:97
+msgid "%d / %d available"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:110
+msgid "%d / %d connected"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:66
+msgid "%d d ago"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:294
+msgid "%d entries"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:64
+msgid "%d h ago"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:62
+msgid "%d min ago"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:60
+msgid "%d s ago"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:296
+msgid "(%d total)"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:198
+msgid ""
+"A NetBird tarball or a direct binary URL; after download it is checked "
+"against this CPU architecture."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:54
+msgid "A key is configured; leave blank to keep it"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:204
+msgid "Accept Client Routes"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:209
+msgid "Accept Server Routes"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:231
+msgid ""
+"Accept WireGuard connections from peers that do not have Rosenpass enabled."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:199
+msgid "Access LAN"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:210
+msgid "Act as a router for server routes received from the management service."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:199
+msgid "Active exit node"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:97
+msgid "Active source"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:363
+msgid "Active source is now %s (running v%s)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:247
+msgid ""
+"All internet traffic from this router and devices routed through it will go "
+"through \"%s\"."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:396
+msgid "All severities"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:414
+msgid "All times"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:109
+msgid ""
+"Allow NetBird peers to reach your LAN (src=netbird, dest=lan). Higher "
+"exposure, enable with care. No effect if Block Inbound is enabled on the "
+"Settings Firewall tab."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:200
+msgid ""
+"Allow access to local networks (LAN) when this peer acts as a router or exit "
+"node."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:101
+msgid "Allow hosts on your LAN to reach NetBird peers (src=lan, dest=netbird)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:171
+msgid ""
+"Allow local port forwarding through the SSH server. Requires netbird 0.72.x."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:177
+msgid ""
+"Allow remote port forwarding through the SSH server. Requires netbird 0.72.x."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:159
+msgid ""
+"Allow root login via the NetBird SSH server. Requires netbird 0.72.x; "
+"ignored on older versions."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:276
+msgid "Already on the latest official version (v%s)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:212
+msgid "Apply exit node"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:117
+msgid "Apply forwarding"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:104
+msgid "Architecture"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:206
+#: htdocs/luci-static/resources/view/netbird/overview.js:304
+#: root/usr/share/luci/menu.d/luci-app-netbird.json:13
+msgid "Authentication"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:170
+msgid "Backend state"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:327
+msgid "Binary installed: v%s."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:77
+msgid "Binary source"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:145
+msgid "Block Inbound"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:146
+msgid ""
+"Block all inbound connections to this machine and routed networks (overrides "
+"management policies). This also blocks the NetBird to LAN forwarding on the "
+"Network tab."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:94
+msgid "CLI version"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:148
+#: htdocs/luci-static/resources/view/netbird/setup.js:274
+#: htdocs/luci-static/resources/view/netbird/versions.js:308
+#: htdocs/luci-static/resources/view/netbird/versions.js:348
+#: htdocs/luci-static/resources/view/netbird/versions.js:375
+msgid "Cancel"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:93
+msgid "Caution:"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:154
+#: htdocs/luci-static/resources/view/netbird/versions.js:177
+msgid "Check for updates"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:260
+msgid "Check for updates failed."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:257
+msgid "Checking…"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:210
+msgid "Checksum (optional)"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:337
+msgid "Checksum verification failed; the download was rejected."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:68
+msgid ""
+"Configure the OpenWrt firewall zone and forwarding rules for NetBird, and "
+"select the exit node."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:221
+msgid "Exit node"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:271
+msgid "Exit node switched to \"%s\"."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:272
+msgid "Exit node turned off."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:275
+msgid "Failed to switch the exit node."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:183
+msgid "NetBird is not connected. Connect from the Authentication page first."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:180
+msgid ""
+"NetBird is not running. Start it and connect from the Authentication page "
+"first."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:186
+msgid ""
+"No exit nodes are available. Set up a peer as an exit node in the NetBird "
+"management console first."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:351
+msgid "Not enough storage space. Delete unused downloaded versions and try again."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:36
+msgid "Configured"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:239
+msgid "Connect"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:33
+#: htdocs/luci-static/resources/view/netbird/status.js:95
+#: htdocs/luci-static/resources/view/netbird/status.js:96
+msgid "Connected"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:120
+msgid "Connected to NetBird."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:81
+#: htdocs/luci-static/resources/view/netbird/status.js:114
+msgid "Connection"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:72
+msgid ""
+"Connection and behavior settings applied via \"netbird up\". Forward "
+"semantics: a checked box enables the feature."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:248
+msgid "Connection control"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:120
+msgid "Connection failed."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:139
+msgid "Connection mode"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:51
+msgid "Could not determine the NetBird service state."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:184
+msgid "Could not read exit nodes:"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:272
+msgid "Could not reach GitHub to check the latest version."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:80
+msgid "Create firewall zone"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:68
+msgid ""
+"Creates a dedicated firewall zone bound to the NetBird device so NetBird "
+"traffic can flow."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:94
+msgid "Current"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:158
+msgid "Current configuration"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:29
+#: htdocs/luci-static/resources/view/netbird/versions.js:72
+msgid "Custom download"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:194
+msgid "Custom download URL"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:189
+msgid "DNS"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:93
+msgid "Daemon version"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:116
+msgid ""
+"Daemon version is the running daemon; CLI version is the binary on disk. "
+"They match unless the binary was switched without restarting the daemon."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:237
+#: htdocs/luci-static/resources/view/netbird/versions.js:376
+msgid "Delete"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:373
+msgid ""
+"Delete downloaded custom version v%s? This only removes the stored binary "
+"file."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:388
+msgid "Delete failed."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:372
+msgid "Delete version"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:386
+msgid "Deleted version v%s."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:153
+#: htdocs/luci-static/resources/view/netbird/overview.js:264
+msgid "Deregister"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:142
+msgid "Deregister this NetBird device?"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:232
+msgid "Deregister failed"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:118
+msgid ""
+"Device name reported to NetBird. Applied only when the peer first "
+"registers; to rename an already registered device, edit it in the NetBird "
+"management console. Leave blank to use the system hostname."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:259
+msgid "Disconnect"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:270
+msgid ""
+"Disconnect keeps your credentials; Log out removes the local NetBird "
+"identity (requires a setup key to reconnect)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:35
+#: htdocs/luci-static/resources/view/netbird/status.js:95
+#: htdocs/luci-static/resources/view/netbird/status.js:96
+msgid "Disconnected"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:218
+msgid "Download"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:309
+msgid "Download anyway"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:185
+msgid ""
+"Download the NetBird client from a custom URL, kept by version so you can "
+"roll back anytime."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:331
+msgid "Download/install failed: %s"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:223
+msgid "Downloaded versions"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:321
+msgid "Downloading NetBird binary"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:191
+msgid "Enable DNS"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:140
+msgid "Enable Firewall"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:217
+msgid "Enable IPv6"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:225
+msgid "Enable Rosenpass"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:153
+msgid "Enable SSH"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:182
+msgid "Enable SSH Authentication"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:284
+msgid "Enable and start"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:280
+msgid "Enable the NetBird service and start it now."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:165
+msgid ""
+"Enable the SFTP subsystem. Requires netbird 0.72.x; ignored on older "
+"versions."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:80
+msgid "Enabled"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:94
+msgid ""
+"Enabling forwarding exposes your LAN to NetBird mesh peers (and vice-versa)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:296
+msgid "Enter a custom download URL first."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:300
+msgid ""
+"Enter a valid checksum: md5 (32), sha1 (40), sha256 (64) or sha512 (128) hex "
+"characters."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:98
+msgid "FQDN"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:293
+msgid "Failed to remove automation."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:218
+msgid "Failed to set up the firewall zone."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:252
+msgid "Failed to update forwarding."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:138
+msgid "Firewall"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:162
+msgid "Firewall zone (bound device)"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:169
+msgid "Forwarding LAN → NetBird"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:173
+msgid "Forwarding NetBird → LAN"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:108
+msgid "Forwarding rules"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:248
+msgid "Forwarding updated: LAN→NetBird %s, NetBird→LAN %s."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:78
+msgid "General"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:115
+msgid "Hostname"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:138
+msgid "IP"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:215
+msgid "IPv6"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:342
+msgid "If no local copy is kept, it will be fetched from the %s feed first."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:214
+msgid ""
+"If set, the download must match this checksum or it is rejected. Use sha256 "
+"or stronger for tamper protection; md5/sha1 only guard against corruption."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:232
+msgid "In use"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:305
+msgid "Insecure download"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:288
+msgid "Install the netbird package (e.g. via %s), then reload this page."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:109
+msgid ""
+"Interface name \"%s\" looks like a reserved/blacklisted prefix (\"%s\"); it "
+"may conflict with other services. Use \"wt0\" if unsure."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:104
+msgid "Interface type"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:101
+msgid ""
+"Invalid interface name. Use 1-15 chars: start with a letter, then letters/"
+"digits/_/-."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:104
+msgid "Kernel"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:196
+msgid "Key from the NetBird console — one-time use, not shown again."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:97
+msgid "LAN → NetBird"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:91
+msgid "LAN ↔ NetBird forwarding"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:415
+msgid "Last 15 minutes"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:417
+msgid "Last 24 hours"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:141
+msgid "Last handshake"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:416
+msgid "Last hour"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:202
+msgid "Last used:"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:140
+msgid "Latency"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:274
+msgid "Latest official: v%s"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:106
+msgid "Lazy connection"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:192
+msgid "Leave blank if already logged in"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:192
+msgid ""
+"Let NetBird configure DNS. Off by default on OpenWrt to avoid competing with "
+"dnsmasq for port 53."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:431
+msgid "Loading…"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:239
+msgid "Log Level"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:343
+msgid "Log output truncated to last %d lines."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:191
+msgid "Logged in, leave blank to keep the current identity"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:165
+msgid "Logged out. The local NetBird identity was removed."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:253
+msgid "Local NetBird identity removed. Use a setup key to log in again."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:241
+msgid "Remove local identity only"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:223
+msgid ""
+"Route all internet traffic from this router and its clients through a "
+"NetBird peer. Exit nodes are defined in the NetBird management console. "
+"Changes take effect immediately and are remembered by the NetBird daemon."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:259
+msgid "Switch exit node"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:245
+msgid "Switch exit node?"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:206
+msgid "Switch to"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:251
+msgid ""
+"Switching the exit node changes the default route. Connections may drop "
+"briefly, and remote management sessions that do not run over NetBird can be "
+"cut off."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:248
+msgid ""
+"The exit node will be turned off; internet traffic will go out directly "
+"again."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:234
+msgid "The management server could not deregister this device — it may be unreachable, rebuilt, or it no longer knows this peer. You can remove the local identity only and then log in again with a new setup key. If the device is still listed on the server, remove it there manually."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:237
+msgid "Logging"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:38
+msgid "Login required"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:444
+#: root/usr/share/luci/menu.d/luci-app-netbird.json:68
+msgid "Logs"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:208
+msgid "Management URL"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:95
+msgid "Management server"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:218
+msgid "Management server URL — self-hosted or the official one."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:81
+msgid ""
+"Master switch. When off, NetBird disconnects and the service is stopped and "
+"disabled."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:190
+msgid "Message"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:136
+msgid "Name"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:22
+msgid "Needs login"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:444
+#: htdocs/luci-static/resources/view/netbird/overview.js:304
+#: htdocs/luci-static/resources/view/netbird/settings.js:71
+#: htdocs/luci-static/resources/view/netbird/setup.js:55
+#: htdocs/luci-static/resources/view/netbird/status.js:190
+#: htdocs/luci-static/resources/view/netbird/versions.js:51
+#: root/usr/share/luci/menu.d/luci-app-netbird.json:3
+msgid "NetBird"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:99
+msgid "NetBird IP"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:102
+msgid "NetBird IPv6"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:126
+msgid "NetBird disconnected."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:34
+msgid "NetBird is connected to the management server."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:290
+msgid ""
+"NetBird network automation removed. If you later change network settings and "
+"NetBird loses connectivity, reconnect once from the Authentication page to "
+"restore it."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:25
+msgid "NetBird not installed"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:136
+msgid "NetBird reconnected."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:102
+msgid "NetBird service enabled and started."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:105
+msgid "NetBird → LAN"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:141
+msgid ""
+"NetBird's own firewall rules (mesh ACL) — separate from the OpenWrt zone and "
+"forwarding on the Network tab."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:55
+#: root/usr/share/luci/menu.d/luci-app-netbird.json:57
+msgid "Network"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:107
+msgid "Networks"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:57
+msgid "Never"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:71
+msgid "No"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:361
+msgid "NetBird service is not running; no logs are available."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:351
+msgid "No NetBird daemon log entries yet."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:350
+msgid "No NetBird log entries in syslog ring buffer."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:82
+msgid "No connection details (%s)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:225
+msgid ""
+"No custom versions downloaded yet. Enter a URL above and click Download."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:55
+msgid "No key set"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:170
+msgid ""
+"No local %s binary copy is kept; switching will fetch it from the %s feed "
+"automatically (%s)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:199
+msgid "No log entries match the current filter."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:284
+msgid "No package upgrade found in the cached package lists."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:131
+msgid "No peers."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:37
+msgid "Not configured"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:39
+msgid ""
+"Not connected to the server. Enter the management URL and key below to "
+"connect."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:47
+#: htdocs/luci-static/resources/view/netbird/versions.js:148
+msgid "Not installed"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:165
+msgid "Not installed / not in %s database"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:43
+msgid "Off"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:189
+msgid "Off (direct internet access)"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:42
+msgid "On"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:66
+msgid "One-click setup"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:102
+#: htdocs/luci-static/resources/view/netbird/overview.js:126
+#: htdocs/luci-static/resources/view/netbird/overview.js:136
+#: htdocs/luci-static/resources/view/netbird/overview.js:168
+msgid "Operation failed."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:121
+msgid ""
+"Optional extra encryption layer for WireGuard; if set, all peers must use "
+"the same key."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:149
+#: htdocs/luci-static/resources/view/netbird/versions.js:166
+msgid "Path"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:184
+msgid "Peer"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:124
+msgid "Peer details unavailable."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:110
+#: htdocs/luci-static/resources/view/netbird/status.js:123
+#: htdocs/luci-static/resources/view/netbird/status.js:130
+#: htdocs/luci-static/resources/view/netbird/status.js:161
+msgid "Peers"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:223
+msgid "Post-Quantum"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:226
+msgid "Post-quantum secure the connection via Rosenpass (experimental)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:184
+msgid "Process"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:205
+msgid "Process client routes received from the management service."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:109
+msgid "Profile"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:105
+msgid "Quantum resistance"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:142
+msgid "Received"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:254
+msgid "Reconnect"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:268
+msgid ""
+"Reconnect re-establishes the NetBird session while keeping your identity "
+"(down then up)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:423
+msgid "Refresh"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:97
+msgid "Relays"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:279
+msgid "Remove"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:266
+msgid "Remove NetBird network automation?"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:131
+msgid "Remove automation"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:128
+msgid "Remove firewall zone"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:133
+msgid ""
+"Removes the NetBird firewall zone and both forwarding rules from OpenWrt. It "
+"does not stop the NetBird daemon or remove its wtX device; only the OpenWrt "
+"firewall plumbing is removed. Use this before uninstalling, or to undo the "
+"setup."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:93
+msgid ""
+"Renaming can avoid conflicts with other WireGuard services on this router "
+"(default wt0)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:218
+msgid ""
+"Request and use an IPv6 overlay address. Requires netbird 0.72.x; ignored on "
+"older versions."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:183
+msgid ""
+"Require authentication for the NetBird SSH server. Requires netbird 0.72.x; "
+"ignored on older versions."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:230
+msgid "Rosenpass Permissive"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:197
+msgid "Routing"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:154
+msgid "Run the NetBird SSH server on this peer."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:21
+msgid "Running"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:102
+msgid "Running version"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:151
+msgid "SSH"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:170
+msgid "SSH Local Port Forwarding"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:176
+msgid "SSH Remote Port Forwarding"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:158
+msgid "SSH Root Login"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:164
+msgid "SSH SFTP"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:379
+msgid "Search logs…"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:79
+msgid "Select source"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:143
+msgid "Sent"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:44
+#: htdocs/luci-static/resources/view/netbird/status.js:24
+msgid "Service disabled"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:321
+msgid "Logs unavailable: %s"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:41
+#: htdocs/luci-static/resources/view/netbird/status.js:23
+msgid "Service stopped"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:71
+#: root/usr/share/luci/menu.d/luci-app-netbird.json:35
+msgid "Settings"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:206
+msgid ""
+"Settings were saved, but the firewall reload did not complete; they will "
+"take effect on the next firewall reload or reboot."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:222
+msgid "Setup Key"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:188
+msgid "Severity"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:96
+msgid "Signal server"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:137
+#: htdocs/luci-static/resources/view/netbird/status.js:190
+#: root/usr/share/luci/menu.d/luci-app-netbird.json:46
+msgid "Status"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:172
+msgid ""
+"Status details are available only when the NetBird service is running. See "
+"the Authentication tab to enable, start, or log in."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:344
+msgid "Switch binary source"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:365
+msgid "Switch failed."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:349
+msgid "Switch source"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:345
+msgid ""
+"Switch the active NetBird binary to %s? The NetBird service will restart "
+"briefly."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:125
+msgid "Switch to this source"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:235
+msgid "Switch to this version"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:358
+msgid "Switching and restarting NetBird…"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:357
+msgid "Switching binary source"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:48
+msgid ""
+"The NetBird binary was not found. Install the netbird package, then return "
+"here."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:154
+msgid "The NetBird firewall zone already exists."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:155
+msgid ""
+"The NetBird firewall zone does not exist yet. Use the \"Create firewall "
+"zone\" button below."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:220
+msgid "The NetBird firewall zone is configured (device: %s)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:245
+msgid ""
+"The NetBird firewall zone was auto-created (prerequisite for forwarding)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:42
+msgid "The NetBird service is installed and enabled but not running."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:45
+msgid ""
+"The NetBird service is installed but disabled. Enable and start it to "
+"continue."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:36
+msgid ""
+"The current session is disconnected, but your login identity is kept. Click "
+"Connect below to reconnect; no setup key is needed."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:173
+msgid ""
+"The %s feed does not provide netbird on this device, so switching is "
+"unavailable. Check your package sources."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:53
+msgid ""
+"The %s package is the fallback baseline; the latest official build has "
+"more complete features."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:130
+msgid "The pre-shared key must not contain spaces."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:450
+msgid ""
+"The severity filter is a minimum threshold: choosing a level also shows all "
+"more severe levels. To capture DEBUG or TRACE lines, raise the log level on "
+"the Settings page and reconnect."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:306
+msgid ""
+"This is a plain http:// URL with no checksum. The downloaded file is "
+"executed as root, so a malicious mirror or a man-in-the-middle could run "
+"arbitrary code. Prefer https://, or paste a checksum above."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:164
+msgid "This is the OpenWrt package-repository build."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:147
+msgid "This is the official NetBird Release build."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:143
+msgid ""
+"This will deregister this device and remove the local NetBird identity. You "
+"will need a setup key to log in again. This is different from "
+"\"Disconnect\", which keeps your credentials."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:267
+msgid "This will remove the following from OpenWrt:"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:187
+msgid "Time"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:86
+msgid "UDP listening port for the WireGuard interface (default 51820)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/overview.js:50
+#: htdocs/luci-static/resources/view/netbird/status.js:26
+msgid "Unknown"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:157
+msgid "Update now (v%s)"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:104
+msgid "Userspace"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:240
+msgid "Verbosity of the NetBird log."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:148
+#: htdocs/luci-static/resources/view/netbird/versions.js:165
+msgid "Version"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:51
+#: root/usr/share/luci/menu.d/luci-app-netbird.json:24
+msgid "Versions"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:92
+msgid "WireGuard interface name"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:85
+msgid "WireGuard port"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/settings.js:120
+msgid "WireGuard pre-shared key"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/status.js:71
+msgid "Yes"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:272
+msgid ""
+"Your LAN/WAN configuration is not touched. The NetBird daemon keeps running "
+"and its wtX device stays up."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:72
+msgid ""
+"add/update zone %s bound to the NetBird device (input/output/forward=ACCEPT, "
+"masq, mtu_fix)."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:270
+msgid "both forwarding rules"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:103
+msgid "luci-app-netbird"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:249
+msgid "off"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:249
+msgid "on"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:283
+msgid "Package upgrade available: v%s (run \"%s\")."
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/versions.js:206
+msgid "optional — md5 / sha1 / sha256 / sha512 hex"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/logs.js:268
+msgid "page"
+msgstr ""
+
+#: htdocs/luci-static/resources/view/netbird/setup.js:269
+msgid "the dedicated firewall zone"
+msgstr ""
+
+msgid "Update"
+msgstr ""
+
+msgid "Switch"
+msgstr ""
+
+msgid "Invalid management URL (expected http(s)://host[:port])."
+msgstr ""
+
+msgid "The custom URL must start with http:// or https://."
+msgstr ""
+
+msgid "Could not fetch or parse the latest version from GitHub (network failure or unexpected format)."
+msgstr ""
+
+msgid "The downloaded file is not a valid ELF executable; installation aborted."
+msgstr ""
+
+msgid "The netbird daemon did not stop in time; replacement aborted to protect the current binary."
+msgstr ""
+
+msgid "source must be release, opkg, or custom."
+msgstr ""
+
+msgid "The release binary is not downloaded yet — use \"Check for updates / Update now\" first."
+msgstr ""
+
+msgid "Switching to the custom source requires a valid version."
+msgstr ""
+
+msgid "The system package feed does not provide netbird, so its binary cannot be fetched automatically. Check your package sources, or use the release or custom source."
+msgstr ""
+
+msgid "The netbird daemon did not stop in time; switch aborted (the binary was not touched)."
+msgstr ""
+
+msgid "The version is missing or invalid."
+msgstr ""
+
+msgid "The netbird binary is not installed."
+msgstr ""
+
+msgid "The binary path is empty."
+msgstr ""
+
+msgid "\"status --json\" did not return JSON."
+msgstr ""
+
+msgid "Another binary operation is in progress; please wait and try again."
+msgstr ""
+
+msgid "The checksum must be md5 (32), sha1 (40), sha256 (64) or sha512 (128) hexadecimal characters."
+msgstr ""
+
+msgid "netbird down failed"
+msgstr ""
+
+msgid "netbird deregister failed"
+msgstr ""
+
+msgid "init enable returned a non-zero exit code"
+msgstr ""
+
+msgid "init start returned a non-zero exit code"
+msgstr ""
+
+msgid "Connecting"
+msgstr ""
+
+msgid "Idle"
+msgstr ""
+
+msgid "Preparing download..."
+msgstr ""
+
+msgid "Downloading..."
+msgstr ""
+
+msgid "Download complete. Verifying..."
+msgstr ""
+
+msgid "Verifying checksum and architecture..."
+msgstr ""
+
+msgid "Extracting binary..."
+msgstr ""
+
+msgid "Installing binary..."
+msgstr ""
+
+msgid "Stopping download..."
+msgstr ""
+
+msgid "Download stopped."
+msgstr ""
+
+msgid "Binary installed."
+msgstr ""
+
+msgid "Download failed."
+msgstr ""
+
+msgid "Downloaded"
+msgstr ""
+
+msgid "Speed"
+msgstr ""
+
+msgid "Elapsed"
+msgstr ""
+
+msgid "Stop download"
+msgstr ""
+
+msgid "Stopping..."
+msgstr ""
+
+msgid "Download/install did not complete. Check the device logs and try again."
+msgstr ""
+
+msgid "Could not start the download worker."
+msgstr ""
+
+msgid "Update luci-app-netbird"
+msgstr ""
+
+msgid "luci-app-netbird update available: v%s"
+msgstr ""
+
+msgid "luci-app-netbird is already up to date (v%s)."
+msgstr ""
+
+msgid "Update luci-app-netbird from v%s to v%s?"
+msgstr ""
+
+msgid "Packages will be downloaded from %s. The page may need to be reloaded after installation."
+msgstr ""
+
+msgid "Updating luci-app-netbird"
+msgstr ""
+
+msgid "Downloading and installing luci-app-netbird packages…"
+msgstr ""
+
+msgid "luci-app-netbird updated to v%s. Reload this page to use the new UI."
+msgstr ""
+
+msgid "luci-app-netbird update failed: %s"
+msgstr ""
+
+msgid "unknown error"
+msgstr ""
+
+msgid "Could not fetch luci-app-netbird package index."
+msgstr ""
+
+msgid "Could not parse luci-app-netbird package index."
+msgstr ""
+
+msgid "The package index does not contain a valid luci-app-netbird version."
+msgstr ""
+
+msgid "luci-app-netbird is already up to date."
+msgstr ""
+
+msgid "Could not determine luci-app-netbird package filename."
+msgstr ""
+
+msgid "Hint:"
+msgstr ""
+
+msgid "The NetBird operation is still running or took too long. Check the Logs tab, then try again."
+msgstr ""
+
+msgid "Last authentication error:"
+msgstr ""
+
+msgid "Authentication failed: the setup key was rejected by the NetBird management server."
+msgstr ""
+
+msgid "NetBird was stopped to avoid retrying forever. Generate a new setup key and connect again."
+msgstr ""
+
+msgid "Authentication failed: NetBird did not receive a valid setup key."
+msgstr ""
+
+msgid "NetBird was stopped to avoid retrying forever. Enter a new setup key and connect — re-registering does not require deregistering first, even if the server was rebuilt or this device was removed there."
+msgstr ""
+
+msgid "Authentication failed: this peer is no longer accepted by the management server."
+msgstr ""
+
+msgid "NetBird was stopped to avoid retrying forever. Generate a new setup key and connect again — no need to deregister first; this also recovers a device orphaned by a rebuilt management server."
+msgstr ""
+
+msgid "Authentication failed: the management server rejected this peer."
+msgstr ""
+
+msgid "NetBird was stopped to avoid retrying forever. Check whether the setup key is valid or whether this device was removed from NetBird."
+msgstr ""
+
+msgid "The management server is temporarily unreachable."
+msgstr ""
+
+msgid "Automatic reconnect will keep trying while the desired state is connected."
+msgstr ""
+
+msgid "NetBird did not become connected before the timeout."
+msgstr ""
+
+msgid "Check the Logs tab for the last NetBird message, then try again."
+msgstr ""
+
+msgid "Login failed before NetBird accepted the setup key."
+msgstr ""

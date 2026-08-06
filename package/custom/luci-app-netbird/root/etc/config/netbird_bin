@@ -1,0 +1,14 @@
+# luci-app-netbird —— 二进制来源管理(独立配置文件)
+#
+# 故意与 /etc/config/netbird 分开:netbird-settings 的 procd reload trigger 只盯 "netbird"
+# 配置名,放这里改 release_url 不会误触发 netbird down→up。
+#
+# binary_source —— daemon 实际运行哪个二进制来源:
+#   release = 官方 release(symlink /usr/bin/netbird -> /usr/share/netbird/bin/netbird-release)
+#   opkg    = OpenWRT 软件仓库版(/usr/bin/netbird 本体;从保留副本或软件源 download+解压复原,
+#             绝不 opkg --force-reinstall / apk add——那会连带删 /etc/init.d/netbird)
+# release_url —— 自定义下载链接(镜像/加速;空=用 GitHub releases/latest)
+
+config netbird_bin 'binary'
+	option binary_source 'opkg'
+	option release_url ''

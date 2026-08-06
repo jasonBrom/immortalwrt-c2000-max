@@ -1,5 +1,29 @@
 #!/bin/sh
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+
+if [ "$(board_name)" = "nradio,c2000-max" ]; then
+	case "$ACTION" in
+		ifup|ifdown|update) ;;
+		*) exit 0 ;;
+	esac
+	ROLE_LIB=/usr/lib/c2000max/port-role.sh
+	if [ ! -r "$ROLE_LIB" ]; then
+		exec /etc/init.d/eqos stop
+	fi
+	. "$ROLE_LIB"
+	[ ! -e "$C2000_SWITCHING" ] || exit 0
+	if [ -e "$C2000_DEGRADED" ] ||
+	   [ "$(uci -q get turboacc.config.fastpath)" != mediatek_hnat ] ||
+	   [ "$(c2000_actual_role)" != "lan" ] ||
+	   { [ "$INTERFACE" = "lan" ] && [ "$ACTION" = "ifdown" ]; }; then
+		exec /etc/init.d/eqos stop
+	fi
+	[ "$INTERFACE" = "lan" ] || exit 0
+	exec /etc/init.d/eqos start
+fi
+
 [ "$ACTION" = "ifup" ] || exit 0
 [ "$INTERFACE" = "lan" ] || exit 0
-
 /etc/init.d/eqos start

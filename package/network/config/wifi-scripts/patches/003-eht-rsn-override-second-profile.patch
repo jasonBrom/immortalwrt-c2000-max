@@ -1,0 +1,11 @@
+--- a/files-ucode/usr/share/ucode/wifi/ap.uc
++++ b/files-ucode/usr/share/ucode/wifi/ap.uc
+@@ -525,7 +525,7 @@ function iface_add(config, phy, radio, i
+ 			'rsn_override_mfp'
+ 		]);
+ 
+-		if (config.mlo) {
++		if (config.mlo || config.ieee80211be) {
+ 			config.rsn_override_mfp_2 ??= config.rsn_override_mfp;
+ 			config.rsn_override_key_mgmt_2 ??= config.rsn_override_key_mgmt;
+ 			config.rsn_override_pairwise_2 ??= config.rsn_override_pairwise;

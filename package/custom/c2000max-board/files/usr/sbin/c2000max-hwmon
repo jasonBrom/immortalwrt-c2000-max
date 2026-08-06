@@ -1,0 +1,176 @@
+#!/bin/sh
+
+. /usr/share/libubox/jshn.sh
+
+normalize_temp() {
+	local value="$1"
+	case "$value" in
+		''|*[!0-9-]*) return 1 ;;
+	esac
+	[ "$value" -gt 300 ] || value=$((value * 1000))
+	echo "$value"
+}
+
+cpu_temperature() {
+	local zone value max="" type=""
+	for zone in /sys/class/thermal/thermal_zone*; do
+		[ -r "$zone/temp" ] || continue
+		value="$(normalize_temp "$(cat "$zone/temp" 2>/dev/null)")" || continue
+		if [ -z "$max" ] || [ "$value" -gt "$max" ]; then
+			max="$value"
+			type="$(cat "$zone/type" 2>/dev/null)"
+		fi
+	done
+	echo "$max|$type"
+}
+
+json_init
+json_add_string compiled_by "inst."
+
+json_add_array cpus
+for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
+	[ -d "$cpu" ] || continue
+	core="${cpu##*cpu}"
+	[ ! -r "$cpu/online" ] || [ "$(cat "$cpu/online" 2>/dev/null)" = 1 ] || continue
+	freq="$(cat "$cpu/cpufreq/scaling_cur_freq" 2>/dev/null)"
+	[ -n "$freq" ] || freq="$(cat "$cpu/cpufreq/cpuinfo_cur_freq" 2>/dev/null)"
+	case "$freq" in ''|*[!0-9]*) freq=0 ;; esac
+	json_add_object ""
+	json_add_int core "$core"
+	json_add_int khz "$freq"
+	json_close_object
+done
+json_close_array
+
+cpu_info="$(cpu_temperature)"
+cpu_temp="${cpu_info%%|*}"
+cpu_sensor="${cpu_info#*|}"
+case "$cpu_temp" in ''|*[!0-9-]*) cpu_temp=0 ;; esac
+json_add_int cpu_temp "$cpu_temp"
+json_add_string cpu_sensor "$cpu_sensor"
+
+json_add_array wifi_temps
+seen=""
+for phy in /sys/class/ieee80211/phy*; do
+	[ -d "$phy" ] || continue
+	for input in "$phy"/device/hwmon/hwmon*/temp1_input; do
+		[ -r "$input" ] || continue
+		real="$(readlink -f "$input" 2>/dev/null)"
+		case " $seen " in *" $real "*) continue ;; esac
+		seen="$seen $real"
+		value="$(normalize_temp "$(cat "$input" 2>/dev/null)")" || continue
+		label="$(cat "${input%/temp1_input}/temp1_label" 2>/dev/null)"
+		[ -n "$label" ] || label="${phy##*/}"
+		json_add_object ""
+		json_add_string phy "${phy##*/}"
+		json_add_string label "$label"
+		json_add_int milli_c "$value"
+		json_close_object
+	done
+done
+
+# Some mt76 versions expose hwmon below PCI rather than below ieee80211.
+for hwmon in /sys/class/hwmon/hwmon*; do
+	[ -r "$hwmon/temp1_input" ] || continue
+	name="$(cat "$hwmon/name" 2>/dev/null)"
+	case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in
+		*mt799*|*wifi*|*wireless*) ;;
+		*) continue ;;
+	esac
+	real="$(readlink -f "$hwmon/temp1_input" 2>/dev/null)"
+	case " $seen " in *" $real "*) continue ;; esac
+	seen="$seen $real"
+	value="$(normalize_temp "$(cat "$hwmon/temp1_input" 2>/dev/null)")" || continue
+	json_add_object ""
+	json_add_string phy "$name"
+	json_add_string label "$name"
+	json_add_int milli_c "$value"
+	json_close_object
+done
+json_close_array
+
+flow_sw="$(uci -q get firewall.@defaults[0].flow_offloading)"
+flow_hw="$(uci -q get firewall.@defaults[0].flow_offloading_hw)"
+hnat_enabled=0
+if [ -r /sys/kernel/debug/hnat/hook_toggle ]; then
+	case "$(cat /sys/kernel/debug/hnat/hook_toggle 2>/dev/null)" in
+		enabled|1) hnat_enabled=1 ;;
+	esac
+fi
+json_add_boolean flow_offloading "$([ "$flow_sw" = 1 ] && echo 1 || echo 0)"
+json_add_boolean hnat_offloading "$hnat_enabled"
+json_add_boolean hardware_offloading "$([ "$flow_hw" = 1 ] || [ "$hnat_enabled" = 1 ] && echo 1 || echo 0)"
+
+ppe_available=0
+ppe0=0
+ppe1=0
+ppe_total=0
+ppe_connections=0
+ppe_unbind=0
+ppe_fin=0
+if [ -r /sys/kernel/debug/hnat/bind_count ]; then
+	ppe_connections_seen=0
+	for entry in $(cat /sys/kernel/debug/hnat/bind_count 2>/dev/null); do
+		key="${entry%%=*}"
+		value="${entry#*=}"
+		case "$value" in ''|*[!0-9]*) continue ;; esac
+		case "$key" in
+			ppe0) ppe0="$value" ;;
+			ppe1) ppe1="$value" ;;
+			total) ppe_total="$value" ;;
+			connections) ppe_connections="$value"; ppe_connections_seen=1 ;;
+			unbind_total) ppe_unbind="$value" ;;
+			fin_total) ppe_fin="$value" ;;
+		esac
+	done
+	[ "$ppe_connections_seen" = 1 ] || ppe_connections=$(((ppe_total + 1) / 2))
+	ppe_available=1
+fi
+
+json_add_object ppe
+json_add_boolean available "$ppe_available"
+json_add_int ppe0 "$ppe0"
+json_add_int ppe1 "$ppe1"
+json_add_int total "$ppe_total"
+json_add_int connections "$ppe_connections"
+json_add_int unbind "$ppe_unbind"
+json_add_int fin "$ppe_fin"
+json_close_object
+
+rxppd_exists=0
+rxppd_up=0
+rxppd_bound=0
+rxppd_master=""
+rxppd_ready=0
+if [ -d /sys/class/net/rxppd ]; then
+	rxppd_exists=1
+	case "$(ip -o link show dev rxppd 2>/dev/null)" in
+		*'<UP,'*|*',UP,'*|*',UP>'*) rxppd_up=1 ;;
+	esac
+	if [ -L /sys/class/net/rxppd/master ]; then
+		rxppd_master="$(basename "$(readlink -f /sys/class/net/rxppd/master 2>/dev/null)")"
+	fi
+fi
+[ -r /sys/kernel/debug/hnat/hnat_ppd_if ] && \
+	grep -qx 'g_rx_ppdev=rxppd' /sys/kernel/debug/hnat/hnat_ppd_if 2>/dev/null && rxppd_bound=1
+[ "$hnat_enabled" = 1 ] && [ "$rxppd_exists" = 1 ] && \
+	[ "$rxppd_up" = 1 ] && [ "$rxppd_bound" = 1 ] && \
+	[ "$rxppd_master" = br-lan ] && rxppd_ready=1
+
+json_add_object rxppd
+json_add_boolean exists "$rxppd_exists"
+json_add_boolean up "$rxppd_up"
+json_add_boolean bound "$rxppd_bound"
+json_add_string master "$rxppd_master"
+json_add_boolean ready "$rxppd_ready"
+json_close_object
+
+json_add_array hnat_external_interfaces
+if [ -r /sys/kernel/debug/hnat/external_interface ]; then
+	for ifname in $(sed -n 's/^.*] = \([^ ]*\).*$/\1/p' \
+		/sys/kernel/debug/hnat/external_interface 2>/dev/null); do
+		json_add_string "" "$ifname"
+	done
+fi
+json_close_array
+json_dump

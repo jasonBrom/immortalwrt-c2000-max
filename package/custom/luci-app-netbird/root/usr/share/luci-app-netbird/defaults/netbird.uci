@@ -1,0 +1,46 @@
+# luci-app-netbird UCI schema v1 first cut
+#
+# 字段一律存「正向 / UI 语义」（勾选=1=启用）。取反（disable_*/block_*）只在
+# /etc/init.d/netbird-settings 渲染 `netbird up` flag 时发生，前端与 UCI 均不感知取反。
+# OpenWRT 默认：enable_dns 默认关（避与 dnsmasq 抢 53）；防火墙/LAN/路由默认开。
+
+config netbird 'settings'
+	# 常规
+	option service_enabled '0'
+	option wireguard_port '51820'
+	option interface_name 'wt0'
+	option hostname ''
+	option management_url ''
+	# 防火墙
+	option enable_firewall '1'
+	option block_inbound '0'
+	# SSH（5 子项需 0.72.x，旧版门控跳过）
+	option allow_ssh '0'
+	option ssh_root '0'
+	option ssh_sftp '0'
+	option ssh_local_fwd '0'
+	option ssh_remote_fwd '0'
+	option enable_ssh_auth '1'
+	# DNS
+	option enable_dns '0'
+	# 路由
+	option access_lan '1'
+	option accept_client_routes '1'
+	option accept_server_routes '1'
+	# IPv6
+	option enable_ipv6 '1'
+	# 后量子
+	option rosenpass_enabled '0'
+	option rosenpass_permissive '0'
+	# 日志
+	option log_level 'info'
+	# 敏感：WireGuard 预共享密钥（0600；get_settings 仅回 preshared_key_configured）
+	option preshared_key ''
+	# 安装密钥打码 hint（非机密：已消费 key 的部分前缀，由 do_up/do_login 成功后写入）
+	# 绝不存原始 setup_key（安全基线），仅供认证页「上次使用」展示
+	option setup_key_hint ''
+
+config state 'runtime'
+	option last_connect_ts ''
+	option last_error ''
+	option desired_connected ''

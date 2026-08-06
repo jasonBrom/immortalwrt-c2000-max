@@ -1,0 +1,355 @@
+#!/usr/bin/lua
+
+local fs = require "nixio.fs"
+local nixio = require "nixio"
+local json = require "luci.jsonc"
+local util = require "luci.util"
+local core = require "c2000max_app.core"
+local cloud = require "c2000max_app.cloud"
+local command_diag = require "c2000max_app.command_diag"
+local rweb = require "c2000max_app.rweb"
+
+local STATE_DIR = "/var/run/c2000max-app"
+local STATE_FILE = STATE_DIR .. "/remote.state"
+local BRIDGE_LOG = STATE_DIR .. "/mosquitto.log"
+local AGENT_LOG = STATE_DIR .. "/agent.log"
+local BRIDGE_STATE = STATE_DIR .. "/bridge.state"
+local CACHE_STATE = STATE_DIR .. "/cache.state"
+local WIFI_STATE = STATE_DIR .. "/wifi.state"
+local COMMAND_STATE = STATE_DIR .. "/remote-command.state"
+local LOCAL_BROKER = "127.0.0.1"
+local LOCAL_PORT = 1884
+local FACTORY_SELF_GROUP = "g1"
+
+local function write_state(state, event, message)
+	fs.mkdirr(STATE_DIR)
+	local value = {
+		state = state,
+		device_id = core.device_id() or "",
+		broker = core.broker(),
+		last_event = event or "",
+		message = message or "",
+		updated = os.time()
+	}
+	fs.writefile(STATE_FILE, json.stringify(value))
+	fs.chmod(STATE_FILE, "0600")
+end
+
+local function write_runtime_state(path, value)
+	fs.mkdirr(STATE_DIR)
+	value.updated = os.time()
+	fs.writefile(path, json.stringify(value))
+	fs.chmod(path, "0600")
+end
+
+local function command_result_state(result)
+	local state = command_diag.analyze(result)
+	write_runtime_state(COMMAND_STATE, state)
+	return state.message
+end
+
+local function last_file_line(path)
+	local raw = fs.readfile(path)
+	if not raw or raw == "" then
+		return ""
+	end
+	if #raw > 16384 then
+		raw = raw:sub(-16384)
+	end
+	local last = ""
+	for line in raw:gmatch("[^\r\n]+") do
+		last = line
+	end
+	return last
+end
+
+local function last_log_line()
+	return last_file_line(BRIDGE_LOG)
+end
+
+local function read_runtime_state(path)
+	local raw = fs.readfile(path)
+	if not raw or raw == "" then
+		return {}
+	end
+	local ok, value = pcall(json.parse, raw)
+	return ok and type(value) == "table" and value or {}
+end
+
+local function mqtt_client_preflight()
+	fs.mkdirr(STATE_DIR)
+	fs.unlink(AGENT_LOG)
+	local probe = io.popen(
+		"/usr/bin/mosquitto_sub --help >/dev/null 2>" ..
+		util.shellquote(AGENT_LOG), "r")
+	if not probe then
+		return false, "unable to execute mosquitto_sub"
+	end
+	local result = probe:close()
+	if result == true or result == 0 then
+		return true
+	end
+	local detail = last_file_line(AGENT_LOG)
+	return false, detail ~= "" and detail or
+		"mosquitto_sub preflight failed"
+end
+
+local function wait_for_local_broker()
+	for _ = 1, 30 do
+		local socket = nixio.connect(LOCAL_BROKER, LOCAL_PORT,
+			"inet", "stream")
+		if socket then
+			socket:close()
+			return true
+		end
+		nixio.nanosleep(1)
+	end
+	return false
+end
+
+local function announce_online(device_id)
+	local sent_group = cloud.publish("group_id", {
+		id = device_id .. ":" .. FACTORY_SELF_GROUP,
+		server_id = device_id
+	}, false)
+	local sent_status = cloud.publish("status", {
+		id = device_id
+	}, false)
+	local sent_time = cloud.publish("time", {
+		time = os.time()
+	}, false)
+	return sent_group and sent_status and sent_time
+end
+
+local function identity()
+	local state = {}
+	local raw = fs.readfile(STATE_FILE)
+	if raw then
+		local ok, parsed = pcall(json.parse, raw)
+		if ok and type(parsed) == "table" then
+			state = parsed
+		end
+	end
+	for key, value in pairs(core.identity_status(true)) do
+		state[key] = value
+	end
+	if state.device_id and state.device_id ~= "" and
+	   state.factory_id and state.factory_id ~= "" then
+		state.identity_mismatch = state.device_id ~= state.factory_id
+	end
+	state.broker = core.broker()
+	state.state = state.state or "stopped"
+	state.bridge_log = last_log_line()
+	state.agent_log = last_file_line(AGENT_LOG)
+	local bridge = read_runtime_state(BRIDGE_STATE)
+	local cache = read_runtime_state(CACHE_STATE)
+	local wifi = read_runtime_state(WIFI_STATE)
+	local remote_command = read_runtime_state(COMMAND_STATE)
+	state.bridge_state = bridge.state or ""
+	state.bridge_diagnostic = bridge.message or ""
+	state.cache_state = cache.state or ""
+	state.cache_message = cache.message or ""
+	state.cache_elapsed_ms = tonumber(cache.elapsed_ms) or 0
+	state.wifi_apply_state = wifi.state or ""
+	state.wifi_apply_message = wifi.message or ""
+	state.remote_command_state = remote_command.state or ""
+	state.remote_command_message = remote_command.message or ""
+	state.remote_command_exit_code = remote_command.exit_code or ""
+	state.remote_command_ready = remote_command.ready == true
+	state.remote_command_rweb = remote_command.rweb == true
+	state.remote_command_app_ready = remote_command.app_ready == true
+	state.remote_command_failure_class = remote_command.failure_class or ""
+	state.remote_command_missing_program = remote_command.missing_program or ""
+	state.remote_command_tunnel_method = remote_command.tunnel_method or ""
+	state.remote_command_bootstrap_tool = remote_command.bootstrap_tool or ""
+	state.remote_command_uci_queries = remote_command.uci_queries or ""
+	state.remote_command_updated = tonumber(remote_command.updated) or 0
+	local rweb_runtime = rweb.runtime_status()
+	state.remote_wget_runtime = rweb_runtime.runtime or ""
+	state.remote_wget_ready = rweb_runtime.private_wget == true and
+		rweb_runtime.private_wget_entry == true and
+		rweb_runtime.private_wget_ssl_entry == true
+	io.write(json.stringify(state), "\n")
+end
+
+if arg[1] == "identity" then
+	identity()
+	os.exit(0)
+end
+
+if not core.remote_enabled() then
+	write_state("disabled", nil, "remote management disabled")
+	os.exit(0)
+end
+
+local device_id = core.device_id()
+local broker = core.broker()
+local current_identity = core.identity_status(true)
+if not device_id or broker == "" or
+	   not current_identity.bdinfo_present or
+	   not current_identity.bdinfo_identity_valid or
+	   not current_identity.remote_identity_available or
+	   not current_identity.device_code_present then
+	write_state("identity_error", nil,
+		current_identity.identity_error ~= "" and
+		current_identity.identity_error or
+		"factory bdinfo identity unavailable")
+	os.exit(1)
+end
+
+local connection_topic =
+	"$SYS/broker/connection/" .. device_id .. "/state"
+local subscriptions = {
+	connection_topic,
+	"kp/" .. device_id .. "/+/#"
+}
+if core.feature_enabled("command_enable") or
+   core.feature_enabled("developer_enable") then
+	subscriptions[#subscriptions + 1] = "rpc/exec/#"
+end
+
+local command = {
+	"/usr/bin/mosquitto_sub",
+	"-h", LOCAL_BROKER,
+	"-p", tostring(LOCAL_PORT),
+	"-V mqttv311",
+	"-i", util.shellquote("ca-" .. device_id),
+	"-q 1",
+	"-k 30",
+	"-F", util.shellquote("%t\t%p")
+}
+for _, topic in ipairs(subscriptions) do
+	command[#command + 1] = "-t"
+	command[#command + 1] = util.shellquote(topic)
+end
+
+write_state("bridge_starting", nil,
+	"waiting for local MQTT bridge and official connection notification")
+if not wait_for_local_broker() then
+	write_state("agent_error", nil,
+		"local MQTT bridge did not open port 1884 within 30 seconds")
+	os.exit(1)
+end
+local client_ready, client_error = mqtt_client_preflight()
+if not client_ready then
+	write_state("agent_error", nil,
+		"MQTT client unavailable: " .. tostring(client_error))
+	os.exit(1)
+end
+command[#command + 1] = "2>>" .. util.shellquote(AGENT_LOG)
+local pipe = io.popen(table.concat(command, " "), "r")
+if not pipe then
+	write_state("agent_error", nil, "unable to start local MQTT agent")
+	os.exit(1)
+end
+
+for line in pipe:lines() do
+	local topic, payload_text = line:match("^([^\t]+)\t(.*)$")
+	if topic == connection_topic then
+		if payload_text == "1" then
+			-- The factory cloudd connection handler waits five seconds and
+			-- sends group_id, status and time in this order.  These messages
+			-- begin protocol synchronisation; the broker connection alone
+			-- does not prove that the vendor account lists the device online.
+			-- Factory pass sync is deliberately omitted because it exposes
+			-- the root password hash.
+			nixio.nanosleep(5)
+			local announced = announce_online(device_id)
+			write_runtime_state(BRIDGE_STATE, {
+				state = "connected",
+				message = "official MQTT bridge connected"
+			})
+			write_state("connected", "connection", announced and
+				"official MQTT bridge connected; initial sync sent" or
+				"official MQTT bridge connected; initial sync incomplete")
+		elseif payload_text == "0" then
+			write_runtime_state(BRIDGE_STATE, {
+				state = "disconnected",
+				message = "official MQTT bridge disconnected"
+			})
+			write_state("disconnected", "connection",
+				"official MQTT bridge disconnected")
+		else
+			write_state("bridge_starting", "connection",
+				"waiting for official MQTT bridge")
+		end
+	else
+		local event
+		local direct = "kp/" .. device_id .. "/"
+		local rest
+		local is_broadcast = false
+
+		if topic and topic:sub(1, #direct) == direct then
+			rest = topic:sub(#direct + 1)
+			local sender
+			sender, event = rest:match("^([^/]+)/([^/]+)")
+			if sender == "mosca" and
+			   core.feature_enabled("broadcast_enable") then
+				is_broadcast = true
+			end
+			if not sender or sender == "reply" then
+				event = nil
+			end
+		elseif topic and topic:sub(1, 9) == "rpc/exec/" and
+		       (core.feature_enabled("command_enable") or
+		        core.feature_enabled("developer_enable")) then
+			event = topic:match("^rpc/exec/([^/]+)") or "command"
+		end
+
+		if event and event:match("^[A-Za-z0-9_.%-]+$") then
+			local payload = {}
+			if payload_text and payload_text ~= "" then
+				local ok, parsed = pcall(json.parse, payload_text)
+				if ok and type(parsed) == "table" then
+					payload = parsed
+				else
+					write_state("connected", event,
+						"invalid JSON request ignored")
+					event = nil
+				end
+			end
+			if event then
+				payload.broadcast = is_broadcast or nil
+				local ok, result, reply_event, reply_expected =
+					pcall(cloud.handle, event, payload)
+				if not ok or type(result) ~= "table" then
+					result = {
+						code = "2",
+						errcode = "2",
+						message = "request failed"
+					}
+					reply_event = event
+					reply_expected = true
+				end
+				local handled_message
+				if event == "command" then
+					handled_message = command_result_state(result)
+				end
+				if reply_expected == false then
+					write_state("connected", event,
+						handled_message or
+						"request handled; no reply expected")
+				elseif cloud.publish(reply_event or event, result, true) then
+					write_state("connected", event,
+						handled_message or "reply sent")
+				else
+					write_state("connected", event,
+						"request handled but reply publish failed")
+				end
+			end
+		end
+	end
+end
+
+local ok, reason, code = pipe:close()
+local message = "local MQTT agent exited"
+if reason then
+	message = message .. " (" .. tostring(reason) ..
+		":" .. tostring(code or "") .. ")"
+end
+local agent_error = last_file_line(AGENT_LOG)
+if agent_error ~= "" then
+	message = message .. ": " .. agent_error
+end
+write_state("agent_error", nil, message)
+os.exit(ok and 0 or 1)

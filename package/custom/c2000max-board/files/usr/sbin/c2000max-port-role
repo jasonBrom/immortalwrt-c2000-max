@@ -1,0 +1,2341 @@
+#!/bin/sh
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+. /usr/share/libubox/jshn.sh
+
+ROLE_LIB="${C2000_ROLE_LIB:-/usr/lib/c2000max/port-role.sh}"
+[ -r "$ROLE_LIB" ] || {
+	echo '{"success":false,"message":"缺少 C2000-MAX 网口角色库"}'
+	exit 1
+}
+. "$ROLE_LIB"
+
+UPLINK_LIB="${C2000_UPLINK_LIB:-/usr/lib/c2000max/uplink-mode.sh}"
+[ -r "$UPLINK_LIB" ] || {
+	echo '{"success":false,"message":"缺少 C2000-MAX 上行模式库"}'
+	exit 1
+}
+. "$UPLINK_LIB"
+
+PORT_DEVICE="$C2000_PORT_DEVICE"
+WAN4="$C2000_WAN4"
+WAN6="$C2000_WAN6"
+ROLE_LOCK="${C2000_ROLE_LOCK:-/var/lock/c2000max-port-role.lock}"
+QUEUE_LOCK="${C2000_QUEUE_LOCK:-/var/lock/c2000max-port-role-queue.lock}"
+HNAT_LOCK="${C2000_HNAT_LOCK:-/var/lock/c2000max-hnat.lock}"
+ROLE_LOCK_WAIT="${C2000_ROLE_LOCK_WAIT:-20}"
+QUEUE_LOCK_WAIT="${C2000_QUEUE_LOCK_WAIT:-5}"
+HNAT_LOCK_WAIT="${C2000_HNAT_LOCK_WAIT:-20}"
+SWITCHING="$C2000_SWITCHING"
+DEGRADED="$C2000_DEGRADED"
+JOB_DIR="${C2000_JOB_DIR:-/var/run/c2000max-port-role}"
+JOB_STALE_SECONDS="${C2000_JOB_STALE_SECONDS:-300}"
+JOB_CANCEL_WAIT="${C2000_JOB_CANCEL_WAIT:-20}"
+PROC_ROOT="${C2000_PROC_ROOT:-/proc}"
+HNAT_HOOK="${C2000_HNAT_HOOK:-/sys/kernel/debug/hnat/hook_toggle}"
+HNAT_DIR="${C2000_HNAT_DIR:-/sys/kernel/debug/hnat}"
+HNAT_EFFECTIVE="${C2000_HNAT_EFFECTIVE:-/var/run/c2000max-hnat-effective}"
+ACCEL_DEGRADED="${C2000_ACCEL_DEGRADED:-/var/run/c2000max-hnat.degraded}"
+EQOS_LOCKED_HELPER="${C2000_EQOS_LOCKED_HELPER:-/usr/sbin/c2000max-eqos-locked}"
+HNAT_LOCKED_HELPER="${C2000_HNAT_LOCKED_HELPER:-/usr/sbin/c2000max-hnat-locked}"
+SYS_CLASS_NET="$C2000_SYS_CLASS_NET"
+RUNTIME_WAIT_LOOPS="${C2000_RUNTIME_WAIT_LOOPS:-20}"
+REPAIR_WAIT_LOOPS="${C2000_REPAIR_WAIT_LOOPS:-120}"
+HNAT_FLUSH_WAIT_LOOPS="${C2000_HNAT_FLUSH_WAIT_LOOPS:-5}"
+QMODEM_INIT="${C2000_QMODEM_INIT:-/etc/init.d/qmodem_network}"
+MWAN_INIT="${C2000_MWAN_INIT:-/etc/init.d/mwan3}"
+
+umask 077
+
+APPLY_ACTIVE=0
+APPLY_CONTEXT=0
+APPLY_COMMITTED=0
+ACCEL_APPLY_ACTIVE=0
+QUIESCE_ACTIVE=0
+QUEUE_ACTIVE=0
+UPLINK_ACTIVE=0
+ROLE_HELD=0
+CURRENT_JOB=""
+CURRENT_JOB_FILE=""
+CURRENT_BACKUP=""
+CURRENT_BEFORE_ROLE=""
+CURRENT_EQOS_ENABLED=0
+TX_SERVICE_STATE_CAPTURED=0
+TX_QMODEM_WAS_RUNNING=0
+TX_QMODEM_WAS_ENABLED=0
+TX_MWAN_WAS_RUNNING=0
+TX_MWAN_WAS_ENABLED=0
+HNAT_HELD=0
+QUEUE_HELD=0
+STAGE_ERROR=""
+ACCEL_WARNING=""
+REPAIR_CONTEXT=0
+REPAIR_CELLULAR_READY=0
+
+# Kernel-owned descriptor locks are released automatically if this shell
+# exits, unlike OpenWrt's legacy `lock` helper which leaves a keeper process.
+: >>"$ROLE_LOCK" || exit 1
+: >>"$HNAT_LOCK" || exit 1
+: >>"$QUEUE_LOCK" || exit 1
+exec 7<>"$ROLE_LOCK" || exit 1
+exec 8<>"$HNAT_LOCK" || exit 1
+exec 9<>"$QUEUE_LOCK" || exit 1
+
+role_lock_acquire()
+{
+	flock -w "$ROLE_LOCK_WAIT" -x 7 || return 1
+	ROLE_HELD=1
+}
+
+role_lock_release()
+{
+	[ "$ROLE_HELD" = 1 ] || return 0
+	flock -u 7
+	ROLE_HELD=0
+}
+
+hnat_lock_acquire()
+{
+	flock -w "$HNAT_LOCK_WAIT" -x 8 || return 1
+	HNAT_HELD=1
+}
+
+hnat_lock_release()
+{
+	[ "$HNAT_HELD" = 1 ] || return 0
+	flock -u 8
+	HNAT_HELD=0
+}
+
+queue_lock_acquire()
+{
+	flock -w "$QUEUE_LOCK_WAIT" -x 9 || return 1
+	QUEUE_HELD=1
+}
+
+queue_lock_release()
+{
+	[ "$QUEUE_HELD" = 1 ] || return 0
+	flock -u 9
+	QUEUE_HELD=0
+}
+
+log()
+{
+	logger -t c2000max-port-role "$*"
+}
+
+error_json()
+{
+	local message="$1"
+
+	json_init
+	json_add_boolean success 0
+	json_add_string message "$message"
+	json_dump
+}
+
+flock_available()
+{
+	command -v flock >/dev/null 2>&1
+}
+
+run_timed()
+{
+	local seconds="$1"
+
+	shift
+	case "$1" in
+	/*)
+		timeout -k 5 "$seconds" "$@"
+		;;
+	*)
+		# BusyBox timeout can only launch executables. Keeping bare helper
+		# names direct also lets the unit-test shell functions run.
+		"$@"
+		;;
+	esac
+}
+
+wifi_lan_cb()
+{
+	local section="$1" mode network disabled device radio_disabled
+
+	config_get mode "$section" mode
+	config_get network "$section" network
+	config_get device "$section" device
+	config_get_bool disabled "$section" disabled 0
+	config_get_bool radio_disabled "$device" disabled 0
+	[ "$disabled" = 0 ] || return 0
+	[ "$radio_disabled" = 0 ] || return 0
+	[ "$mode" = ap ] || return 0
+	c2000_list_has "$network" lan || return 0
+	HAS_WIFI_LAN=1
+}
+
+has_runtime_wifi_bridge_member()
+{
+	local path member flags state
+
+	[ -d "$SYS_CLASS_NET/br-lan/brif" ] || return 1
+	for path in "$SYS_CLASS_NET"/br-lan/brif/*; do
+		[ -e "$path" ] || continue
+		member="${path##*/}"
+		case "$member" in
+			"$PORT_DEVICE"|rxppd|lo) continue ;;
+			ra*|rax*|wlan*|phy*-ap*|ap*) ;;
+			*) [ -d "$SYS_CLASS_NET/$member/wireless" ] || continue ;;
+		esac
+		flags="$(cat "$SYS_CLASS_NET/$member/flags" 2>/dev/null)"
+		case "$flags" in
+			0x*) [ $((flags & 1)) -ne 0 ] 2>/dev/null || continue ;;
+			*) continue ;;
+		esac
+		state="$(cat "$SYS_CLASS_NET/$member/operstate" 2>/dev/null)"
+		case "$state" in
+			up|unknown) return 0 ;;
+		esac
+	done
+	return 1
+}
+
+has_wifi_management()
+{
+	HAS_WIFI_LAN=0
+	config_load wireless
+	config_foreach wifi_lan_cb wifi-iface
+	[ "$HAS_WIFI_LAN" = 1 ] && has_runtime_wifi_bridge_member
+}
+
+find_wan_zone()
+{
+	uci -q show firewall |
+		sed -n "s/^firewall\.\([^.=]*\)\.name='wan'$/\1/p" |
+		head -n 1
+}
+
+wan_zone_is_safe()
+{
+	local zone networks input forward
+
+	zone="$(find_wan_zone)"
+	[ -n "$zone" ] || return 1
+	networks="$(uci -q get "firewall.${zone}.network")"
+	c2000_list_has "$networks" "$WAN4" || return 1
+	c2000_list_has "$networks" "$WAN6" || return 1
+	[ "$(uci -q get "firewall.${zone}.masq")" = "1" ] || return 1
+	input="$(uci -q get "firewall.${zone}.input")"
+	forward="$(uci -q get "firewall.${zone}.forward")"
+	case "$input" in REJECT|DROP) ;; *) return 1 ;; esac
+	case "$forward" in REJECT|DROP) ;; *) return 1 ;; esac
+	return 0
+}
+
+acceleration_matches()
+{
+	local role="$1" requested expected actual sw_enabled sw_hw hook rc
+
+	requested="$(uci -q get turboacc.config.fastpath)"
+	expected="$(c2000_effective_fastpath "$role" "$requested")"
+	case "$requested:$expected" in
+		disabled:disabled|flow_offloading:flow_offloading|\
+		mediatek_hnat:mediatek_hnat|mediatek_hnat:flow_offloading|\
+		flow_offloading:disabled|mediatek_hnat:disabled) ;;
+		*) return 1 ;;
+	esac
+	actual="$(cat "$HNAT_EFFECTIVE" 2>/dev/null)"
+	[ "$actual" = "$expected" ] || return 1
+	sw_enabled="$(uci -q get firewall.@defaults[0].flow_offloading)"
+	sw_hw="$(uci -q get firewall.@defaults[0].flow_offloading_hw)"
+	[ "${sw_hw:-0}" = 0 ] || return 1
+	if [ "$expected" = flow_offloading ]; then
+		[ "${sw_enabled:-0}" = 1 ] || return 1
+	else
+		[ "${sw_enabled:-0}" = 0 ] || return 1
+	fi
+	hook="$(cat "$HNAT_HOOK" 2>/dev/null)"
+	if [ "$expected" != mediatek_hnat ]; then
+		[ "$hook" != enabled ] || return 1
+		if [ -r "$HNAT_DIR/all_entry" ]; then
+			grep -Fq '|state=BIND|' "$HNAT_DIR/all_entry"
+			rc=$?
+			[ "$rc" = 1 ] || return 1
+		fi
+		return 0
+	fi
+	[ "$hook" = enabled ] || return 1
+	# A port transaction may be repairing a previously degraded state.  The
+	# switching marker and ROLE_LOCK already hide that in-flight state from
+	# normal callers, so validate the hardware itself here and clear the
+	# degraded marker only after this function succeeds.
+	c2000_hard_hnat_runtime_ready "$role"
+}
+
+status_json()
+{
+	local configured actual consistent=0 runtime_consistent=0 accel_consistent=0
+	local uplink_consistent=0 services_consistent=0 network_converged=0 converged=0
+	local requested expected effective link=down speed=""
+	local lan_ip wan_ip hook=unavailable eqos_enabled=0 eqos_state
+	local switching=0 degraded=0 accel_degraded=0 wifi=0 gmac_ready=0 ppe_idle=0
+	local recovery_pending=0
+	local whnat_ready=0 rxppd_ready=0 endpoints_ready=0
+	local hnat_wan="" hnat_lan="" hnat_lan2="" hnat_ppd=""
+	local wan_mode ethernet_weight cellular_weight cellular_modem cellular_interface
+	local qmodem_dial=0 qmodem_running=0 qmodem_enabled=0
+	local qmodem_any_up=0 qmodem_interface="" qmodem_ip=""
+	local mwan_managed=0 mwan_running=0 mwan_enabled=0
+	local cellular_up=0 cellular_ip=""
+	local active_job="" active_job_state="" active_job_age=0
+	local active_job_alive=0 stale_task=0
+	local modem modem_interface modem_up
+
+	configured="$(uci -q get c2000max.ethernet.role)"
+	actual="$(c2000_actual_role)"
+	[ "$actual" != "inconsistent" ] && consistent=1
+	requested="$(uci -q get turboacc.config.fastpath)"
+	expected="$(c2000_effective_fastpath "$actual" "$requested")"
+	effective="$(cat "$HNAT_EFFECTIVE" 2>/dev/null)"
+	case "$effective" in
+		disabled|flow_offloading|mediatek_hnat) ;;
+		*) effective=unknown ;;
+	esac
+	[ -e "$SWITCHING" ] && switching=1
+	active_job="$(cat "$JOB_DIR/active" 2>/dev/null)"
+	case "$active_job" in
+		''|*[!0-9-]*) active_job="" ;;
+	esac
+	if [ -n "$active_job" ] &&
+	   [ -r "$JOB_DIR/${active_job}.json" ]; then
+		active_job_state="$(jsonfilter -i "$JOB_DIR/${active_job}.json" \
+			-e '@.state' 2>/dev/null)"
+		active_job_age="$(job_age_seconds \
+			"$JOB_DIR/${active_job}.json" 2>/dev/null)"
+		case "$active_job_age" in
+			''|*[!0-9]*) active_job_age=0 ;;
+		esac
+		case "$active_job_state" in
+			pending|running)
+				if job_process_alive "$active_job"; then
+					active_job_alive=1
+					switching=1
+				else
+					stale_task=1
+				fi
+				;;
+		esac
+	elif [ -e "$SWITCHING" ]; then
+		stale_task=1
+	fi
+	[ -e "$DEGRADED" ] && degraded=1
+	[ -e "$ACCEL_DEGRADED" ] && accel_degraded=1
+	[ "$(uci -q get c2000max.ethernet.pending)" = 1 ] &&
+		recovery_pending=1
+	if [ "$consistent" = 1 ] && runtime_role_matches "$actual"; then
+		runtime_consistent=1
+	fi
+	if [ "$consistent" = 1 ] && acceleration_matches "$actual"; then
+		accel_consistent=1
+	fi
+	wan_mode="$(uci -q get c2000max.ethernet.wan_mode)"
+	[ -n "$wan_mode" ] || wan_mode="$C2000_WAN_MODE_ONLY"
+	ethernet_weight="$(uci -q get c2000max.ethernet.ethernet_weight)"
+	[ -n "$ethernet_weight" ] || ethernet_weight=60
+	cellular_weight="$(uci -q get c2000max.ethernet.cellular_weight)"
+	[ -n "$cellular_weight" ] || cellular_weight=40
+	cellular_modem="$(uci -q get c2000max.ethernet.cellular_modem)"
+	[ -n "$cellular_modem" ] || cellular_modem=auto
+	if ! c2000_wan_settings_valid "$wan_mode" "$ethernet_weight" \
+		"$cellular_weight" "$cellular_modem"; then
+		wan_mode="$C2000_WAN_MODE_ONLY"
+		ethernet_weight=60
+		cellular_weight=40
+		cellular_modem=auto
+	fi
+	cellular_interface="$(uci -q get c2000max.ethernet.cellular_interface)"
+	if [ "$consistent" = 1 ] &&
+	   c2000_uplink_config_matches "$actual" "$wan_mode" \
+		"$ethernet_weight" "$cellular_weight" "$cellular_modem"; then
+		uplink_consistent=1
+	fi
+	if [ "$consistent" = 1 ] &&
+	   uplink_services_match "$actual" "$wan_mode"; then
+		services_consistent=1
+	fi
+	if [ "$consistent" = 1 ] && [ "$runtime_consistent" = 1 ] &&
+	   [ "$uplink_consistent" = 1 ] && [ "$switching" = 0 ]; then
+		network_converged=1
+	fi
+	if [ "$network_converged" = 1 ] && [ "$accel_consistent" = 1 ]; then
+		converged=1
+	fi
+	[ "$(uci -q get eqos.config.enabled)" = 1 ] && eqos_enabled=1
+	if { [ "$actual" != lan ] || [ "$switching" = 1 ] ||
+	     [ "$requested" != mediatek_hnat ] ||
+	     [ "$accel_consistent" != 1 ] || [ "$accel_degraded" = 1 ]; } &&
+	   [ "$eqos_enabled" = 1 ]; then
+		eqos_state=paused
+	elif [ "$eqos_enabled" = 1 ]; then
+		eqos_state=configured
+	else
+		eqos_state=disabled
+	fi
+	has_wifi_management && wifi=1
+	[ "$(cat "$SYS_CLASS_NET/${PORT_DEVICE}/carrier" 2>/dev/null)" = 1 ] && link=up
+	speed="$(cat "$SYS_CLASS_NET/${PORT_DEVICE}/speed" 2>/dev/null)"
+	[ "$link" = up ] || speed=""
+	lan_ip="$(uci -q get network.lan.ipaddr)"
+	wan_ip="$(ubus call "network.interface.${WAN4}" status 2>/dev/null |
+		jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+	[ ! -r "$HNAT_HOOK" ] || hook="$(cat "$HNAT_HOOK" 2>/dev/null)"
+	if c2000_is_mtk_gmac "$PORT_DEVICE" &&
+	   c2000_is_mtk_gmac "$C2000_PPE_DEVICE"; then
+		gmac_ready=1
+	fi
+	if c2000_ppe_device_unused && c2000_ppe_runtime_unowned; then
+		ppe_idle=1
+	fi
+	c2000_whnat_ready && whnat_ready=1
+	c2000_rxppd_ready && rxppd_ready=1
+	if [ "$actual" != inconsistent ] &&
+	   c2000_hnat_endpoints_match "$actual"; then
+		endpoints_ready=1
+	fi
+	hnat_wan="$(c2000_hnat_endpoint_value wan 2>/dev/null || true)"
+	hnat_lan="$(c2000_hnat_endpoint_value lan 2>/dev/null || true)"
+	hnat_lan2="$(c2000_hnat_endpoint_value lan2 2>/dev/null || true)"
+	hnat_ppd="$(c2000_hnat_endpoint_value ppd 2>/dev/null || true)"
+	[ "$(uci -q get qmodem.main.enable_dial)" = 1 ] && qmodem_dial=1
+	qmodem_service_running && qmodem_running=1
+	qmodem_service_enabled && qmodem_enabled=1
+	for modem in $(c2000_modem_sections); do
+		c2000_modem_enabled "$modem" || continue
+		modem_interface="$(c2000_modem_interface "$modem" 2>/dev/null || true)"
+		[ -n "$modem_interface" ] || continue
+		c2000_modem_is_up "$modem_interface" || continue
+		qmodem_any_up=1
+		qmodem_interface="$modem_interface"
+		qmodem_ip="$(ubus call "network.interface.${modem_interface}" status 2>/dev/null |
+			jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+		[ -n "$qmodem_ip" ] ||
+			qmodem_ip="$(ubus call "network.interface.${modem_interface}" status 2>/dev/null |
+				jsonfilter -e '@["ipv6-address"][0].address' 2>/dev/null)"
+		break
+	done
+	if uci -q show mwan3 2>/dev/null |
+	   grep -q "\.c2000max_managed='1'$"; then
+		mwan_managed=1
+	fi
+	mwan_service_running && mwan_running=1
+	mwan_service_enabled && mwan_enabled=1
+	if [ -n "$cellular_interface" ]; then
+		if c2000_modem_is_up "$cellular_interface"; then
+			cellular_up=1
+		fi
+		cellular_ip="$(ubus call "network.interface.${cellular_interface}" status 2>/dev/null |
+			jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+	fi
+
+	json_init
+	json_add_string role "$actual"
+	json_add_string configured_role "${configured:-unknown}"
+	json_add_string actual_role "$actual"
+	json_add_boolean consistent "$consistent"
+	json_add_boolean runtime_consistent "$runtime_consistent"
+	json_add_boolean acceleration_consistent "$accel_consistent"
+	json_add_boolean uplink_consistent "$uplink_consistent"
+	json_add_boolean services_consistent "$services_consistent"
+	json_add_boolean network_converged "$network_converged"
+	json_add_boolean converged "$converged"
+	json_add_boolean switching "$switching"
+	json_add_boolean stale_task "$stale_task"
+	json_add_string active_job "$active_job"
+	json_add_string active_job_state "$active_job_state"
+	json_add_boolean active_job_alive "$active_job_alive"
+	json_add_int active_job_age "$active_job_age"
+	json_add_boolean degraded "$degraded"
+	json_add_boolean acceleration_degraded "$accel_degraded"
+	json_add_string acceleration_error "$(cat "$ACCEL_DEGRADED" 2>/dev/null)"
+	json_add_boolean recovery_pending "$recovery_pending"
+	json_add_string port "$PORT_DEVICE"
+	json_add_string link "$link"
+	json_add_string speed "$speed"
+	json_add_string lan_ip "$lan_ip"
+	json_add_string wan_ip "$wan_ip"
+	json_add_string requested_fastpath "${requested:-disabled}"
+	json_add_string expected_fastpath "$expected"
+	json_add_string effective_fastpath "$effective"
+	json_add_string hnat_hook "$hook"
+	json_add_boolean gmac_ready "$gmac_ready"
+	json_add_boolean ppe_idle "$ppe_idle"
+	json_add_boolean whnat_ready "$whnat_ready"
+	json_add_boolean rxppd_ready "$rxppd_ready"
+	json_add_boolean endpoints_ready "$endpoints_ready"
+	json_add_string hnat_wan "$hnat_wan"
+	json_add_string hnat_lan "$hnat_lan"
+	json_add_string hnat_lan2 "$hnat_lan2"
+	json_add_string hnat_ppd "$hnat_ppd"
+	json_add_string eqos "$eqos_state"
+	json_add_boolean wifi_management "$wifi"
+	json_add_string wan_mode "$wan_mode"
+	json_add_int ethernet_weight "$ethernet_weight"
+	json_add_int cellular_weight "$cellular_weight"
+	json_add_string cellular_modem "$cellular_modem"
+	json_add_string cellular_interface "$cellular_interface"
+	json_add_boolean cellular_up "$cellular_up"
+	json_add_string cellular_ip "$cellular_ip"
+	json_add_boolean qmodem_dial_enabled "$qmodem_dial"
+	json_add_boolean qmodem_running "$qmodem_running"
+	json_add_boolean qmodem_enabled "$qmodem_enabled"
+	json_add_boolean qmodem_any_up "$qmodem_any_up"
+	json_add_string qmodem_interface "$qmodem_interface"
+	json_add_string qmodem_ip "$qmodem_ip"
+	json_add_boolean mwan_managed "$mwan_managed"
+	json_add_boolean mwan_running "$mwan_running"
+	json_add_boolean mwan_enabled "$mwan_enabled"
+	json_add_array cellular_modems
+	for modem in $(c2000_modem_sections); do
+		c2000_modem_enabled "$modem" || continue
+		modem_interface="$(c2000_modem_interface "$modem" 2>/dev/null || true)"
+		[ -n "$modem_interface" ] || continue
+		modem_up=0
+		c2000_modem_is_up "$modem_interface" && modem_up=1
+		json_add_object ""
+		json_add_string section "$modem"
+		json_add_string interface "$modem_interface"
+		json_add_boolean up "$modem_up"
+		json_close_object
+	done
+	json_close_array
+	json_dump
+}
+
+backup_configs()
+{
+	local dir="$1"
+
+	umask 077
+	mkdir -p "$dir" || return 1
+	chmod 700 "$dir" || {
+		cleanup_backup "$dir"
+		return 1
+	}
+	uci export network > "$dir/network" &&
+	uci export firewall > "$dir/firewall" &&
+		uci export dhcp > "$dir/dhcp" &&
+		uci export c2000max > "$dir/c2000max" &&
+		uci export qmodem > "$dir/qmodem" &&
+		uci export mwan3 > "$dir/mwan3" || {
+		cleanup_backup "$dir"
+		return 1
+	}
+}
+
+cleanup_backup()
+{
+	local dir="$1"
+
+	case "$dir" in
+		"$JOB_DIR"/backup-*) ;;
+		*) return 1 ;;
+	esac
+	rm -f "$dir/network" "$dir/firewall" "$dir/dhcp" \
+		"$dir/c2000max" "$dir/qmodem" "$dir/mwan3"
+	rmdir "$dir" 2>/dev/null || true
+}
+
+managed_section_collision()
+{
+	local section="$1"
+
+	[ -z "$(uci -q get "network.${section}")" ] ||
+		[ "$(uci -q get "network.${section}.c2000max_managed")" = "1" ]
+}
+
+wan_metric()
+{
+	local metric
+
+	metric="$(uci -q get c2000max.ethernet.wan_metric)"
+	case "$metric" in
+		''|*[!0-9]*) metric=5 ;;
+	esac
+	printf '%s\n' "$metric"
+}
+
+stage_wan()
+{
+	local bridge metric
+
+	bridge="$(c2000_find_lan_bridge)" || return 1
+	managed_section_collision "$WAN4" || return 1
+	managed_section_collision "$WAN6" || return 1
+	metric="$(wan_metric)"
+
+	uci -q del_list "network.${bridge}.ports=$PORT_DEVICE" || return 1
+	uci -q set "network.${WAN4}=interface" || return 1
+	uci -q set "network.${WAN4}.device=$PORT_DEVICE" || return 1
+	uci -q set "network.${WAN4}.proto=dhcp" || return 1
+	uci -q set "network.${WAN4}.metric=$metric" || return 1
+	uci -q set "network.${WAN4}.c2000max_managed=1" || return 1
+	uci -q set "network.${WAN6}=interface" || return 1
+	uci -q set "network.${WAN6}.device=@${WAN4}" || return 1
+	uci -q set "network.${WAN6}.proto=dhcpv6" || return 1
+	uci -q set "network.${WAN6}.metric=$metric" || return 1
+	uci -q set "network.${WAN6}.c2000max_managed=1" || return 1
+}
+
+stage_lan()
+{
+	local bridge
+
+	bridge="$(c2000_find_lan_bridge)" || return 1
+	managed_section_collision "$WAN4" || return 1
+	managed_section_collision "$WAN6" || return 1
+
+	if [ -n "$(uci -q get "network.${WAN6}")" ]; then
+		uci -q delete "network.${WAN6}" || return 1
+	fi
+	if [ -n "$(uci -q get "network.${WAN4}")" ]; then
+		uci -q delete "network.${WAN4}" || return 1
+	fi
+	if ! c2000_list_has "$(uci -q get "network.${bridge}.ports")" "$PORT_DEVICE"; then
+		uci -q add_list "network.${bridge}.ports=$PORT_DEVICE" || return 1
+	fi
+}
+
+stage_acceleration_policy()
+{
+	local role="$1" fastpath effective flow_offloading=0
+
+	case "$role" in lan|wan) ;; *) return 1 ;; esac
+
+	fastpath="$(uci -q get turboacc.config.fastpath)"
+	case "$fastpath" in
+		disabled|flow_offloading|mediatek_hnat) ;;
+		*)
+			# Unsupported legacy values are normalized to the safe state, never
+			# promoted to HNAT by a LAN/WAN transaction.
+			uci -q set turboacc.config.fastpath='disabled' || return 1
+			;;
+	esac
+	effective="$(c2000_effective_fastpath "$role" "$fastpath")"
+	[ "$effective" != flow_offloading ] || flow_offloading=1
+	uci -q set turboacc.config.fastpath_fo_hw='0' &&
+		uci -q set \
+			"firewall.@defaults[0].flow_offloading=$flow_offloading" &&
+		uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+}
+
+stage_repair_dial_intent()
+{
+	local section has_dial=0
+
+	[ -n "$(uci -q get qmodem.main)" ] ||
+		uci -q set qmodem.main='main' || return 1
+	uci -q set qmodem.main.enable_dial='1' || return 1
+
+	# Normally c2000_stage_uplink_mode() restores every saved per-device
+	# choice. If an older failed transaction lost that journal and left all
+	# modems explicitly disabled, a repair must still make at least one
+	# cellular uplink dialable. Preserve state=disabled devices and preserve
+	# the user's selection whenever any dialable modem already exists.
+	for section in $(c2000_modem_sections); do
+		[ "$(uci -q get "qmodem.${section}.state")" != disabled ] ||
+			continue
+		[ "$(uci -q get "qmodem.${section}.enable_dial")" = 0 ] ||
+			has_dial=1
+	done
+	[ "$has_dial" = 1 ] && return 0
+	for section in $(c2000_modem_sections); do
+		[ "$(uci -q get "qmodem.${section}.state")" != disabled ] ||
+			continue
+		uci -q set "qmodem.${section}.enable_dial=1" || return 1
+	done
+	return 0
+}
+
+write_pending_marker()
+{
+	local role="$1" mode="$2" ethernet_weight="$3" cellular_weight="$4" modem="$5"
+	local resolved_modem="$6" resolved_interface="$7"
+
+	uci -q set c2000max.ethernet.pending='1' &&
+		uci -q set c2000max.ethernet.journal_phase='target_pending' &&
+		uci -q set "c2000max.ethernet.pending_role=$role" &&
+		uci -q set "c2000max.ethernet.pending_wan_mode=$mode" &&
+		uci -q set "c2000max.ethernet.pending_ethernet_weight=$ethernet_weight" &&
+		uci -q set "c2000max.ethernet.pending_cellular_weight=$cellular_weight" &&
+		uci -q set "c2000max.ethernet.pending_cellular_modem=$modem" ||
+		return 1
+	if [ -n "$resolved_modem" ] && [ -n "$resolved_interface" ]; then
+		uci -q set "c2000max.ethernet.pending_resolved_cellular_modem=$resolved_modem" &&
+			uci -q set "c2000max.ethernet.pending_cellular_interface=$resolved_interface" ||
+			return 1
+	else
+		uci -q delete c2000max.ethernet.pending_resolved_cellular_modem || true
+		uci -q delete c2000max.ethernet.pending_cellular_interface || true
+	fi
+	uci -q commit c2000max &&
+		sync
+}
+
+set_journal_phase()
+{
+	uci -q set "c2000max.ethernet.journal_phase=$1" &&
+		uci -q commit c2000max &&
+		sync
+}
+
+stage_role_marker()
+{
+	local role="$1" mode="$2" ethernet_weight="$3" cellular_weight="$4" modem="$5"
+
+	uci -q set "c2000max.ethernet.role=$role" &&
+		uci -q set "c2000max.ethernet.wan_mode=$mode" &&
+		uci -q set "c2000max.ethernet.ethernet_weight=$ethernet_weight" &&
+		uci -q set "c2000max.ethernet.cellular_weight=$cellular_weight" &&
+		uci -q set "c2000max.ethernet.cellular_modem=$modem"
+}
+
+sync_role_marker()
+{
+	local role="$1" mode="$2" ethernet_weight="$3" cellular_weight="$4" modem="$5"
+
+	stage_role_marker "$role" "$mode" "$ethernet_weight" \
+		"$cellular_weight" "$modem" || return 1
+	uci -q delete c2000max.ethernet.pending || true
+	uci -q delete c2000max.ethernet.pending_role || true
+	uci -q delete c2000max.ethernet.pending_wan_mode || true
+	uci -q delete c2000max.ethernet.pending_ethernet_weight || true
+	uci -q delete c2000max.ethernet.pending_cellular_weight || true
+	uci -q delete c2000max.ethernet.pending_cellular_modem || true
+	uci -q delete c2000max.ethernet.pending_resolved_cellular_modem || true
+	uci -q delete c2000max.ethernet.pending_cellular_interface || true
+	uci -q delete c2000max.ethernet.journal_phase || true
+	uci -q commit c2000max &&
+		sync
+}
+
+restore_role_backup_runtime()
+{
+	local dir="$1"
+
+	[ -r "$dir/network" ] && [ -r "$dir/firewall" ] &&
+		[ -r "$dir/dhcp" ] && [ -r "$dir/c2000max" ] &&
+		[ -r "$dir/qmodem" ] &&
+		[ -r "$dir/mwan3" ] || return 1
+	uci -q import < "$dir/network" || return 1
+	uci -q import < "$dir/firewall" || return 1
+	uci -q import < "$dir/dhcp" || return 1
+	uci -q import < "$dir/qmodem" || return 1
+	uci -q import < "$dir/mwan3" || return 1
+	uci -q commit network || return 1
+	uci -q commit firewall || return 1
+	uci -q commit dhcp || return 1
+	uci -q commit qmodem || return 1
+	uci -q commit mwan3 || return 1
+	sync
+}
+
+restore_role_backup_state()
+{
+	local dir="$1"
+
+	[ -r "$dir/c2000max" ] || return 1
+	uci -q import < "$dir/c2000max"
+}
+
+backup_has_pending()
+{
+	grep -Eq "^[[:space:]]*option pending '1'$" "$1/c2000max" 2>/dev/null
+}
+
+network_reload()
+{
+	run_timed 45 /etc/init.d/network reload >/dev/null 2>&1
+}
+
+firewall_reload()
+{
+	run_timed 30 /etc/init.d/firewall reload >/dev/null 2>&1
+}
+
+qmodem_stop()
+{
+	[ -x "$QMODEM_INIT" ] || return 0
+	run_timed 30 "$QMODEM_INIT" stop >/dev/null 2>&1 || true
+	return 0
+}
+
+service_running()
+{
+	local init="$1"
+
+	[ -x "$init" ] || return 1
+	run_timed 10 "$init" running >/dev/null 2>&1
+}
+
+service_enabled()
+{
+	local init="$1"
+
+	[ -x "$init" ] || return 1
+	run_timed 10 "$init" enabled >/dev/null 2>&1
+}
+
+qmodem_service_running()
+{
+	service_running "$QMODEM_INIT"
+}
+
+qmodem_service_enabled()
+{
+	service_enabled "$QMODEM_INIT"
+}
+
+qmodem_online_interface()
+{
+	local modem interface address
+
+	for modem in $(c2000_modem_sections); do
+		c2000_modem_enabled "$modem" || continue
+		interface="$(c2000_modem_interface "$modem" 2>/dev/null || true)"
+		[ -n "$interface" ] || continue
+		c2000_modem_is_up "$interface" || continue
+		address="$(ubus call "network.interface.${interface}" status 2>/dev/null |
+			jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+		[ -n "$address" ] ||
+			address="$(ubus call "network.interface.${interface}" status 2>/dev/null |
+				jsonfilter -e '@["ipv6-address"][0].address' 2>/dev/null)"
+		[ -n "$address" ] || continue
+		printf '%s\n' "$interface"
+		return 0
+	done
+	return 1
+}
+
+wait_qmodem_online()
+{
+	local i=0
+
+	while [ "$i" -lt "$REPAIR_WAIT_LOOPS" ]; do
+		qmodem_online_interface >/dev/null && return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+mwan_service_running()
+{
+	service_running "$MWAN_INIT"
+}
+
+mwan_service_enabled()
+{
+	service_enabled "$MWAN_INIT"
+}
+
+mwan_stop()
+{
+	[ -x "$MWAN_INIT" ] || return 0
+	run_timed 30 "$MWAN_INIT" stop >/dev/null 2>&1 || true
+	return 0
+}
+
+set_service_state()
+{
+	local init="$1" enabled="$2" running="$3"
+
+	[ -x "$init" ] || return 1
+	case "$enabled:$running" in
+		0:0|0:1|1:0|1:1) ;;
+		*) return 1 ;;
+	esac
+	if [ "$enabled" = 1 ]; then
+		run_timed 15 "$init" enable >/dev/null 2>&1 || true
+	else
+		run_timed 15 "$init" disable >/dev/null 2>&1 || true
+	fi
+	if [ "$running" = 1 ]; then
+		run_timed 45 "$init" restart >/dev/null 2>&1 || true
+	else
+		run_timed 30 "$init" stop >/dev/null 2>&1 || true
+	fi
+	# QModem's procd service has one instance per detected modem.  At boot,
+	# `running` is false until USB enumeration and modem registration finish,
+	# even though the service is correctly enabled and will dial normally.
+	# mwan3 likewise may have no process before an interface appears.  The
+	# persistent enable/disable intent is therefore the only synchronous
+	# service state that belongs to the Ethernet role transaction.
+	if [ "$enabled" = 1 ]; then
+		service_enabled "$init"
+	else
+		! service_enabled "$init"
+	fi
+}
+
+capture_transaction_service_state()
+{
+	TX_QMODEM_WAS_RUNNING=0
+	TX_QMODEM_WAS_ENABLED=0
+	TX_MWAN_WAS_RUNNING=0
+	TX_MWAN_WAS_ENABLED=0
+	qmodem_service_running && TX_QMODEM_WAS_RUNNING=1
+	qmodem_service_enabled && TX_QMODEM_WAS_ENABLED=1
+	mwan_service_running && TX_MWAN_WAS_RUNNING=1
+	mwan_service_enabled && TX_MWAN_WAS_ENABLED=1
+	TX_SERVICE_STATE_CAPTURED=1
+}
+
+capture_persistent_service_state()
+{
+	# V23 persisted momentary procd process state.  A snapshot taken before
+	# USB modem enumeration could then be replayed forever as "QModem must be
+	# stopped".  V24 derives service intent solely from the selected role and
+	# WAN mode, and removes every legacy process-state override.
+	uci -q delete c2000max.ethernet.services_override_active || true
+	uci -q delete c2000max.ethernet.qmodem_saved_running || true
+	uci -q delete c2000max.ethernet.qmodem_saved_enabled || true
+	uci -q delete c2000max.ethernet.mwan_saved_running || true
+	uci -q delete c2000max.ethernet.mwan_saved_enabled || true
+	return 0
+}
+
+saved_service_state()
+{
+	local option="$1" value
+
+	[ "$(uci -q get c2000max.ethernet.services_override_active)" = 1 ] ||
+		return 1
+	value="$(uci -q get "c2000max.ethernet.${option}")"
+	case "$value" in 0|1) printf '%s\n' "$value" ;; *) return 1 ;; esac
+}
+
+restore_transaction_services()
+{
+	[ "$TX_SERVICE_STATE_CAPTURED" = 1 ] || return 1
+	set_service_state "$QMODEM_INIT" "$TX_QMODEM_WAS_ENABLED" \
+		"$TX_QMODEM_WAS_RUNNING" &&
+		set_service_state "$MWAN_INIT" "$TX_MWAN_WAS_ENABLED" \
+			"$TX_MWAN_WAS_RUNNING"
+}
+
+transaction_services_match()
+{
+	local qrun=0 qen=0 mrun=0 men=0
+
+	[ "$TX_SERVICE_STATE_CAPTURED" = 1 ] || return 1
+	qmodem_service_running && qrun=1
+	qmodem_service_enabled && qen=1
+	mwan_service_running && mrun=1
+	mwan_service_enabled && men=1
+	[ "$qrun" = "$TX_QMODEM_WAS_RUNNING" ] &&
+		[ "$qen" = "$TX_QMODEM_WAS_ENABLED" ] &&
+		[ "$mrun" = "$TX_MWAN_WAS_RUNNING" ] &&
+		[ "$men" = "$TX_MWAN_WAS_ENABLED" ]
+}
+
+apply_uplink_services()
+{
+	local role="$1" mode="$2"
+	local qenable=0 menable=0
+
+	case "$role:$mode" in
+		wan:"$C2000_WAN_MODE_BALANCE")
+			qenable=1
+			menable=1
+			;;
+		wan:"$C2000_WAN_MODE_ONLY")
+			qenable=0
+			menable=0
+			;;
+		lan:*)
+			[ "$(uci -q get qmodem.main.enable_dial)" = 1 ] &&
+				qenable=1
+			menable=0
+			;;
+		*) return 1 ;;
+	esac
+	set_service_state "$QMODEM_INIT" "$qenable" "$qenable" &&
+		set_service_state "$MWAN_INIT" "$menable" "$menable"
+}
+
+service_state_matches()
+{
+	local init="$1" expected_enabled="$2" expected_running="$3"
+	local enabled=0
+
+	service_enabled "$init" && enabled=1
+	[ "$enabled" = "$expected_enabled" ]
+}
+
+uplink_services_match()
+{
+	local role="$1" mode="$2" qenable=0 menable=0
+
+	case "$role:$mode" in
+		lan:*)
+			if [ "$(uci -q get qmodem.main.enable_dial)" = 1 ]; then
+				qenable=1
+			fi
+			menable=0
+			;;
+		wan:"$C2000_WAN_MODE_ONLY")
+			qenable=0
+			menable=0
+			;;
+		wan:"$C2000_WAN_MODE_BALANCE")
+			qenable=1
+			menable=1
+			;;
+		*) return 1 ;;
+	esac
+	service_state_matches "$QMODEM_INIT" "$qenable" "$qenable" &&
+		service_state_matches "$MWAN_INIT" "$menable" "$menable"
+}
+
+finalize_service_override()
+{
+	uci -q delete c2000max.ethernet.services_override_active || true
+	uci -q delete c2000max.ethernet.qmodem_saved_running || true
+	uci -q delete c2000max.ethernet.qmodem_saved_enabled || true
+	uci -q delete c2000max.ethernet.mwan_saved_running || true
+	uci -q delete c2000max.ethernet.mwan_saved_enabled || true
+}
+
+recover_uplink_services()
+{
+	local role mode
+
+	role="$(c2000_actual_role)"
+	mode="$(uci -q get c2000max.ethernet.wan_mode)"
+	[ -n "$mode" ] || mode="$C2000_WAN_MODE_ONLY"
+	case "$role" in
+		lan|wan)
+			apply_uplink_services "$role" "$mode" >/dev/null 2>&1 || true
+			;;
+		*)
+			# An inconsistent Ethernet topology must not take the independent
+			# cellular recovery path down with it.
+			set_service_state "$QMODEM_INIT" 1 1 >/dev/null 2>&1 || true
+			set_service_state "$MWAN_INIT" 0 0 >/dev/null 2>&1 || true
+			;;
+	esac
+	sync
+}
+
+hnat_reload()
+{
+	local rc journal_replay=0
+
+	# apply_role()/rollback_role() already own ROLE.  Do not enter rc.common
+	# here: procd_hnat -> ROLE in a concurrent ordinary reload would invert
+	# ROLE -> HNAT -> procd_hnat and deadlock this transaction.
+	hnat_lock_acquire || return 1
+	if [ "$APPLY_ACTIVE" = 1 ] && [ -e "$SWITCHING" ]; then
+		journal_replay=1
+	fi
+	C2000MAX_PORT_SWITCH=1 C2000MAX_ACCEL_LOCKS_HELD=1 \
+		C2000MAX_JOURNAL_REPLAY="$journal_replay" \
+		run_timed 45 "$HNAT_LOCKED_HELPER" >/dev/null 2>&1
+	rc=$?
+	hnat_lock_release
+	return "$rc"
+}
+
+eqos_stop()
+{
+	C2000MAX_PORT_SWITCH=1 C2000MAX_ACCEL_LOCKS_HELD=1 \
+		run_timed 30 "$EQOS_LOCKED_HELPER" stop >/dev/null 2>&1 || true
+	if command -v tc >/dev/null 2>&1 &&
+	   tc qdisc show dev br-lan 2>/dev/null | grep -q 'qdisc htb 1:'; then
+		return 1
+	fi
+	[ ! -d "$SYS_CLASS_NET/ifb-eqos" ] || return 1
+	if command -v nft >/dev/null 2>&1 &&
+	   nft list table inet eqos >/dev/null 2>&1; then
+		return 1
+	fi
+	return 0
+}
+
+eqos_start()
+{
+	local rc
+
+	# apply_role()/rollback_role() already hold ROLE.  Keep HNAT held across
+	# the complete EQoS QDMA/nft/tc transaction and invoke the non-rc.common
+	# worker so the procd service lock cannot invert lock order.
+	hnat_lock_acquire || return 1
+	C2000MAX_PORT_SWITCH=1 C2000MAX_ACCEL_LOCKS_HELD=1 \
+		C2000MAX_JOURNAL_REPLAY=1 \
+		run_timed 30 "$EQOS_LOCKED_HELPER" start >/dev/null 2>&1
+	rc=$?
+	hnat_lock_release
+	return "$rc"
+}
+
+force_hook_off()
+{
+	local state rc i=0
+
+	if [ ! -e "$HNAT_HOOK" ]; then
+		printf '%s\n' disabled > "$HNAT_EFFECTIVE"
+		return 0
+	fi
+	[ -w "$HNAT_HOOK" ] || {
+		printf '%s\n' unknown > "$HNAT_EFFECTIVE"
+		return 1
+	}
+	echo 0 > "$HNAT_HOOK" || {
+		printf '%s\n' unknown > "$HNAT_EFFECTIVE"
+		return 1
+	}
+	state="$(cat "$HNAT_HOOK" 2>/dev/null)"
+	[ "$state" = disabled ] || {
+		printf '%s\n' unknown > "$HNAT_EFFECTIVE"
+		return 1
+	}
+	[ -r "$HNAT_DIR/all_entry" ] || {
+		printf '%s\n' unknown > "$HNAT_EFFECTIVE"
+		return 1
+	}
+	while [ "$i" -lt "$HNAT_FLUSH_WAIT_LOOPS" ]; do
+		grep -Fq '|state=BIND|' "$HNAT_DIR/all_entry"
+		rc=$?
+		if [ "$rc" = 1 ]; then
+			printf '%s\n' disabled > "$HNAT_EFFECTIVE"
+			return 0
+		fi
+		[ "$rc" = 0 ] || {
+			printf '%s\n' unknown > "$HNAT_EFFECTIVE"
+			return 1
+		}
+		sleep 1
+		i=$((i + 1))
+	done
+	printf '%s\n' unknown > "$HNAT_EFFECTIVE"
+	return 1
+}
+
+quiesce_acceleration()
+{
+	local rc=0
+
+	hnat_lock_acquire || return 1
+	eqos_stop || rc=1
+	force_hook_off || rc=1
+	hnat_lock_release
+	return "$rc"
+}
+
+runtime_role_matches()
+{
+	local role="$1" master=""
+
+	if [ -L "$SYS_CLASS_NET/$PORT_DEVICE/master" ]; then
+		master="$(basename "$(readlink -f "$SYS_CLASS_NET/$PORT_DEVICE/master")")"
+	fi
+
+	case "$role" in
+		lan)
+			[ "$master" = br-lan ] || return 1
+			ubus call network.interface.lan status >/dev/null 2>&1
+			;;
+		wan)
+			[ -z "$master" ] || return 1
+			ubus call "network.interface.${WAN4}" status >/dev/null 2>&1
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+wait_runtime_role()
+{
+	local role="$1" i=0
+
+	while [ "$i" -lt "$RUNTIME_WAIT_LOOPS" ]; do
+		runtime_role_matches "$role" && return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+job_pid_file()
+{
+	printf '%s/%s.pid\n' "$JOB_DIR" "$1"
+}
+
+job_process_matches()
+{
+	local job_id="$1" pid="$2" cmdline
+
+	case "$job_id:$pid" in
+		*[!0-9-]*:*|*:*[!0-9]*) return 1 ;;
+	esac
+	[ -r "$PROC_ROOT/$pid/cmdline" ] || return 1
+	cmdline="$(tr '\000' ' ' < "$PROC_ROOT/$pid/cmdline" 2>/dev/null)"
+	case "$cmdline" in
+		*c2000max-port-role*" apply "*"$job_id"*) return 0 ;;
+	esac
+	return 1
+}
+
+job_process_alive()
+{
+	local job_id="$1" pid
+
+	pid="$(cat "$(job_pid_file "$job_id")" 2>/dev/null)"
+	job_process_matches "$job_id" "$pid"
+}
+
+job_age_seconds()
+{
+	local file="$1" now modified
+
+	now="$(date +%s)"
+	modified="$(stat -c %Y "$file" 2>/dev/null)"
+	case "$now:$modified" in
+		*[!0-9:]*|:*) return 1 ;;
+	esac
+	if [ "$now" -ge "$modified" ]; then
+		printf '%s\n' $((now - modified))
+	else
+		printf '0\n'
+	fi
+}
+
+job_state_active()
+{
+	local job_id="$1" state
+
+	[ -r "$JOB_DIR/${job_id}.json" ] || return 1
+	state="$(jsonfilter -i "$JOB_DIR/${job_id}.json" -e '@.state' 2>/dev/null)"
+	case "$state" in pending|running) return 0 ;; esac
+	return 1
+}
+
+terminate_job_process()
+{
+	local job_id="$1" pid i=0
+
+	pid="$(cat "$(job_pid_file "$job_id")" 2>/dev/null)"
+	job_process_matches "$job_id" "$pid" || return 0
+	kill -TERM "$pid" 2>/dev/null || true
+	while [ "$i" -lt "$JOB_CANCEL_WAIT" ]; do
+		job_process_matches "$job_id" "$pid" || return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	kill -KILL "$pid" 2>/dev/null || true
+	i=0
+	while [ "$i" -lt 5 ]; do
+		job_process_matches "$job_id" "$pid" || return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+write_job()
+{
+	local file="$1" state="$2" success="$3" message="$4"
+	local job_id pid
+
+	job_id="${file##*/}"
+	job_id="${job_id%.json}"
+	pid="$(cat "$(job_pid_file "$job_id")" 2>/dev/null)"
+	json_init
+	json_add_string job_id "$job_id"
+	json_add_string state "$state"
+	json_add_boolean success "$success"
+	json_add_string message "$message"
+	json_add_int updated "$(date +%s)"
+	case "$pid" in
+		''|*[!0-9]*) ;;
+		*) json_add_int pid "$pid" ;;
+	esac
+	json_dump > "${file}.tmp" || return 1
+	mv "${file}.tmp" "$file"
+}
+
+clear_active_job()
+{
+	local job_id="$1"
+
+	[ "$(cat "$JOB_DIR/active" 2>/dev/null)" = "$job_id" ] || return 0
+	rm -f "$JOB_DIR/active"
+	rm -f "$(job_pid_file "$job_id")"
+}
+
+clear_orphaned_job()
+{
+	local job_id="$1" reason="$2" file state had_transaction=0
+
+	file="$JOB_DIR/${job_id}.json"
+	state="$(jsonfilter -i "$file" -e '@.state' 2>/dev/null)"
+	case "$state" in
+		pending|running)
+			write_job "$file" failed 0 "$reason" || true
+			;;
+	esac
+	if [ -e "$SWITCHING" ] ||
+	   [ "$(uci -q get c2000max.ethernet.pending)" = 1 ] ||
+	   [ "$(c2000_actual_role)" = inconsistent ]; then
+		had_transaction=1
+	fi
+	rm -f "$SWITCHING"
+	clear_active_job "$job_id"
+	if [ "$had_transaction" = 1 ]; then
+		mark_degraded "$reason"
+	fi
+	log "$reason"
+}
+
+reap_orphaned_active_job()
+{
+	local active state age
+
+	active="$(cat "$JOB_DIR/active" 2>/dev/null)"
+	[ -n "$active" ] || return 0
+	case "$active" in *[!0-9-]*) rm -f "$JOB_DIR/active"; return 0 ;; esac
+	[ -r "$JOB_DIR/${active}.json" ] || {
+		rm -f "$JOB_DIR/active" "$(job_pid_file "$active")"
+		return 0
+	}
+	state="$(jsonfilter -i "$JOB_DIR/${active}.json" -e '@.state' 2>/dev/null)"
+	case "$state" in
+		pending|running) ;;
+		*)
+			clear_active_job "$active"
+			return 0
+			;;
+	esac
+	job_process_alive "$active" && return 1
+	age="$(job_age_seconds "$JOB_DIR/${active}.json" 2>/dev/null)"
+	case "$age" in
+		''|*[!0-9]*) age="$JOB_STALE_SECONDS" ;;
+	esac
+	# start-stop-daemon writes the pidfile during the launcher handoff.  Give
+	# that handoff a short grace period before declaring a new job orphaned.
+	[ "$age" -ge 5 ] || return 1
+	clear_orphaned_job "$active" \
+		"检测到后台网口任务已退出，已自动清除永久忙状态；请执行网口修复"
+	return 0
+}
+
+mark_degraded()
+{
+	local reason="$1"
+
+	printf '%s\n' "$reason" > "$DEGRADED"
+}
+
+mark_acceleration_degraded()
+{
+	local reason="$1"
+
+	ACCEL_WARNING="$reason"
+	printf '%s\n' "$reason" > "$ACCEL_DEGRADED"
+}
+
+apply_acceleration_nonfatal()
+{
+	local role="$1" eqos_enabled="$2" requested expected
+
+	requested="$(uci -q get turboacc.config.fastpath)"
+	expected="$(c2000_effective_fastpath "$role" "$requested")"
+	if hnat_reload && acceleration_matches "$role"; then
+		rm -f "$ACCEL_DEGRADED"
+		if [ "$role" = lan ] && [ "$eqos_enabled" = 1 ] &&
+		   [ "$requested" = mediatek_hnat ]; then
+			if ! eqos_start; then
+				mark_acceleration_degraded \
+					"MediaTek HNAT 已启用，但 EQoS 恢复失败并保持暂停"
+			fi
+		fi
+		return 0
+	fi
+
+	if force_hook_off >/dev/null 2>&1; then
+		if [ "$expected" = mediatek_hnat ]; then
+			mark_acceleration_degraded \
+				"${role} 角色网络已生效，但 MediaTek HNAT 运行态验证失败，硬件加速已验证关闭"
+		elif [ "$expected" = flow_offloading ]; then
+			mark_acceleration_degraded \
+				"${role} 角色网络已生效，但软件流量分载未能完成验证；MediaTek HNAT 已验证关闭"
+		else
+			mark_acceleration_degraded \
+				"加速关闭状态未能完全收敛，但所有硬件 hook 已验证关闭"
+		fi
+		# An ordinary PPE/WHNAT gate failure is outside the network rollback
+		# boundary only after the hook-off and BIND-flush barrier is proven.
+		return 0
+	fi
+
+	if [ "$expected" = mediatek_hnat ]; then
+		mark_acceleration_degraded \
+			"${role} 角色网络已生效，但 MediaTek HNAT 运行态验证失败，且无法确认硬件 hook 已关闭"
+	elif [ "$expected" = flow_offloading ]; then
+		mark_acceleration_degraded \
+			"${role} 角色网络已生效，但软件流量分载未能完成验证，且无法确认 MediaTek HNAT hook 已关闭"
+	else
+		mark_acceleration_degraded \
+			"加速关闭状态未能完成运行态验证，且无法确认硬件 hook 已关闭"
+	fi
+	# Do not call an unverified hardware state a non-fatal acceleration miss.
+	return 2
+}
+
+rollback_role()
+{
+	local role="$1" eqos_enabled="$2" backup="$3"
+	local mode ethernet_weight cellular_weight modem
+
+	# Network recovery has priority over accelerator diagnostics.  A failed
+	# hook readback must not prevent restoring the usable topology.
+	quiesce_acceleration >/dev/null 2>&1 || force_hook_off >/dev/null 2>&1 || true
+	case "$role" in lan|wan) ;; *) return 1 ;; esac
+	qmodem_stop >/dev/null 2>&1 || true
+	mwan_stop >/dev/null 2>&1 || true
+	restore_role_backup_runtime "$backup" || return 1
+	restore_role_backup_state "$backup" || return 1
+	uci -q commit c2000max || return 1
+	[ "$(c2000_actual_role)" = "$role" ] || return 1
+	network_reload || return 1
+	wait_runtime_role "$role" || return 1
+	mode="$(uci -q get c2000max.ethernet.wan_mode)"
+	[ -n "$mode" ] || mode="$C2000_WAN_MODE_ONLY"
+	ethernet_weight="$(uci -q get c2000max.ethernet.ethernet_weight)"
+	[ -n "$ethernet_weight" ] || ethernet_weight=60
+	cellular_weight="$(uci -q get c2000max.ethernet.cellular_weight)"
+	[ -n "$cellular_weight" ] || cellular_weight=40
+	modem="$(uci -q get c2000max.ethernet.cellular_modem)"
+	[ -n "$modem" ] || modem=auto
+	apply_uplink_services "$role" "$mode" || return 1
+	uplink_services_match "$role" "$mode" || return 1
+	finalize_service_override "$role"
+	sync || return 1
+	firewall_reload || return 1
+	c2000_uplink_config_matches "$role" "$mode" \
+			"$ethernet_weight" "$cellular_weight" "$modem" &&
+		uplink_services_match "$role" "$mode" || return 1
+	sync_role_marker "$role" "$mode" "$ethernet_weight" \
+		"$cellular_weight" "$modem" || return 1
+	rm -f "$DEGRADED"
+	# A restored network remains successful even if HNAT must retry later.
+	apply_acceleration_nonfatal "$role" "$eqos_enabled" || true
+	return 0
+}
+
+emergency_lan_recovery()
+{
+	local eqos_enabled="$1"
+
+	force_hook_off >/dev/null 2>&1 || true
+	qmodem_stop >/dev/null 2>&1 || true
+	mwan_stop >/dev/null 2>&1 || true
+	stage_lan || return 1
+	c2000_stage_uplink_mode lan "$C2000_WAN_MODE_ONLY" 60 40 auto ||
+		return 1
+	stage_repair_dial_intent || return 1
+	stage_acceleration_policy lan || return 1
+	uci -q commit network &&
+		uci -q commit dhcp &&
+		uci -q commit turboacc &&
+		uci -q commit firewall &&
+		uci -q commit qmodem &&
+		uci -q commit mwan3 || return 1
+	network_reload && wait_runtime_role lan || return 1
+	apply_uplink_services lan "$C2000_WAN_MODE_ONLY" || return 1
+	firewall_reload || return 1
+	finalize_service_override lan
+	sync_role_marker lan "$C2000_WAN_MODE_ONLY" 60 40 auto || return 1
+	rm -f "$DEGRADED"
+	apply_acceleration_nonfatal lan "$eqos_enabled" || true
+	return 0
+}
+
+abort_apply()
+{
+	local message recovered=0
+
+	trap '' HUP INT TERM
+	# If interruption arrived inside an HNAT/EQoS worker, release HNAT before
+	# rollback attempts to reacquire it under the already-held ROLE lock.
+	hnat_lock_release >/dev/null 2>&1 || true
+	queue_lock_release >/dev/null 2>&1 || true
+	if [ "$APPLY_CONTEXT" = 1 ] && [ "$ACCEL_APPLY_ACTIVE" = 1 ]; then
+		# Network state is either unchanged (acceleration-only retry) or already
+		# committed. Never roll it back because the separate HNAT pass was
+		# interrupted, but do not claim fail-closed without proving the barrier.
+		if force_hook_off >/dev/null 2>&1; then
+			message="网络配置保持不变；加速收敛被中断，硬件 hook 已验证关闭"
+			mark_acceleration_degraded "$message"
+			[ -z "$CURRENT_JOB_FILE" ] ||
+				write_job "$CURRENT_JOB_FILE" done 1 "$message"
+		else
+			message="网络配置保持不变；加速收敛被中断，无法确认硬件 hook 已关闭"
+			mark_acceleration_degraded "$message"
+			[ -z "$CURRENT_JOB_FILE" ] ||
+				write_job "$CURRENT_JOB_FILE" failed 0 "$message"
+		fi
+		rm -f "$SWITCHING"
+		clear_active_job "$CURRENT_JOB"
+		[ -z "$CURRENT_BACKUP" ] ||
+			cleanup_backup "$CURRENT_BACKUP" >/dev/null 2>&1 || true
+	elif [ "$APPLY_CONTEXT" = 1 ] && [ "$APPLY_COMMITTED" = 1 ]; then
+		# The network journal and role marker are already finalized. A signal
+		# after that boundary must never restore the previous topology.
+		if [ "$REPAIR_CONTEXT" = 1 ]; then
+			message="网络与服务修复已完成；5G 地址等待被中断，拨号将继续自动重试"
+		else
+			message="网络与上行服务切换已完成；收尾过程被中断"
+		fi
+		rm -f "$SWITCHING"
+		[ -z "$CURRENT_JOB_FILE" ] ||
+			write_job "$CURRENT_JOB_FILE" done 1 "$message"
+		clear_active_job "$CURRENT_JOB"
+		[ -z "$CURRENT_BACKUP" ] ||
+			cleanup_backup "$CURRENT_BACKUP" >/dev/null 2>&1 || true
+	elif [ "$APPLY_CONTEXT" = 1 ] && [ "$APPLY_ACTIVE" = 1 ]; then
+		force_hook_off >/dev/null 2>&1
+		if [ -n "$CURRENT_BACKUP" ] &&
+		   rollback_role "$CURRENT_BEFORE_ROLE" "$CURRENT_EQOS_ENABLED" \
+			"$CURRENT_BACKUP"; then
+			recovered=1
+			message="切换进程被中断；已验证恢复原网络与服务状态"
+			rm -f "$DEGRADED"
+		else
+			if force_hook_off >/dev/null 2>&1; then
+				message="切换进程被中断且自动回滚失败；HNAT 已验证关闭，待开机按日志恢复"
+			else
+				message="切换进程被中断且自动回滚失败；HNAT 状态未知，待开机按日志恢复"
+			fi
+			if emergency_lan_recovery "$CURRENT_EQOS_ENABLED"; then
+				recovered=1
+				message="切换进程被中断；已自动恢复 LAN 与 5G 网络"
+				rm -f "$DEGRADED"
+			else
+				recover_uplink_services
+				mark_degraded "$message"
+			fi
+		fi
+		rm -f "$SWITCHING"
+		[ -z "$CURRENT_JOB_FILE" ] ||
+			write_job "$CURRENT_JOB_FILE" failed 0 "$message"
+		clear_active_job "$CURRENT_JOB"
+		if [ "$recovered" = 1 ] && [ -n "$CURRENT_BACKUP" ]; then
+			cleanup_backup "$CURRENT_BACKUP"
+		fi
+	elif [ "$APPLY_CONTEXT" = 1 ]; then
+		# The job owns the queue entry but has not mutated committed network
+		# state yet.  Do not leave a permanent pending/running task if a
+		# signal arrives during the initial delay, validation, or backup.
+		message="切换进程在进入网络事务前被中断；配置未改变"
+		if [ "$QUIESCE_ACTIVE" = 1 ]; then
+			if force_hook_off >/dev/null 2>&1; then
+				message="${message}；硬件 hook 已验证关闭"
+			else
+				message="${message}；无法确认硬件 hook 已关闭"
+			fi
+			mark_acceleration_degraded "$message"
+		fi
+		if [ -n "$CURRENT_BACKUP" ] && [ -e "$SWITCHING" ]; then
+			if ! restore_role_backup_state "$CURRENT_BACKUP" ||
+			   ! uci -q commit c2000max || ! sync; then
+				message="${message}；无法清理事务前的 c2000max 暂存状态"
+				mark_degraded "$message"
+			fi
+		fi
+		rm -f "$SWITCHING"
+		[ -z "$CURRENT_BACKUP" ] ||
+			cleanup_backup "$CURRENT_BACKUP" >/dev/null 2>&1 || true
+		[ -z "$CURRENT_JOB_FILE" ] ||
+			write_job "$CURRENT_JOB_FILE" failed 0 "$message"
+		clear_active_job "$CURRENT_JOB"
+	elif [ "$QUEUE_ACTIVE" = 1 ]; then
+		message="提交切换任务时被中断；任务已取消"
+		[ -z "$CURRENT_JOB_FILE" ] ||
+			write_job "$CURRENT_JOB_FILE" failed 0 "$message"
+		clear_active_job "$CURRENT_JOB"
+	elif [ "$UPLINK_ACTIVE" = 1 ] && [ "$ROLE_HELD" = 1 ]; then
+		if force_hook_off >/dev/null 2>&1; then
+			message="上行事件收敛被中断；HNAT 已验证关闭，需重新应用 WAN 设置"
+		else
+			message="上行事件收敛被中断；HNAT 状态未知，需重新应用 WAN 设置"
+		fi
+		mark_acceleration_degraded "$message"
+		log "$message"
+	fi
+	role_lock_release >/dev/null 2>&1 || true
+	exit 1
+}
+
+apply_role()
+{
+	local role="$1" job_id="$2" mode="$3" ethernet_weight="$4"
+	local cellular_weight="$5" modem="$6" force="${7:-0}"
+	local repair="${8:-0}"
+	local before backup rc=1 message stage_rc selected select_rc accel_rc=0
+	local frozen_modem="" frozen_interface="" journal_modem="" journal_interface=""
+	local job_file="${JOB_DIR}/${job_id}.json"
+	local role_label eqos_enabled=0 rollback_ok=0 effective
+
+	CURRENT_JOB="$job_id"
+	CURRENT_JOB_FILE="$job_file"
+	APPLY_CONTEXT=1
+	APPLY_COMMITTED=0
+	ACCEL_APPLY_ACTIVE=0
+	QUIESCE_ACTIVE=0
+	REPAIR_CONTEXT="$repair"
+	STAGE_ERROR=""
+	ACCEL_WARNING=""
+	REPAIR_CELLULAR_READY=0
+	case "$repair" in 0|1) ;; *) repair=0; REPAIR_CONTEXT=0 ;; esac
+	if [ "$repair" = 1 ]; then
+		role=lan
+		force=1
+	fi
+	trap abort_apply HUP INT TERM
+	role_label="$(printf '%s' "$role" | tr 'a-z' 'A-Z')"
+	[ "$(uci -q get eqos.config.enabled)" = 1 ] && eqos_enabled=1
+
+	sleep 2
+	role_lock_acquire || {
+		trap - HUP INT TERM
+		write_job "$job_file" failed 0 "无法取得网口切换锁"
+		clear_active_job "$job_id"
+		return 1
+	}
+	write_job "$job_file" running 1 "正在切换"
+
+	before="$(c2000_actual_role)"
+	CURRENT_BEFORE_ROLE="$before"
+	CURRENT_EQOS_ENABLED="$eqos_enabled"
+	if [ "$before" = inconsistent ] && [ "$repair" != 1 ]; then
+		if force_hook_off >/dev/null 2>&1; then
+			message="当前 network UCI 拓扑不一致，HNAT 已验证关闭"
+		else
+			message="当前 network UCI 拓扑不一致，HNAT 状态未知"
+		fi
+		mark_degraded "$message"
+		write_job "$job_file" failed 0 "$message"
+		clear_active_job "$job_id"
+		role_lock_release
+		trap - HUP INT TERM
+		return 1
+	fi
+	if [ "$role" = wan ] && ! wan_zone_is_safe; then
+		message="WAN 防火墙区域未满足受管接口、NAT 和非 ACCEPT 安全条件"
+		write_job "$job_file" failed 0 "$message"
+		clear_active_job "$job_id"
+		role_lock_release
+		trap - HUP INT TERM
+		return 1
+	fi
+	if ! c2000_wan_settings_valid "$mode" "$ethernet_weight" \
+		"$cellular_weight" "$modem"; then
+		if [ "$role" = lan ]; then
+			mode="$C2000_WAN_MODE_ONLY"
+			ethernet_weight=60
+			cellular_weight=40
+			modem=auto
+		else
+			write_job "$job_file" failed 0 "WAN 模式、分流比例或 5G 模块选择无效"
+			clear_active_job "$job_id"
+			role_lock_release
+			trap - HUP INT TERM
+			return 1
+		fi
+	fi
+	if [ "$role" = wan ] && [ "$mode" = "$C2000_WAN_MODE_BALANCE" ]; then
+		# A pending transaction stores the one modem selected before services
+		# were stopped.  Reuse it during S98 crash replay so an automatic
+		# selection with multiple now-offline modems remains deterministic.
+		if [ "$(uci -q get c2000max.ethernet.pending)" = 1 ] &&
+		   [ "$(uci -q get c2000max.ethernet.pending_role)" = "$role" ] &&
+		   [ "$(uci -q get c2000max.ethernet.pending_wan_mode)" = "$mode" ] &&
+		   [ "$(uci -q get c2000max.ethernet.pending_ethernet_weight)" = "$ethernet_weight" ] &&
+		   [ "$(uci -q get c2000max.ethernet.pending_cellular_weight)" = "$cellular_weight" ] &&
+		   [ "$(uci -q get c2000max.ethernet.pending_cellular_modem)" = "$modem" ]; then
+			journal_modem="$(uci -q get c2000max.ethernet.pending_resolved_cellular_modem)"
+			journal_interface="$(uci -q get c2000max.ethernet.pending_cellular_interface)"
+		fi
+		if [ -z "$journal_modem" ] &&
+		   [ "$before" = wan ] &&
+		   [ "$(uci -q get c2000max.ethernet.wan_mode)" = "$mode" ] &&
+		   [ "$(uci -q get c2000max.ethernet.ethernet_weight)" = "$ethernet_weight" ] &&
+		   [ "$(uci -q get c2000max.ethernet.cellular_weight)" = "$cellular_weight" ] &&
+		   [ "$(uci -q get c2000max.ethernet.cellular_modem)" = "$modem" ] &&
+		   [ "$(uci -q get c2000max.ethernet.qmodem_override_active)" = 1 ]; then
+			# Normal S98 boot convergence happens before QModem S99.  Reuse
+			# the already-resolved automatic selection rather than declaring
+			# multiple saved-but-currently-offline modems ambiguous.
+			journal_modem="$(uci -q get c2000max.ethernet.resolved_cellular_modem)"
+			journal_interface="$(uci -q get c2000max.ethernet.cellular_interface)"
+		fi
+		if [ -n "$journal_modem" ] && [ -n "$journal_interface" ] &&
+		   [ "$(uci -q get "qmodem.${journal_modem}")" = modem-device ] &&
+		   c2000_modem_enabled "$journal_modem" &&
+		   [ "$(c2000_modem_interface "$journal_modem" 2>/dev/null)" = \
+			"$journal_interface" ] &&
+		   c2000_cell_interface_safe "$journal_modem" "$journal_interface"; then
+			selected="${journal_modem}|${journal_interface}"
+			select_rc=0
+		else
+			selected="$(c2000_select_modem "$modem")"
+			select_rc=$?
+		fi
+		if [ "$select_rc" -ne 0 ]; then
+			if [ "$select_rc" -eq 2 ]; then
+				message="检测到多个可用 5G 模块，请明确选择模块"
+			else
+				message="没有找到可拨号的 QModem 5G 模块"
+			fi
+			write_job "$job_file" failed 0 "$message"
+			clear_active_job "$job_id"
+			role_lock_release
+			trap - HUP INT TERM
+			return 1
+		fi
+		frozen_modem="${selected%%|*}"
+		frozen_interface="${selected#*|}"
+		if ! c2000_cell_interface_safe "$frozen_modem" "$frozen_interface"; then
+			write_job "$job_file" failed 0 "所选 5G 接口名与系统网络或受管 mwan3 命名空间冲突"
+			clear_active_job "$job_id"
+			role_lock_release
+			trap - HUP INT TERM
+			return 1
+		fi
+	fi
+	if [ "$repair" != 1 ] &&
+	   [ "$force" != 1 ] && [ "$before" = "$role" ] &&
+	   [ ! -e "$DEGRADED" ] &&
+	   [ "$(uci -q get c2000max.ethernet.pending)" != 1 ] &&
+	   runtime_role_matches "$role" &&
+	   c2000_uplink_config_matches "$role" "$mode" \
+		"$ethernet_weight" "$cellular_weight" "$modem" &&
+	   uplink_services_match "$role" "$mode"; then
+		if ! sync_role_marker "$role" "$mode" "$ethernet_weight" \
+			"$cellular_weight" "$modem"; then
+			write_job "$job_file" failed 0 "网络拓扑正确，但无法同步角色状态"
+			clear_active_job "$job_id"
+			role_lock_release
+			trap - HUP INT TERM
+			return 1
+		fi
+		if acceleration_matches "$role"; then
+			rm -f "$ACCEL_DEGRADED"
+			message="网口已经是 ${role_label} 模式，网络与加速状态均已收敛"
+		else
+			ACCEL_APPLY_ACTIVE=1
+			apply_acceleration_nonfatal "$role" "$eqos_enabled"
+			accel_rc=$?
+			ACCEL_APPLY_ACTIVE=0
+			if [ "$accel_rc" -ne 0 ]; then
+				message="网口已经是 ${role_label} 模式，但无法确认硬件加速已安全关闭"
+				[ -z "$ACCEL_WARNING" ] ||
+					message="${message}；${ACCEL_WARNING}"
+				write_job "$job_file" failed 0 "$message"
+				clear_active_job "$job_id"
+				APPLY_CONTEXT=0
+				role_lock_release
+				trap - HUP INT TERM
+				return 2
+			elif acceleration_matches "$role"; then
+				message="网口已经是 ${role_label} 模式，已单独重新收敛加速状态"
+			else
+				message="网口已经是 ${role_label} 模式，网络保持可用"
+				[ -z "$ACCEL_WARNING" ] ||
+					message="${message}；${ACCEL_WARNING}"
+			fi
+		fi
+		write_job "$job_file" done 1 "$message"
+		clear_active_job "$job_id"
+		APPLY_CONTEXT=0
+		role_lock_release
+		trap - HUP INT TERM
+		return 0
+	fi
+	if [ "$role" = wan ] && [ "$before" = lan ] &&
+	   [ "$force" != 1 ] && ! has_wifi_management; then
+		write_job "$job_file" failed 0 "未发现已启用且实际挂入 br-lan 的 Wi-Fi AP，拒绝断开有线管理"
+		clear_active_job "$job_id"
+		role_lock_release
+		trap - HUP INT TERM
+		return 1
+	fi
+
+	backup="${JOB_DIR}/backup-${job_id}"
+	CURRENT_BACKUP="$backup"
+	if ! backup_configs "$backup"; then
+		cleanup_backup "$backup" >/dev/null 2>&1
+		write_job "$job_file" failed 0 "无法创建受限权限配置备份"
+		clear_active_job "$job_id"
+		role_lock_release
+		trap - HUP INT TERM
+		return 1
+	fi
+	# This is read-only transaction metadata.  Capture it before declaring
+	# APPLY_ACTIVE so every active-path signal rollback has a complete service
+	# baseline and cannot quarantine otherwise untouched services.
+	capture_transaction_service_state
+	: > "$SWITCHING" || {
+		cleanup_backup "$backup"
+		write_job "$job_file" failed 0 "无法创建切换互斥标记"
+		clear_active_job "$job_id"
+		role_lock_release
+		trap - HUP INT TERM
+		return 1
+	}
+	trap abort_apply HUP INT TERM
+
+	# Quiescing changes only volatile accelerator state. Do it before creating a
+	# new persistent journal or stopping either uplink service, so a failure at
+	# this safety barrier cannot turn an untouched network into a recovery job.
+	QUIESCE_ACTIVE=1
+	if ! quiesce_acceleration; then
+		QUIESCE_ACTIVE=0
+		effective="$(cat "$HNAT_EFFECTIVE" 2>/dev/null)"
+		if [ "$effective" = disabled ]; then
+			message="无法完成加速静默，未修改网络或上行服务；硬件 hook 已验证关闭"
+			rc=1
+		else
+			message="无法完成加速静默，未修改网络或上行服务；硬件 hook 状态未知"
+			rc=2
+		fi
+		mark_acceleration_degraded "$message"
+		rm -f "$SWITCHING"
+		write_job "$job_file" failed 0 "$message"
+		log "$message"
+		cleanup_backup "$backup"
+		CURRENT_BACKUP=""
+		clear_active_job "$job_id"
+		APPLY_CONTEXT=0
+		trap - HUP INT TERM
+		role_lock_release
+		return "$rc"
+	fi
+	QUIESCE_ACTIVE=0
+
+	# Capture and persist the write-ahead journal before declaring the rollback
+	# transaction active. Until that commit succeeds, neither uplink service has
+	# been touched and failure recovery must restore only c2000max UCI staging.
+	if ! capture_persistent_service_state; then
+		STAGE_ERROR="无法暂存上行服务原始状态"
+	elif ! write_pending_marker "$role" "$mode" "$ethernet_weight" \
+		"$cellular_weight" "$modem" "$frozen_modem" "$frozen_interface"; then
+		STAGE_ERROR="无法写入切换恢复日志"
+	fi
+	if [ -n "$STAGE_ERROR" ]; then
+		rc=1
+		if ! restore_role_backup_state "$backup" ||
+		   ! uci -q commit c2000max || ! sync; then
+			message="${STAGE_ERROR}；同时无法恢复事务前的 c2000max 状态"
+			mark_degraded "$message"
+			rc=2
+		else
+			ACCEL_APPLY_ACTIVE=1
+			apply_acceleration_nonfatal "$before" "$eqos_enabled"
+			accel_rc=$?
+			ACCEL_APPLY_ACTIVE=0
+			message="${STAGE_ERROR}；网络与 QModem/mwan3 均未修改"
+			if [ -n "$ACCEL_WARNING" ]; then
+				message="${message}；${ACCEL_WARNING}"
+			fi
+			[ "$accel_rc" -eq 0 ] || rc=2
+		fi
+		rm -f "$SWITCHING"
+		write_job "$job_file" failed 0 "$message"
+		log "$message"
+		cleanup_backup "$backup"
+		CURRENT_BACKUP=""
+		clear_active_job "$job_id"
+		APPLY_CONTEXT=0
+		trap - HUP INT TERM
+		role_lock_release
+		return "$rc"
+	fi
+	APPLY_ACTIVE=1
+
+	# Stopping dial/routing helpers is best effort.  Their momentary process
+	# state must never veto an otherwise valid Ethernet topology change.
+	qmodem_stop >/dev/null 2>&1 || true
+	mwan_stop >/dev/null 2>&1 || true
+	{
+		case "$role" in
+			wan) stage_wan ;;
+			lan) stage_lan ;;
+		esac
+		stage_rc=$?
+		if [ "$stage_rc" = 0 ]; then
+			if ! c2000_stage_uplink_mode "$role" "$mode" \
+				"$ethernet_weight" "$cellular_weight" "$modem" \
+				"$frozen_modem"; then
+				STAGE_ERROR="${C2000_UPLINK_ERROR:-无法配置上行模式}"
+			fi
+		else
+			STAGE_ERROR="无法写入目标 LAN/WAN 网络拓扑"
+		fi
+		if [ -z "$STAGE_ERROR" ]; then
+			if ! stage_acceleration_policy "$role"; then
+				STAGE_ERROR="无法保存用户选择的加速策略"
+			elif [ "$repair" = 1 ] && ! stage_repair_dial_intent; then
+				STAGE_ERROR="无法恢复 QModem 拨号配置"
+			elif ! set_journal_phase prepared; then
+				STAGE_ERROR="无法写入切换准备日志"
+			elif ! uci -q commit network ||
+			     ! uci -q commit dhcp ||
+			     ! uci -q commit turboacc ||
+			     ! uci -q commit firewall ||
+			     ! uci -q commit qmodem ||
+			     ! uci -q commit mwan3; then
+				STAGE_ERROR="无法提交目标网络配置"
+			elif ! set_journal_phase configs_committed; then
+				STAGE_ERROR="无法写入配置提交日志"
+			elif [ "$(c2000_actual_role)" != "$role" ]; then
+				STAGE_ERROR="目标 LAN/WAN UCI 拓扑回读不一致"
+			elif ! network_reload || ! wait_runtime_role "$role"; then
+				STAGE_ERROR="目标网口运行态未能建立"
+			elif ! apply_uplink_services "$role" "$mode" ||
+			     ! uplink_services_match "$role" "$mode"; then
+				STAGE_ERROR="QModem 或 mwan3 服务未能进入目标运行态"
+			elif ! sync || ! firewall_reload; then
+				STAGE_ERROR="防火墙未能重新加载"
+			else
+				if ! stage_role_marker "$role" "$mode" \
+					"$ethernet_weight" "$cellular_weight" "$modem" ||
+				   ! c2000_uplink_config_matches "$role" "$mode" \
+					"$ethernet_weight" "$cellular_weight" "$modem" ||
+				   ! uplink_services_match "$role" "$mode" ||
+				   ! finalize_service_override "$role" ||
+				   ! sync_role_marker "$role" "$mode" "$ethernet_weight" \
+					"$cellular_weight" "$modem"; then
+					STAGE_ERROR="目标网络已建立，但最终状态记录失败"
+				else
+					# The verified network and service state is authoritative.
+					# Finalize and clear its persistent journal before the separate
+					# HNAT pass so power loss or a signal there cannot replay or
+					# roll back an already usable topology.
+					APPLY_COMMITTED=1
+					rc=0
+					ACCEL_APPLY_ACTIVE=1
+					apply_acceleration_nonfatal "$role" "$eqos_enabled"
+					accel_rc=$?
+					ACCEL_APPLY_ACTIVE=0
+					if [ "$accel_rc" -ne 0 ]; then
+						rc=2
+					fi
+				fi
+			fi
+		fi
+	}
+
+	if [ "$rc" = 0 ]; then
+		rm -f "$DEGRADED"
+		if [ "$repair" = 1 ]; then
+			if wait_qmodem_online; then
+				REPAIR_CELLULAR_READY=1
+				message="LAN 与 QModem 已修复，5G 接口已重新获取地址"
+			else
+				message="LAN 与 QModem 服务已修复；5G 仍在拨号，将继续自动重试"
+			fi
+		else
+			message="网口已切换为 ${role_label}；网络与上行服务已完成运行态验证"
+		fi
+		if [ -n "$ACCEL_WARNING" ]; then
+			message="${message}；${ACCEL_WARNING}"
+		fi
+		rm -f "$SWITCHING"
+		write_job "$job_file" done 1 "$message"
+		log "$message"
+	elif [ "$APPLY_COMMITTED" = 1 ]; then
+		# The network journal is already finalized. An unverified hook-off state
+		# is a safety failure, but restoring the old topology would be another
+		# endpoint transition without a quiesce barrier.
+		message="网络与上行服务已提交，但硬件加速状态未知；未回滚已验证的网络拓扑"
+		[ -z "$ACCEL_WARNING" ] ||
+			message="${message}；${ACCEL_WARNING}"
+		rm -f "$SWITCHING"
+		write_job "$job_file" failed 0 "$message"
+		log "$message"
+	else
+		if rollback_role "$before" "$eqos_enabled" "$backup"; then
+			rollback_ok=1
+			rm -f "$DEGRADED"
+			if [ -n "$STAGE_ERROR" ]; then
+				message="${STAGE_ERROR}；已验证恢复原网络拓扑"
+			else
+				message="切换失败，已验证恢复原网络拓扑；HNAT 仅在恢复完成后重新收敛"
+			fi
+		else
+			if emergency_lan_recovery "$eqos_enabled"; then
+				rollback_ok=1
+				rm -f "$DEGRADED"
+				message="${STAGE_ERROR:-切换失败}；原拓扑回滚失败，已自动恢复 LAN 与 5G 网络"
+			else
+				recover_uplink_services
+				if force_hook_off >/dev/null 2>&1; then
+					message="切换、回滚及 LAN 自动恢复均失败；5G 拨号已保持启用，HNAT 已验证关闭"
+				else
+					message="切换、回滚及 LAN 自动恢复均失败；5G 拨号已保持启用，HNAT 状态未知"
+				fi
+				mark_degraded "$message"
+			fi
+		fi
+		rm -f "$SWITCHING"
+		write_job "$job_file" failed 0 "$message"
+		log "$message"
+	fi
+
+	trap - HUP INT TERM
+	APPLY_ACTIVE=0
+	APPLY_CONTEXT=0
+	ACCEL_APPLY_ACTIVE=0
+	QUIESCE_ACTIVE=0
+	if [ "$rc" = 0 ] || [ "$rollback_ok" = 1 ] ||
+	   [ "$APPLY_COMMITTED" = 1 ]; then
+		cleanup_backup "$backup"
+	fi
+	APPLY_COMMITTED=0
+	CURRENT_BACKUP=""
+	clear_active_job "$job_id"
+	role_lock_release
+	[ "$rc" = 0 ] && return 0
+	[ "$rollback_ok" = 1 ] && return 1
+	return 2
+}
+
+queue_role()
+{
+	local role="$1" mode="$2" ethernet_weight="$3" cellular_weight="$4"
+	local modem="$5" force="${6:-0}" repair="${7:-0}"
+	local job_id job_file pid_file launcher active state age pending_message message
+	local launch_rc=1
+
+	case "$role" in
+		lan|wan) ;;
+		*) echo '{"success":false,"message":"无效角色"}'; return 1 ;;
+	esac
+	if ! flock_available; then
+		message="系统缺少 flock，无法创建安全的网口切换任务"
+		log "$message"
+		error_json "$message"
+		return 1
+	fi
+	if ! c2000_wan_settings_valid "$mode" "$ethernet_weight" \
+		"$cellular_weight" "$modem"; then
+		if [ "$role" = lan ]; then
+			mode="$C2000_WAN_MODE_ONLY"
+			ethernet_weight=60
+			cellular_weight=40
+			modem=auto
+		else
+			echo '{"success":false,"message":"WAN 模式、分流比例或 5G 模块选择无效"}'
+			return 1
+		fi
+	fi
+	if ! mkdir -p "$JOB_DIR"; then
+		message="无法创建网口切换任务目录"
+		log "$message: $JOB_DIR"
+		error_json "$message"
+		return 1
+	fi
+	if ! chmod 700 "$JOB_DIR"; then
+		message="无法设置网口切换任务目录权限"
+		log "$message: $JOB_DIR"
+		error_json "$message"
+		return 1
+	fi
+	QUEUE_ACTIVE=1
+	CURRENT_JOB=""
+	CURRENT_JOB_FILE=""
+	trap abort_apply HUP INT TERM
+	queue_lock_acquire || {
+		trap - HUP INT TERM
+		message="无法取得网口切换任务队列锁"
+		log "$message"
+		error_json "$message"
+		return 1
+	}
+	active="$(cat "$JOB_DIR/active" 2>/dev/null)"
+	if [ -n "$active" ] && [ -r "$JOB_DIR/${active}.json" ]; then
+		state="$(jsonfilter -i "$JOB_DIR/${active}.json" -e '@.state' 2>/dev/null)"
+		case "$state" in
+			pending|running)
+				age="$(job_age_seconds "$JOB_DIR/${active}.json" 2>/dev/null)"
+				case "$age" in
+					''|*[!0-9]*) age="$JOB_STALE_SECONDS" ;;
+				esac
+				if job_process_alive "$active"; then
+					if [ "$repair" = 1 ]; then
+						if ! terminate_job_process "$active"; then
+							queue_lock_release
+							trap - HUP INT TERM
+							echo '{"success":false,"message":"旧网口任务无法安全终止，请重启设备后再修复"}'
+							return 1
+						fi
+						clear_orphaned_job "$active" \
+							"用户请求恢复网口，旧切换任务已终止"
+					elif [ "$age" -ge "$JOB_STALE_SECONDS" ]; then
+						if terminate_job_process "$active"; then
+							clear_orphaned_job "$active" \
+								"网口切换任务运行超时，已自动终止并解除永久忙状态"
+							queue_lock_release
+							trap - HUP INT TERM
+							echo '{"success":false,"message":"超时任务已终止，请先执行“修复网口配置”再切换"}'
+							return 1
+						fi
+						queue_lock_release
+						trap - HUP INT TERM
+						echo '{"success":false,"message":"网口切换任务已超时且无法安全终止，请重启设备"}'
+						return 1
+					else
+						queue_lock_release
+						trap - HUP INT TERM
+						echo '{"success":false,"message":"已有网口切换任务正在执行；可使用“终止任务并恢复 LAN”"}'
+						return 1
+					fi
+				else
+					# A pidfile can lag the JSON file for a fraction of a
+					# second while start-stop-daemon performs its handoff.
+					if [ "$age" -lt 5 ]; then
+						queue_lock_release
+						trap - HUP INT TERM
+						echo '{"success":false,"message":"网口任务正在启动，请稍候"}'
+						return 1
+					fi
+					clear_orphaned_job "$active" \
+						"检测到已退出的网口任务，已自动解除永久忙状态"
+					if [ "$repair" != 1 ]; then
+						queue_lock_release
+						trap - HUP INT TERM
+						echo '{"success":false,"message":"旧任务已清理，请先执行“修复网口配置”再切换"}'
+						return 1
+					fi
+				fi
+				;;
+		esac
+	elif [ -n "$active" ]; then
+		rm -f "$JOB_DIR/active" "$(job_pid_file "$active")"
+	fi
+
+	job_id="$(date +%s)-$$"
+	job_file="${JOB_DIR}/${job_id}.json"
+	pid_file="$(job_pid_file "$job_id")"
+	CURRENT_JOB="$job_id"
+	CURRENT_JOB_FILE="$job_file"
+	if [ "$repair" = 1 ]; then
+		pending_message="修复请求已接收，2 秒后恢复 LAN 与 5G 网络"
+	else
+		pending_message="请求已接收，2 秒后开始切换"
+	fi
+	write_job "$job_file" pending 1 "$pending_message" || {
+		queue_lock_release
+		trap - HUP INT TERM
+		message="无法写入网口切换任务状态"
+		log "$message: $job_file"
+		error_json "$message"
+		return 1
+	}
+	if ! printf '%s\n' "$job_id" > "$JOB_DIR/active" ||
+	   ! printf '%s\n' "$job_id" > "$JOB_DIR/latest"; then
+		write_job "$job_file" failed 0 "无法记录切换任务"
+		rm -f "$JOB_DIR/active"
+		queue_lock_release
+		trap - HUP INT TERM
+		echo '{"success":false,"message":"无法记录切换任务"}'
+		return 1
+	fi
+	launcher="$(command -v start-stop-daemon)"
+	# Keep the queue owner alive across the launcher handoff.  The launcher
+	# runs with default signal dispositions so the detached apply process can
+	# install its own rollback trap; signals to this short-lived parent are
+	# ignored until success/failure is known and cannot orphan active.json.
+	trap '' HUP INT TERM
+	if [ -n "$launcher" ]; then
+		(
+			trap - HUP INT TERM
+			exec "$launcher" -S -b -m -p "$pid_file" -x "$0" -- \
+				apply "$role" "$job_id" \
+				"$mode" "$ethernet_weight" "$cellular_weight" "$modem" \
+				"$force" "$repair" </dev/null >/dev/null 2>&1
+		)
+		launch_rc=$?
+	fi
+	if [ "$launch_rc" -ne 0 ]; then
+		write_job "$job_file" failed 0 "无法启动后台切换任务"
+		rm -f "$JOB_DIR/active" "$pid_file"
+		QUEUE_ACTIVE=0
+		CURRENT_JOB=""
+		CURRENT_JOB_FILE=""
+		queue_lock_release
+		trap - HUP INT TERM
+		echo '{"success":false,"message":"无法启动后台切换任务"}'
+		return 1
+	fi
+	QUEUE_ACTIVE=0
+	CURRENT_JOB=""
+	CURRENT_JOB_FILE=""
+	queue_lock_release
+	trap - HUP INT TERM
+
+	json_init
+	json_add_boolean success 1
+	json_add_string job_id "$job_id"
+	json_add_string message "$pending_message"
+	json_dump
+}
+
+job_status()
+{
+	local job_id="$1" active
+
+	case "$job_id" in
+		''|*[!0-9-]*) echo '{"success":false,"message":"无效任务编号"}'; return 1 ;;
+	esac
+	[ -r "${JOB_DIR}/${job_id}.json" ] || {
+		echo '{"success":false,"message":"任务不存在"}'
+		return 1
+	}
+	active="$(cat "$JOB_DIR/active" 2>/dev/null)"
+	if [ "$active" = "$job_id" ] && queue_lock_acquire; then
+		reap_orphaned_active_job >/dev/null 2>&1 || true
+		queue_lock_release
+	fi
+	cat "${JOB_DIR}/${job_id}.json"
+}
+
+uplink_event()
+{
+	local interface="$1" action="$2" wan cellular rc=1 message
+	local mode ethernet_weight cellular_weight modem
+
+	case "$action" in
+		ifup|ifdown|connected|disconnected) ;;
+		*) return 0 ;;
+	esac
+	UPLINK_ACTIVE=1
+	trap abort_apply HUP INT TERM
+	role_lock_acquire || {
+		trap - HUP INT TERM
+		return 1
+	}
+	if [ -e "$SWITCHING" ] ||
+	   [ "$(c2000_actual_role)" != wan ] ||
+	   [ "$(uci -q get c2000max.ethernet.wan_mode)" != "$C2000_WAN_MODE_BALANCE" ]; then
+		role_lock_release
+		trap - HUP INT TERM
+		return 0
+	fi
+	wan="$(uci -q get c2000max.ethernet.wan4)"
+	[ -n "$wan" ] || wan="$WAN4"
+	cellular="$(uci -q get c2000max.ethernet.cellular_interface)"
+	if [ "$interface" != "$wan" ] &&
+	   { [ -z "$cellular" ] || [ "$interface" != "$cellular" ]; }; then
+		role_lock_release
+		trap - HUP INT TERM
+		return 0
+	fi
+	mode="$(uci -q get c2000max.ethernet.wan_mode)"
+	ethernet_weight="$(uci -q get c2000max.ethernet.ethernet_weight)"
+	cellular_weight="$(uci -q get c2000max.ethernet.cellular_weight)"
+	modem="$(uci -q get c2000max.ethernet.cellular_modem)"
+	if ! c2000_uplink_config_matches wan "$mode" "$ethernet_weight" \
+		"$cellular_weight" "$modem"; then
+		# The role controller will reconcile mwan3/QModem configuration on the
+		# next explicit apply.  A service mismatch is not a reason to disable
+		# an otherwise valid Ethernet HNAT topology.
+		role_lock_release
+		trap - HUP INT TERM
+		return 0
+	fi
+
+	# Both WAN variants stay out of the hardware fast path. Re-assert the
+	# effective non-HNAT policy after an Ethernet/5G event without restarting
+	# netifd, QModem or mwan3; software flow offload may remain enabled.
+	if quiesce_acceleration &&
+	   hnat_reload &&
+	   acceleration_matches wan; then
+		rc=0
+	else
+		if force_hook_off >/dev/null 2>&1; then
+			message="上行 ${interface} 的 ${action} 事件后已保持 WAN 的 MediaTek HNAT 关闭"
+			rc=0
+		else
+			message="上行 ${interface} 的 ${action} 事件后无法确认硬件加速已关闭"
+			rc=0
+		fi
+		mark_acceleration_degraded "$message"
+		log "$message"
+	fi
+	role_lock_release
+	trap - HUP INT TERM
+	UPLINK_ACTIVE=0
+	return "$rc"
+}
+
+[ "$(board_name)" = "nradio,c2000-max" ] || {
+	echo '{"success":false,"message":"此功能仅支持 C2000-MAX"}'
+	exit 1
+}
+
+case "$1" in
+	status)
+		status_json
+		;;
+	switch)
+		role="$2"
+		mode="$3"
+		if [ -z "$mode" ] || [ "$mode" = --force ]; then
+			[ "$mode" = --force ] && force=1 || force=0
+			mode="$(uci -q get c2000max.ethernet.wan_mode)"
+			[ -n "$mode" ] || mode="$C2000_WAN_MODE_ONLY"
+			ethernet_weight="$(uci -q get c2000max.ethernet.ethernet_weight)"
+			[ -n "$ethernet_weight" ] || ethernet_weight=60
+			cellular_weight="$(uci -q get c2000max.ethernet.cellular_weight)"
+			[ -n "$cellular_weight" ] || cellular_weight=40
+			modem="$(uci -q get c2000max.ethernet.cellular_modem)"
+			[ -n "$modem" ] || modem=auto
+		else
+			ethernet_weight="$4"
+			cellular_weight="$5"
+			modem="${6:-auto}"
+			[ "$7" = --force ] && force=1 || force=0
+		fi
+		queue_role "$role" "$mode" "$ethernet_weight" \
+			"$cellular_weight" "$modem" "$force"
+		;;
+	repair)
+		mode="$(uci -q get c2000max.ethernet.wan_mode)"
+		[ -n "$mode" ] || mode="$C2000_WAN_MODE_ONLY"
+		ethernet_weight="$(uci -q get c2000max.ethernet.ethernet_weight)"
+		[ -n "$ethernet_weight" ] || ethernet_weight=60
+		cellular_weight="$(uci -q get c2000max.ethernet.cellular_weight)"
+		[ -n "$cellular_weight" ] || cellular_weight=40
+		modem="$(uci -q get c2000max.ethernet.cellular_modem)"
+		[ -n "$modem" ] || modem=auto
+		queue_role lan "$mode" "$ethernet_weight" \
+			"$cellular_weight" "$modem" 1 1
+		;;
+	apply)
+		apply_role "$2" "$3" "$4" "$5" "$6" "$7" "${8:-0}" "${9:-0}"
+		;;
+	job-status)
+		job_status "$2"
+		;;
+	uplink-event)
+		uplink_event "$2" "$3"
+		;;
+	*)
+		echo "Usage: $0 status | switch <lan|wan> [mode ethernet_weight cellular_weight modem] [--force] | repair | job-status <id> | uplink-event <interface> <action>" >&2
+		exit 1
+		;;
+esac

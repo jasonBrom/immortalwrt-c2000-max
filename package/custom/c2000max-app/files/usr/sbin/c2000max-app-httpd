@@ -1,0 +1,203 @@
+#!/usr/bin/lua
+
+local nixio = require "nixio"
+local json = require "luci.jsonc"
+local app_http = require "c2000max_app.http"
+
+local PORT = 82
+local MAX_HEADER = 65536
+local MAX_BODY = 262144
+local PREFIX = "/cgi-bin/luci/nradio/app/"
+local ACTIONS = {
+	auth = true,
+	health = true,
+	heartbeat = true,
+	signal = true,
+	cmd = true,
+	info = true,
+	wifi = true,
+	cpesel = true,
+	client = true,
+	combo = true,
+	neighbour = true,
+	earfcn = true,
+	sms = true,
+	apn = true,
+	sync = true,
+	lan = true,
+	status = true,
+	speed = true,
+	password = true,
+	wifiauth = true
+}
+
+local function send_all(client, value)
+	local offset = 1
+	while offset <= #value do
+		local sent = client:send(value:sub(offset))
+		if not sent or sent <= 0 then
+			return false
+		end
+		offset = offset + sent
+	end
+	return true
+end
+
+local function reply(client, status, payload, extra_headers)
+	local body = json.stringify(payload or {})
+	local headers = {
+		"HTTP/1.1 " .. status,
+		"Content-Type: application/json",
+		"Content-Length: " .. tostring(#body),
+		"Cache-Control: no-store",
+		"Access-Control-Allow-Origin: *",
+		"Access-Control-Allow-Credentials: true",
+		"Access-Control-Allow-Headers: Origin,X-Requested-With,Content-Type,Authorization",
+		"Access-Control-Allow-Methods: POST,GET,OPTIONS,PUT",
+		"Connection: close"
+	}
+	for _, header in ipairs(extra_headers or {}) do
+		headers[#headers + 1] = header
+	end
+	return send_all(client, table.concat(headers, "\r\n") ..
+		"\r\n\r\n" .. body)
+end
+
+local function receive_request(client)
+	local buffer = ""
+	local header_end
+	while #buffer < MAX_HEADER do
+		local chunk = client:recv(math.min(4096, MAX_HEADER - #buffer))
+		if not chunk or #chunk == 0 then
+			break
+		end
+		buffer = buffer .. chunk
+		header_end = buffer:find("\r\n\r\n", 1, true)
+		if header_end then
+			break
+		end
+	end
+	if not header_end then
+		return nil, "invalid request headers"
+	end
+
+	local header_text = buffer:sub(1, header_end - 1)
+	local body = buffer:sub(header_end + 4)
+	local request_line, rest = header_text:match("^([^\r\n]+)\r\n(.*)$")
+	if not request_line then
+		request_line = header_text
+		rest = ""
+	end
+	local method, target = request_line:match(
+		"^([A-Z]+)%s+([^%s]+)%s+HTTP/%d+%.%d+$")
+	if not method or not target then
+		return nil, "invalid request line"
+	end
+
+	local headers = {}
+	for line in (rest .. "\r\n"):gmatch("(.-)\r\n") do
+		local name, value = line:match("^([^:]+):%s*(.*)$")
+		if name then
+			headers[name:lower()] = value
+		end
+	end
+	local length = tonumber(headers["content-length"] or "0")
+	if not length or length < 0 or length > MAX_BODY then
+		return nil, "invalid content length"
+	end
+	while #body < length do
+		local chunk = client:recv(math.min(4096, length - #body))
+		if not chunk or #chunk == 0 then
+			return nil, "incomplete request body"
+		end
+		body = body .. chunk
+	end
+	if #body > length then
+		body = body:sub(1, length)
+	end
+	return {
+		method = method,
+		target = target,
+		headers = headers,
+		body = body
+	}
+end
+
+local function handle(client)
+	local request, message = receive_request(client)
+	if not request then
+		reply(client, "400 Bad Request", {
+			code = "2",
+			message = message
+		})
+		return
+	end
+	if request.method == "OPTIONS" then
+		reply(client, "204 No Content", {})
+		return
+	end
+
+	local path = request.target:match("^([^?]+)") or request.target
+	local action
+	if path == PREFIX:sub(1, -2) or path == PREFIX then
+		action = "heartbeat"
+	elseif path:sub(1, #PREFIX) == PREFIX then
+		action = path:sub(#PREFIX + 1):match("^([A-Za-z0-9_%-]+)")
+	end
+	if not action or not ACTIONS[action] then
+		reply(client, "404 Not Found", {
+			code = "4",
+			message = "not found"
+		})
+		return
+	end
+	if request.method ~= "POST" and
+	   not (request.method == "GET" and action == "health") then
+		reply(client, "405 Method Not Allowed", {
+			code = "4",
+			message = "method not allowed"
+		})
+		return
+	end
+
+	local ok, payload = pcall(app_http.process, action, request.body, {
+		authorization = request.headers.authorization or "",
+		cookie = request.headers.cookie or ""
+	})
+	if not ok or type(payload) ~= "table" then
+		payload = { code = "2", message = "request failed" }
+	end
+	reply(client, "200 OK", payload)
+end
+
+local server, message = nixio.socket("inet", "stream")
+if not server then
+	io.stderr:write("unable to create APP HTTP socket: ",
+		tostring(message), "\n")
+	os.exit(1)
+end
+server:setopt("socket", "reuseaddr", 1)
+local bound, bind_message = server:bind("0.0.0.0", PORT)
+if not bound then
+	io.stderr:write("unable to bind APP HTTP port ", tostring(PORT), ": ",
+		tostring(bind_message), "\n")
+	server:close()
+	os.exit(1)
+end
+local listening, listen_message = server:listen(32)
+if not listening then
+	io.stderr:write("unable to listen on APP HTTP port: ",
+		tostring(listen_message), "\n")
+	server:close()
+	os.exit(1)
+end
+
+while true do
+	local client = server:accept()
+	if client then
+		client:setopt("socket", "rcvtimeo", 5, 0)
+		client:setopt("socket", "sndtimeo", 5, 0)
+		pcall(handle, client)
+		client:close()
+	end
+end

@@ -1,0 +1,107 @@
+#!/bin/sh
+
+. /usr/share/libubox/jshn.sh
+
+STATE_DIR=/var/run/c2000max-app
+CONF="$STATE_DIR/mosquitto.conf"
+LOG="$STATE_DIR/mosquitto.log"
+BRIDGE_STATE="$STATE_DIR/bridge.state"
+LOCAL_PORT=1884
+
+umask 077
+mkdir -p "$STATE_DIR" || exit 2
+chmod 0755 "$STATE_DIR"
+
+bridge_state()
+{
+	state="$1"
+	message="$2"
+	printf '{"state":"%s","message":"%s","updated":%s}\n' \
+		"$state" "$message" "$(date +%s)" > "$BRIDGE_STATE"
+	chmod 0600 "$BRIDGE_STATE"
+}
+
+fail()
+{
+	bridge_state error "$1"
+	exit 2
+}
+
+identity="$(/usr/sbin/c2000max-app-remote identity 2>/dev/null)"
+device_id="$(printf '%s' "$identity" | jsonfilter -e '@.device_id')"
+broker="$(printf '%s' "$identity" | jsonfilter -e '@.broker')"
+available="$(printf '%s' "$identity" | jsonfilter -e '@.available')"
+bdinfo_present="$(printf '%s' "$identity" | jsonfilter -e '@.bdinfo_present')"
+bdinfo_identity_valid="$(printf '%s' "$identity" | jsonfilter -e '@.bdinfo_identity_valid')"
+remote_identity_available="$(printf '%s' "$identity" | jsonfilter -e '@.remote_identity_available')"
+device_code_present="$(printf '%s' "$identity" | jsonfilter -e '@.device_code_present')"
+
+case "$device_id" in
+	????????????) ;;
+	*) fail "invalid device identity" ;;
+esac
+[ "$available" = true ] || fail "device identity unavailable"
+[ "$bdinfo_present" = true ] || fail "bdinfo unavailable"
+[ "$bdinfo_identity_valid" = true ] || fail "bdinfo identity invalid"
+[ "$remote_identity_available" = true ] || fail "remote identity unavailable"
+[ "$device_code_present" = true ] || fail "device code unavailable"
+[ "$broker" = "$device_id.dev.nradio.com.cn" ] || fail "broker identity mismatch"
+
+rm -f "$LOG"
+
+{
+	printf '%s\n' \
+		'per_listener_settings false' \
+		"listener $LOCAL_PORT 127.0.0.1" \
+		'allow_anonymous true' \
+		'persistence false' \
+		'connection_messages true' \
+		'log_timestamp true' \
+		"log_dest file $LOG" \
+		'log_type error' \
+		'log_type warning' \
+		'log_type notice' \
+		"connection $device_id" \
+		"address $broker:1883" \
+		'bridge_protocol_version mqttv311' \
+		"remote_clientid $device_id" \
+		'remote_username router' \
+		'keepalive_interval 10' \
+		'cleansession false' \
+		'notifications true' \
+		'notifications_local_only true' \
+		'restart_timeout 5' \
+		'start_type automatic' \
+		'try_private false' \
+		"topic kp/mosca/$device_id/# out 1 \"\" \"\"" \
+		"topic kp/$device_id/+/# in 1 \"\" \"\""
+
+	if [ "$(uci -q get c2000max_app.main.broadcast_enable)" = 1 ]; then
+		printf '%s\n' \
+			"topic mosca/# in 1 kp/$device_id/ kp/FFFFFFFFFFFF/"
+	fi
+
+	if [ "$(uci -q get c2000max_app.main.command_enable)" = 1 ] ||
+	   [ "$(uci -q get c2000max_app.main.developer_enable)" = 1 ]; then
+		printf '%s\n' \
+			"topic exec/# both 1 rpc/ $device_id/"
+	fi
+
+	if [ "$(uci -q get c2000max_app.main.device_report_enable)" = 1 ] ||
+	   [ "$(uci -q get c2000max_app.main.signal_report_enable)" = 1 ] ||
+	   [ "$(uci -q get c2000max_app.main.traffic_report_enable)" = 1 ] ||
+	   [ "$(uci -q get c2000max_app.main.terminal_tracking_enable)" = 1 ]; then
+		printf '%s\n' \
+			"topic sysinfo/# out 1 \"\" $device_id/"
+	fi
+} > "$CONF" || exit 2
+
+chmod 600 "$CONF"
+touch "$LOG"
+chmod 600 "$LOG"
+if id mosquitto >/dev/null 2>&1; then
+	chown mosquitto:mosquitto "$CONF" "$LOG"
+fi
+
+bridge_state starting "local broker and official bridge starting"
+exec /usr/sbin/mosquitto -c "$CONF"

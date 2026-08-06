@@ -1,0 +1,281 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copyright (c) Tailscale Inc & AUTHORS  (attribution retained; see NOTICE)
+# Modified from luci-app-tailscale-community for luci-app-netbird (2026-04-15)
+#
+# uci-defaults 脚本：首装全量拷贝 + schema v1 幂等补缺失字段 + sysupgrade.conf 保护
+# OpenWRT 惯例：rc.d 在脚本成功退出后自动 unlink，不需要自删
+# 运行策略：best-effort（不用 set -e），单个 uci 失败只记 logger，不中断
+
+CONFIG_FILE="/etc/config/netbird"
+DEFAULTS_TEMPLATE="/usr/share/luci-app-netbird/defaults/netbird.uci"
+TAG="luci-app-netbird"
+
+# ── 版本路由决策 ───────────────────────────────────────────────────────────────
+# 路由匹配用 'schema v' + 版本号前缀；'first cut' 等描述后缀忽略
+
+if [ ! -f "$CONFIG_FILE" ]; then
+	# 首装分支：无文件 → 全量拷贝模板
+	logger -t "$TAG" "首装：从模板拷贝 $DEFAULTS_TEMPLATE"
+	cp "$DEFAULTS_TEMPLATE" "$CONFIG_FILE"
+
+elif ! head -n1 "$CONFIG_FILE" | grep -qF 'schema v'; then
+	# 无 schema 注释 → 外部手动创建的文件，不动（安全退出）
+	logger -t "$TAG" "警告：$CONFIG_FILE 首行无 'schema v' 注释，跳过修改"
+
+elif head -n1 "$CONFIG_FILE" | grep -qF 'schema v1'; then
+	# schema v1 分支：补缺失字段，不覆盖用户已改值（幂等升级）
+	# 此分支同时承载未来 schema 新字段的平滑追加
+	# 噪音抑制：仅当真的补了缺失字段时才 logger 一次（_MISSING_FILLED 标志位），
+	# 正常无缺失（每次部署/重启都会跑本脚本）时不刷屏。
+
+	_MISSING_FILLED=0
+
+	# 字段默认值映射表（与 root/etc/config/netbird 一致）
+	# 格式：field=default（空值写法：field= ）
+	# 仅在字段确实缺失并成功写入时把 _MISSING_FILLED 置 1。
+	_set_if_missing() {
+		field="$1"
+		default="$2"
+		if ! uci -q get "netbird.settings.$field" > /dev/null 2>&1; then
+			if uci -q set "netbird.settings.$field=$default"; then
+				_MISSING_FILLED=1
+			else
+				logger -t "$TAG" "警告：设置 netbird.settings.$field 失败"
+			fi
+		fi
+	}
+
+	# settings section 若不存在则先创建
+	if ! uci -q get netbird.settings > /dev/null 2>&1; then
+		if uci -q set netbird.settings=netbird; then
+			_MISSING_FILLED=1
+		else
+			logger -t "$TAG" "警告：创建 netbird.settings section 失败"
+		fi
+	fi
+
+	# 字段默认值（与 root/etc/config/netbird 一致；正向/UI 语义，取反只在 init.d 发生）。
+	# 平滑升级：老用户（旧 9 字段 schema，含 disable_*）缺新字段时按默认补齐；
+	# 旧 disable_*/auto_connect 字段若仍残留不影响 init.d（init.d 只读正向字段）。
+	# 常规
+	_set_if_missing service_enabled 0
+	_set_if_missing wireguard_port 51820
+	_set_if_missing interface_name wt0
+	_set_if_missing hostname ''
+	_set_if_missing management_url ''
+	# 防火墙
+	_set_if_missing enable_firewall 1
+	_set_if_missing block_inbound 0
+	# SSH（5 子项需 0.72.x；UCI 仍存值，应用层按版本门控跳过）
+	_set_if_missing allow_ssh 0
+	_set_if_missing ssh_root 0
+	_set_if_missing ssh_sftp 0
+	_set_if_missing ssh_local_fwd 0
+	_set_if_missing ssh_remote_fwd 0
+	_set_if_missing enable_ssh_auth 1
+	# DNS（OpenWRT 默认关，避与 dnsmasq 抢 53）
+	_set_if_missing enable_dns 0
+	# 路由
+	_set_if_missing access_lan 1
+	_set_if_missing accept_client_routes 1
+	_set_if_missing accept_server_routes 1
+	# IPv6
+	_set_if_missing enable_ipv6 1
+	# 后量子
+	_set_if_missing rosenpass_enabled 0
+	_set_if_missing rosenpass_permissive 0
+	# 日志
+	_set_if_missing log_level info
+	# 敏感
+	_set_if_missing preshared_key ''
+	# 安装密钥打码 hint（非机密；do_up/do_login 成功后写入，绝不存原始 key）
+	_set_if_missing setup_key_hint ''
+
+	# state.runtime section：若不存在则创建并初始化（补缺失）
+	if ! uci -q get netbird.runtime > /dev/null 2>&1; then
+		_MISSING_FILLED=1
+		uci -q add netbird state > /dev/null 2>&1 || true
+		# rename 为 runtime
+		uci -q rename netbird.@state[-1]=runtime 2>/dev/null || \
+			uci -q set netbird.runtime=state 2>/dev/null || true
+		uci -q set netbird.runtime.last_connect_ts='' || \
+			logger -t "$TAG" "警告：设置 last_connect_ts 失败"
+		uci -q set netbird.runtime.last_error='' || \
+			logger -t "$TAG" "警告：设置 last_error 失败"
+		uci -q set netbird.runtime.desired_connected='' || \
+			logger -t "$TAG" "警告：设置 desired_connected 失败"
+	else
+		# runtime section 存在，同样补缺失字段
+		if ! uci -q get netbird.runtime.last_connect_ts > /dev/null 2>&1; then
+			_MISSING_FILLED=1
+			uci -q set netbird.runtime.last_connect_ts='' || true
+		fi
+		if ! uci -q get netbird.runtime.last_error > /dev/null 2>&1; then
+			_MISSING_FILLED=1
+			uci -q set netbird.runtime.last_error='' || true
+		fi
+		if ! uci -q get netbird.runtime.desired_connected > /dev/null 2>&1; then
+			_MISSING_FILLED=1
+			uci -q set netbird.runtime.desired_connected='' || true
+		fi
+	fi
+
+	# 仅当真有缺失字段被补齐时记一次日志（否则静默，避免每次部署刷屏）
+	if [ "$_MISSING_FILLED" = "1" ]; then
+		logger -t "$TAG" "schema v1：补齐缺失字段"
+		uci -q commit netbird || logger -t "$TAG" "警告：uci commit netbird 失败"
+	fi
+
+else
+	# schema v2 或更高版本 → 预留 v2 分支钩子，不执行本脚本逻辑
+	SCHEMA_VERSION=$(head -n1 "$CONFIG_FILE" | grep -oE 'schema v[0-9]+')
+	logger -t "$TAG" "future schema ($SCHEMA_VERSION)，跳过处理（v2 迁移脚本在独立文件中实现）"
+fi
+
+# ── zone 设备直绑迁移（一次性,幂等）：旧版 network 接口 + zone(option network 绑定) → zone 设备绑定 ──
+# 背景：旧设计建 network.netbird(proto=none)接口 + zone `list network 'netbird'`
+# 引用它;reload network 会让 netifd flush 掉 wt0 的 overlay IP/对端子网路由(netbird 不自愈)→
+# 经 mesh 远程管理时硬锁死。改为 zone 直接 `list device` 绑定、不建 network 接口。
+# 升级机残留的旧 network.netbird 接口 = 潜在地雷:日后任何无关的 reload network 仍会 flush wt0。
+# 本段在安装/升级时一次性迁移:zone 改设备绑定 + 删旧 network 引用 + 删残留接口。
+# ⚠️ **只 reload firewall、绝不 reload network**:删 proto=none 接口若 reload network 会断
+# netbird;UCI-only 删除则 wt0 运行态此刻零中断(残留的 netifd adopt 留待下次自然 reload 协调)。
+# 幂等:迁移后 network.netbird 不存在 → 下次运行本段 if 为假 = no-op;新装(纯设备直绑)亦 no-op。
+if [ "$(uci -q get network.netbird 2>/dev/null)" = "interface" ]; then
+	# 设备名取设置接口名(netbird up 的事实源);非法回退 wt0(与 netbird.uc _nb_interface_name 同规则)
+	_nb_dev=$(uci -q get netbird.settings.interface_name 2>/dev/null)
+	echo "$_nb_dev" | grep -qE '^[a-zA-Z][a-zA-Z0-9_-]{0,14}$' || _nb_dev=wt0
+	# zone 存在则迁移到设备绑定(删旧 network 引用、重置 device 为单元素 list)
+	if [ "$(uci -q get firewall.netbird 2>/dev/null)" = "zone" ]; then
+		uci -q delete firewall.netbird.network 2>/dev/null
+		uci -q delete firewall.netbird.device 2>/dev/null
+		uci -q add_list firewall.netbird.device="$_nb_dev" 2>/dev/null
+		uci -q commit firewall 2>/dev/null
+	fi
+	# 删残留 network.netbird 接口(UCI-only,不 reload network)
+	uci -q delete network.netbird 2>/dev/null
+	uci -q commit network 2>/dev/null
+	/etc/init.d/firewall reload >/dev/null 2>&1
+	logger -t "$TAG" "迁移:删 network.netbird 接口 + zone 改设备绑定($_nb_dev),只 reload firewall"
+fi
+
+# ── sysupgrade.conf 幂等追加 ──────────────────────────────────────────
+# grep -qxF 保证不重复追加（精确行匹配）
+# 追加 UCI 配置文件
+grep -qxF '/etc/config/netbird' /etc/sysupgrade.conf 2>/dev/null || \
+	echo '/etc/config/netbird' >> /etc/sysupgrade.conf
+# 追加 netbird 身份目录（PrivateKey / SSHKey）；两路径均追加，兼容不同发行版默认位置
+# /etc/netbird/  —— ImmortalWrt 及部分本机安装路径（0.72.4 验证）
+# /var/lib/netbird/ —— 官方 netbird 上游 Linux 默认路径
+grep -qxF '/etc/netbird/' /etc/sysupgrade.conf 2>/dev/null || \
+	echo '/etc/netbird/' >> /etc/sysupgrade.conf
+grep -qxF '/var/lib/netbird/' /etc/sysupgrade.conf 2>/dev/null || \
+	echo '/var/lib/netbird/' >> /etc/sysupgrade.conf
+
+# ── 文件权限保护 ─────────────────────────────────────────────────────────────
+# preshared_key 字段要求 0600，防止非 root 用户读取
+chmod 0600 "$CONFIG_FILE"
+
+# The upstream netbird package enables its daemon unconditionally at install
+# time.  Keep the LuCI master switch authoritative: a fresh install (and an
+# upgrade whose saved switch is off) must not leave the daemon in rc.d.
+# Enabling the switch later is handled by netbird-settings, which re-enables
+# and starts the upstream service before applying `netbird up`.
+if [ "$(uci -q get netbird.settings.service_enabled 2>/dev/null)" != "1" ] && \
+   [ -x /etc/init.d/netbird ]; then
+	/etc/init.d/netbird stop >/dev/null 2>&1 || true
+	/etc/init.d/netbird disable >/dev/null 2>&1 || true
+fi
+
+# ── env file single source of truth ─────────────────────────────────────────
+# /etc/netbird.env 作为 LuCI 期望 env 配置的单一事实源，幂等保证含 NB_LOG_FILE=syslog。
+ENV_FILE=/etc/netbird.env
+[ -f "$ENV_FILE" ] || : > "$ENV_FILE"
+grep -qxF 'NB_LOG_FILE=syslog' "$ENV_FILE" || echo 'NB_LOG_FILE=syslog' >> "$ENV_FILE"
+chmod 0644 "$ENV_FILE"
+
+# 注：env override 未闭环（上游 netbird.init v0.66.2 不消费本文件），
+# get_logs 在 running 态走 logread -e netbird ring；若 ring 为空返 no_logs_in_ring 主路径。
+
+# ── init.d/netbird-settings 可执行性兜底 ─────────────────────────────────────
+# luci.mk 打包 root/ 时偶发把 /etc/init.d/netbird-settings 落成 0644（非可执行，跨
+# macOS↔Docker 卷构建时复现），导致 Save&Apply 无法执行其 reload。uci-defaults
+# 自身必为 0755 且在 opkg 安装时运行，故在此幂等修正模式 + 注册 enable。
+if [ -f /etc/init.d/netbird-settings ]; then
+	chmod 0755 /etc/init.d/netbird-settings
+	/etc/init.d/netbird-settings enable 2>/dev/null || \
+		logger -t "$TAG" "警告：netbird-settings enable 失败"
+fi
+
+# ── 自动重连 watchdog 可执行性 + 注册 ─────────────────────────────────────────
+# 仅在 netbird.runtime.desired_connected=1 时重连;手动断开/注销或认证 fatal 会置 0。
+if [ -f /etc/init.d/luci-netbird-watchdog ]; then
+	chmod 0755 /etc/init.d/luci-netbird-watchdog
+	# watchdog 执行体同样可能被 luci.mk 落成 0644(同 netbird-settings),补幂等 chmod。
+	[ -f /usr/share/netbird/netbird-autoreconnect.sh ] && \
+		chmod 0755 /usr/share/netbird/netbird-autoreconnect.sh
+	/etc/init.d/luci-netbird-watchdog enable 2>/dev/null || \
+		logger -t "$TAG" "警告：luci-netbird-watchdog enable 失败"
+	/etc/init.d/luci-netbird-watchdog start 2>/dev/null || \
+		logger -t "$TAG" "警告：luci-netbird-watchdog start 失败"
+fi
+
+# ── 二进制来源管理:存储目录 + sysupgrade 保全 + 遗留态 adopt ─────────────────────
+# release 二进制存 /usr/share/netbird/bin/netbird-release;
+# /usr/bin/netbird 由 set_binary_source 切成 symlink(release)/opkg 真二进制本体。
+NB_REL_DIR=/usr/share/netbird/bin
+NB_REL_BIN="$NB_REL_DIR/netbird-release"
+NB_OPKG_BIN=/usr/bin/netbird
+mkdir -p "$NB_REL_DIR"
+
+# sysupgrade 保全:release 存储目录 + 独立 binary 配置(刷机不丢已选来源/URL/release 包)
+grep -qxF '/usr/share/netbird/' /etc/sysupgrade.conf 2>/dev/null || \
+	echo '/usr/share/netbird/' >> /etc/sysupgrade.conf
+grep -qxF '/etc/config/netbird_bin' /etc/sysupgrade.conf 2>/dev/null || \
+	echo '/etc/config/netbird_bin' >> /etc/sysupgrade.conf
+
+# 遗留态 adopt(一次性,幂等):仅当 /usr/bin/netbird 是普通文件(非本应用建的 symlink)时,
+# 判定它是「系统软件源(包管理器)自带的二进制」还是「被旧版手动更新覆盖成的 release 二进制」。
+# 查询按运行时包管理器分流(apk = OpenWRT/ImmortalWrt 25+,opkg = 24.10 及更早;探测 /usr/bin/apk
+# 是否存在,与后端二进制来源管理一致):
+#   (b) 版本 == 软件源记录 → 软件源自带 → 保留一份副本 netbird-opkg(供切回「软件源」来源,免联网;
+#       绝不用 opkg --force-reinstall / apk add 这类会连带删除 /etc/init.d/netbird 的包生命周期操作),
+#       source=opkg(此处 opkg 为「系统软件源」语义,apk/opkg 通用)、不改写 /usr/bin/netbird;
+#   (c) 版本 != 软件源记录(= 被旧版手动更新覆盖成 release)→ 收编为 netbird-release + symlink、source=release。
+# 软件源记录查不到时(_pm_ver 为空)两个分支都不进 → 保守处理:不改写 /usr/bin/netbird,等用户在
+# 「版本」页显式选择来源。这避免 apk 机(无 opkg)误把软件源自带的二进制改写成 symlink、破坏 apk 文件归属。
+# 不影响正在运行的 daemon(持有旧 inode;symlink 指向等同内容,下次重启自然生效)。
+NB_OPKG_BAK="$NB_REL_DIR/netbird-opkg"
+if [ ! -L "$NB_OPKG_BIN" ] && [ -x "$NB_OPKG_BIN" ]; then
+	_cur_ver=$("$NB_OPKG_BIN" version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+	# 系统软件源记录的已装 netbird 版本:apk 机用 `apk list -I`,opkg 机用 `opkg list-installed`。
+	if [ -x /usr/bin/apk ]; then
+		_pm_ver=$(apk list -I netbird 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+	else
+		_pm_ver=$(opkg list-installed netbird 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+	fi
+	if [ -n "$_cur_ver" ] && [ -n "$_pm_ver" ] && [ "$_cur_ver" = "$_pm_ver" ]; then
+		# (b) 软件源自带二进制:保留副本 + source=opkg(=系统软件源语义)
+		if [ ! -e "$NB_OPKG_BAK" ]; then
+			cat "$NB_OPKG_BIN" > "$NB_OPKG_BAK" 2>/dev/null && chmod 0755 "$NB_OPKG_BAK"
+			logger -t "$TAG" "preserve feed binary($_cur_ver) -> netbird-opkg(供切回软件源来源兜底)"
+		fi
+		uci -q set netbird_bin.binary=netbird_bin 2>/dev/null
+		uci -q set netbird_bin.binary.binary_source=opkg 2>/dev/null
+		uci -q commit netbird_bin 2>/dev/null
+	elif [ -n "$_cur_ver" ] && [ -n "$_pm_ver" ] && [ "$_cur_ver" != "$_pm_ver" ] && [ ! -e "$NB_REL_BIN" ]; then
+		# (c) 孤儿二进制(版本 != 软件源记录 = 被旧版手动更新覆盖成 release):收编为 release + symlink。
+		#     apk/opkg 软件源自带的二进制版本必 == 记录 → 走 (b);只有被覆盖的才到这里。
+		if cat "$NB_OPKG_BIN" > "$NB_REL_BIN" 2>/dev/null && chmod 0755 "$NB_REL_BIN"; then
+			ln -sf "$NB_REL_BIN" "$NB_OPKG_BIN.tmp" && mv -f "$NB_OPKG_BIN.tmp" "$NB_OPKG_BIN"
+			uci -q set netbird_bin.binary=netbird_bin 2>/dev/null
+			uci -q set netbird_bin.binary.binary_source=release 2>/dev/null
+			uci -q commit netbird_bin 2>/dev/null
+			logger -t "$TAG" "adopt: /usr/bin/netbird($_cur_ver) 收编为 release(软件源记录 ${_pm_ver:-none})"
+		fi
+	fi
+fi
+
+exit 0

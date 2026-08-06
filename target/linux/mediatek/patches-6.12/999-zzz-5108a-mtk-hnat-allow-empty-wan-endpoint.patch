@@ -1,0 +1,26 @@
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
+@@ -2579,6 +2579,23 @@ static ssize_t hnat_wan_if_write(struct file *file,
+ 	if (!p || !*p)
+ 		return -EINVAL;
+ 
++	/*
++	 * "/" is the existing no-interface sentinel used by LAN2. Allow the
++	 * board role controller to release a former wired WAN explicitly when
++	 * the active WAN is an external USB/WWAN device handled by IS_EXT().
++	 */
++	if (!strcmp(p, "/")) {
++		rtnl_lock();
++		old_dev = hnat_priv->g_wandev;
++		hnat_priv->g_wandev = NULL;
++		strscpy(hnat_priv->wan, p, IFNAMSIZ);
++		rtnl_unlock();
++
++		if (old_dev)
++			dev_put(old_dev);
++		goto end;
++	}
++
+ 	dev = dev_get_by_name(&init_net, p);
+ 	if (!dev) {
+ 		pr_err("%s : no such device: %s !\n", __func__, p);
