@@ -25,13 +25,26 @@ elseif status_interval > 300 then
 	status_interval = 300
 end
 
+local report_interval = tonumber(uci:get("c2000max_app", "main",
+	"report_interval") or "300") or 300
+if report_interval < 60 then
+	report_interval = 60
+elseif report_interval > 3600 then
+	report_interval = 3600
+end
+
 nixio.nanosleep(10)
 local next_status = 0
+local next_reports = 0
 while core.remote_enabled() do
 	local now = os.time()
 	if now >= next_status then
 		cloud.publish_online_status()
 		next_status = now + status_interval
+	end
+	if now >= next_reports then
+		cloud.publish_reports()
+		next_reports = now + report_interval
 	end
 	-- Factory report_proactively emits cpestatus about every two seconds.
 	-- Keep this behind the user's signal-report permission.

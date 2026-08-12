@@ -31,6 +31,9 @@ config app 'main'
 	option presence_interval '2'
 	option status_interval '30'
 	option report_interval '300'
+	# Rebuild only the official MQTT bridge once a day.  This refreshes the
+	# vendor cloud session without rebooting the router or restarting QModem.
+	option bridge_restart_interval '86400'
 	# APP foreground refresh policy.  The fast path sends only AT^MONSC through
 	# QModem's serialized queue; static modem fields retain their own caches.
 	option signal_normal_interval '3'

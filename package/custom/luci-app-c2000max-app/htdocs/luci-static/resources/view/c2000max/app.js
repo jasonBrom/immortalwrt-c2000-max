@@ -89,6 +89,31 @@ function text(value, fallback) {
 	return value == null || value === '' ? fallback : String(value);
 }
 
+function formatDuration(value) {
+	let seconds = Number(value) || 0;
+	if (seconds <= 0)
+		return '尚未建立';
+	const days = Math.floor(seconds / 86400);
+	seconds %= 86400;
+	const hours = Math.floor(seconds / 3600);
+	seconds %= 3600;
+	const minutes = Math.floor(seconds / 60);
+	const parts = [];
+	if (days)
+		parts.push(days + '天');
+	if (hours || days)
+		parts.push(hours + '小时');
+	parts.push(minutes + '分钟');
+	return parts.join(' ');
+}
+
+function formatTimestamp(value) {
+	const timestamp = Number(value) || 0;
+	if (timestamp <= 0)
+		return '尚未建立';
+	return new Date(timestamp * 1000).toLocaleString();
+}
+
 function checkbox(option, checked) {
 	const node = E('input', {
 		'id': 'c2000max-app-' + option.name,
@@ -122,6 +147,8 @@ function statusLabel(status) {
 		return 'MQTT bridge 未运行';
 	if (!flag(status.agent_running))
 		return '本地管理代理未运行';
+	if (!flag(status.reporter_running))
+		return '状态上报进程未运行';
 	const labels = {
 		bridge_starting: 'bridge 已启动，等待官方服务器连接',
 		connected: 'bridge 已连接官方服务器',
@@ -215,7 +242,8 @@ return view.extend({
 			E('h2', {}, 'APP 支持'),
 			E('div', { 'class': 'cbi-map-descr' },
 				'局域网和云端总开关默认关闭；下方功能权限已默认开启，' +
-				'启用对应总开关即可使用。当前界面：V35.25-TEST。'),
+				'启用对应总开关即可使用。当前界面：' +
+				text(status.app_build, 'V35.35') + '。'),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '总开关')
 			].concat(masterOptions)),
@@ -253,6 +281,22 @@ return view.extend({
 						E('td', { 'class': 'td left' },
 							'官方云端远程管理运行状态'),
 						E('td', { 'class': 'td left' }, statusLabel(status))
+					]),
+					E('tr', {}, [
+						E('td', { 'class': 'td left' }, 'MQTT 会话建立时间'),
+						E('td', { 'class': 'td left' },
+							formatTimestamp(status.bridge_session_started))
+					]),
+					E('tr', {}, [
+						E('td', { 'class': 'td left' }, 'MQTT 会话年龄 / 轮换周期'),
+						E('td', { 'class': 'td left' },
+							formatDuration(status.bridge_session_age) + ' / ' +
+							formatDuration(status.bridge_reconnect_interval))
+					]),
+					E('tr', {}, [
+						E('td', { 'class': 'td left' }, '本次开机主动重连次数'),
+						E('td', { 'class': 'td left' },
+							String(Number(status.bridge_reconnect_count) || 0))
 					])
 				])
 			]),

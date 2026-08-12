@@ -41,6 +41,9 @@ status()
 {
 	local option value identity device_id broker state state_message bridge_log
 	local agent_log bridge_state bridge_diagnostic
+	local bridge_session_state bridge_session_message
+	local bridge_session_started bridge_session_age bridge_next_reconnect
+	local bridge_reconnect_count bridge_reconnect_interval
 	local cache_state cache_message cache_elapsed_ms
 	local wifi_apply_state wifi_apply_message
 	local remote_command_state remote_command_message
@@ -54,8 +57,9 @@ status()
 	local bdinfo_present bdinfo_source crypto_source app_auth_source
 	local bdinfo_fac_mac_present bdinfo_identity_valid identity_error
 	local remote_identity_available device_code_present
-	local local_enabled local_probe local_probe_code
-	local local_probe_build local_probe_message local_route_installed
+	local local_enabled local_probe local_probe_code local_probe_service
+	local local_probe_build local_probe_valid local_probe_message
+	local local_route_installed
 
 	identity="$(/usr/sbin/c2000max-app-remote identity 2>/dev/null)"
 	device_id="$(printf '%s' "$identity" | jsonfilter -e '@.device_id')"
@@ -67,6 +71,25 @@ status()
 	bridge_state="$(printf '%s' "$identity" | jsonfilter -e '@.bridge_state')"
 	bridge_diagnostic="$(printf '%s' "$identity" |
 		jsonfilter -e '@.bridge_diagnostic')"
+	bridge_session_state="$(printf '%s' "$identity" |
+		jsonfilter -e '@.bridge_session_state')"
+	bridge_session_message="$(printf '%s' "$identity" |
+		jsonfilter -e '@.bridge_session_message')"
+	bridge_session_started="$(printf '%s' "$identity" |
+		jsonfilter -e '@.bridge_session_started')"
+	bridge_session_age="$(printf '%s' "$identity" |
+		jsonfilter -e '@.bridge_session_age')"
+	bridge_next_reconnect="$(printf '%s' "$identity" |
+		jsonfilter -e '@.bridge_next_reconnect')"
+	bridge_reconnect_count="$(printf '%s' "$identity" |
+		jsonfilter -e '@.bridge_reconnect_count')"
+	bridge_reconnect_interval="$(printf '%s' "$identity" |
+		jsonfilter -e '@.bridge_reconnect_interval')"
+	case "$bridge_session_started" in ''|*[!0-9]*) bridge_session_started=0 ;; esac
+	case "$bridge_session_age" in ''|*[!0-9]*) bridge_session_age=0 ;; esac
+	case "$bridge_next_reconnect" in ''|*[!0-9]*) bridge_next_reconnect=0 ;; esac
+	case "$bridge_reconnect_count" in ''|*[!0-9]*) bridge_reconnect_count=0 ;; esac
+	case "$bridge_reconnect_interval" in ''|*[!0-9]*) bridge_reconnect_interval=0 ;; esac
 	cache_state="$(printf '%s' "$identity" | jsonfilter -e '@.cache_state')"
 	cache_message="$(printf '%s' "$identity" | jsonfilter -e '@.cache_message')"
 	cache_elapsed_ms="$(printf '%s' "$identity" |
@@ -168,6 +191,13 @@ status()
 	json_add_string agent_log "$agent_log"
 	json_add_string bridge_state "$bridge_state"
 	json_add_string bridge_diagnostic "$bridge_diagnostic"
+	json_add_string bridge_session_state "$bridge_session_state"
+	json_add_string bridge_session_message "$bridge_session_message"
+	json_add_int bridge_session_started "$bridge_session_started"
+	json_add_int bridge_session_age "$bridge_session_age"
+	json_add_int bridge_next_reconnect "$bridge_next_reconnect"
+	json_add_int bridge_reconnect_count "$bridge_reconnect_count"
+	json_add_int bridge_reconnect_interval "$bridge_reconnect_interval"
 	json_add_string cache_state "$cache_state"
 	json_add_string cache_message "$cache_message"
 	json_add_int cache_elapsed_ms "${cache_elapsed_ms:-0}"
@@ -196,7 +226,7 @@ status()
 	json_add_string remote_wget_runtime "$remote_wget_runtime"
 	json_add_boolean remote_wget_ready \
 		"$([ "$remote_wget_ready" = true ] && echo 1 || echo 0)"
-	json_add_string app_build "V35.25-TEST"
+	json_add_string app_build "V35.35"
 	json_add_string app_software_version "9.9.13.n0.c1"
 	json_add_boolean upgrade_permanently_disabled 1
 	local_enabled="$(uci -q get c2000max_app.main.local_enable)"
@@ -219,23 +249,37 @@ status()
 			2>/dev/null)"
 		local_probe_code="$(printf '%s' "$local_probe" |
 			jsonfilter -e '@.code')"
+		local_probe_service="$(printf '%s' "$local_probe" |
+			jsonfilter -e '@.service')"
 		local_probe_build="$(printf '%s' "$local_probe" |
 			jsonfilter -e '@.build')"
-		if [ "$local_probe_code" != 0 ] ||
-		   [ "$local_probe_build" != V35.21 ]; then
+		local_probe_valid=0
+		case "$local_probe_build" in
+			V*) [ "$local_probe_code" = 0 ] &&
+				[ "$local_probe_service" = c2000max-app ] &&
+				local_probe_valid=1 ;;
+		esac
+		if [ "$local_probe_valid" != 1 ]; then
 			local_probe="$(/usr/bin/wget -q -O - -T 3 \
 				--post-data='{}' \
 				http://127.0.0.1:82/cgi-bin/luci/nradio/app/health \
 				2>/dev/null)"
 			local_probe_code="$(printf '%s' "$local_probe" |
 				jsonfilter -e '@.code')"
+			local_probe_service="$(printf '%s' "$local_probe" |
+				jsonfilter -e '@.service')"
 			local_probe_build="$(printf '%s' "$local_probe" |
 				jsonfilter -e '@.build')"
+			local_probe_valid=0
+			case "$local_probe_build" in
+				V*) [ "$local_probe_code" = 0 ] &&
+					[ "$local_probe_service" = c2000max-app ] &&
+					local_probe_valid=1 ;;
+			esac
 		fi
-		if [ "$local_probe_code" = 0 ] &&
-		   [ "$local_probe_build" = V35.21 ]; then
+		if [ "$local_probe_valid" = 1 ]; then
 			json_add_boolean local_api_ready 1
-			local_probe_message="HTTP 回环请求通过（端口 80/82 兼容）"
+			local_probe_message="HTTP 回环请求通过（端口 80/82 兼容，$local_probe_build）"
 		else
 			json_add_boolean local_api_ready 0
 			local_probe_message="HTTP 回环请求失败"
@@ -247,8 +291,9 @@ status()
 	else
 		json_add_boolean legacy_discovery_running 0
 	fi
-	if [ "$local_probe_code" = 0 ] &&
-	   [ "$local_probe_build" = V35.21 ]; then
+	if [ "$local_probe_valid" = 1 ] &&
+	   pgrep -f '/usr/sbin/c2000max-app-local' >/dev/null 2>&1 &&
+	   pgrep -f '/usr/sbin/c2000max-app-httpd' >/dev/null 2>&1; then
 		json_add_boolean local_running 1
 	else
 		json_add_boolean local_running 0
@@ -264,9 +309,15 @@ status()
 	else
 		json_add_boolean agent_running 0
 	fi
+	if pgrep -f '/usr/sbin/c2000max-app-reporter' >/dev/null 2>&1; then
+		json_add_boolean reporter_running 1
+	else
+		json_add_boolean reporter_running 0
+	fi
 	if pgrep -f '/usr/sbin/mosquitto -c /var/run/c2000max-app/mosquitto.conf' \
 	   >/dev/null 2>&1 &&
-	   pgrep -f '/usr/sbin/c2000max-app-remote' >/dev/null 2>&1; then
+	   pgrep -f '/usr/sbin/c2000max-app-remote' >/dev/null 2>&1 &&
+	   pgrep -f '/usr/sbin/c2000max-app-reporter' >/dev/null 2>&1; then
 		json_add_boolean remote_running 1
 	else
 		json_add_boolean remote_running 0

@@ -276,7 +276,7 @@ assert_contains "$HTTP" 'action == "signal" and context.plaintext'
 assert_contains "$HTTP" 'protocol.current_des_response_context(context)'
 assert_contains "$HTTP" 'protocol.reply({ code = "1" }, context)'
 assert_contains "$HTTP" 'function action_health()'
-assert_contains "$HTTP" 'build = "V35.25-TEST"'
+assert_contains "$HTTP" 'build = "V35.35"'
 assert_contains "$HTTP" 'signal_refresh = core.signal_refresh_policy()'
 assert_contains "$HTTP" 'function process(action, body, request_context)'
 assert_contains "$HTTP" 'core.local_action_allowed(action, data)'
@@ -307,7 +307,7 @@ assert_not_contains "$RPC" 'main.device_id=$device_id'
 assert_contains "$RPC" "pgrep -f '/usr/sbin/c2000max-app-local'"
 assert_contains "$RPC" 'http://127.0.0.1/cgi-bin/luci/nradio/app/health'
 assert_contains "$RPC" 'http://127.0.0.1:82/cgi-bin/luci/nradio/app/health'
-assert_contains "$RPC" 'json_add_string app_build "V35.25-TEST"'
+assert_contains "$RPC" 'json_add_string app_build "V35.35"'
 assert_contains "$RPC" 'json_add_string app_software_version "9.9.13.n0.c1"'
 assert_contains "$RPC" 'json_add_boolean upgrade_permanently_disabled 1'
 assert_not_contains "$RPC" '"upgrade_enable": "bool"'
@@ -320,6 +320,9 @@ assert_contains "$RPC" '/etc/init.d/c2000max-app enable'
 assert_not_contains "$RPC" '/etc/init.d/c2000max-app disable'
 assert_contains "$RPC" 'json_add_boolean service_autostart'
 assert_contains "$RPC" 'json_add_boolean cache_running'
+assert_contains "$RPC" 'json_add_boolean reporter_running'
+assert_contains "$RPC" 'json_add_int bridge_session_age'
+assert_not_contains "$RPC" 'V35.21'
 assert_contains "$RPC" 'json_add_string remote_command_message "$remote_command_message"'
 
 VIEW="$LUCI_ROOT/htdocs/luci-static/resources/view/c2000max/app.js"
@@ -335,12 +338,14 @@ assert_contains "$VIEW" "name: 'developer_enable'"
 assert_not_contains "$VIEW" "'checked': checked"
 assert_not_contains "$VIEW" "'c2000max-app-device-id'"
 assert_contains "$VIEW" '局域网和云端总开关默认关闭'
-assert_contains "$VIEW" '当前界面：V35.25-TEST'
+assert_contains "$VIEW" '当前界面：V35.35'
 assert_contains "$VIEW" '软件更新权限'
 assert_contains "$VIEW" '永久关闭'
 assert_not_contains "$VIEW" "name: 'upgrade_enable'"
 assert_contains "$VIEW" '重新启动 APP 服务'
 assert_contains "$VIEW" '设备身份与状态'
+assert_contains "$VIEW" 'MQTT 会话建立时间'
+assert_contains "$VIEW" '本次开机主动重连次数'
 
 MENU="$LUCI_ROOT/root/usr/share/luci/menu.d/c2000max_app.json"
 ACL="$LUCI_ROOT/root/usr/share/rpcd/acl.d/c2000max_app.json"
@@ -392,6 +397,8 @@ assert_contains "$REMOTE" 'current_identity.remote_identity_available'
 assert_contains "$REMOTE" 'current_identity.device_code_present'
 assert_contains "$REMOTE" 'nixio.nanosleep(5)'
 assert_contains "$REMOTE" 'COMMAND_STATE = STATE_DIR .. "/remote-command.state"'
+assert_contains "$REMOTE" 'BRIDGE_SESSION_STATE = STATE_DIR .. "/bridge-session.state"'
+assert_contains "$REMOTE" 'bridge_reconnect_count'
 assert_contains "$REMOTE" 'reply_expected == false'
 assert_not_contains "$REMOTE" 'state = "online"'
 
@@ -404,6 +411,9 @@ assert_contains "$BRIDGE" "remote_clientid \$device_id"
 assert_contains "$BRIDGE" 'remote_username router'
 assert_contains "$BRIDGE" 'notifications_local_only true'
 assert_contains "$BRIDGE" 'cleansession false'
+assert_contains "$BRIDGE" 'bridge_restart_interval'
+assert_contains "$BRIDGE" '/usr/bin/timeout -s TERM -k 15'
+assert_contains "$BRIDGE" 'scheduled official MQTT session refresh'
 assert_contains "$BRIDGE" '[ "$bdinfo_present" = true ] || fail "bdinfo unavailable"'
 assert_contains "$BRIDGE" '[ "$bdinfo_identity_valid" = true ] || fail "bdinfo identity invalid"'
 assert_contains "$BRIDGE" '[ "$remote_identity_available" = true ] || fail "remote identity unavailable"'
@@ -422,6 +432,8 @@ do
 done
 assert_contains "$CLOUD" '"kp/mosca/" .. device_id .. "/"'
 assert_contains "$CLOUD" '"-h 127.0.0.1"'
+assert_contains "$CLOUD" '"/usr/bin/timeout"'
+assert_contains "$CLOUD" 'id = device_id'
 assert_contains "$CLOUD" '"-p 1884"'
 assert_contains "$CLOUD" 'local function response_timestamp()'
 assert_contains "$CLOUD" 'local function presence_timestamp()'
@@ -461,11 +473,12 @@ REPORTER="$ROOT/files/usr/sbin/c2000max-app-reporter"
 assert_contains "$REPORTER" '"presence_interval"'
 assert_contains "$REPORTER" 'cloud.publish_online_status()'
 assert_contains "$REPORTER" 'cloud.publish_cpe_status()'
-assert_not_contains "$REPORTER" 'cloud.publish_reports()'
+assert_contains "$REPORTER" 'cloud.publish_reports()'
+assert_contains "$REPORTER" '"report_interval"'
 
 MAKEFILE="$ROOT/Makefile"
 assert_contains "$MAKEFILE" '+mosquitto-nossl'
-assert_contains "$MAKEFILE" 'PKG_VERSION:=1.9.7'
+assert_contains "$MAKEFILE" 'PKG_VERSION:=1.10.0'
 assert_contains "$MAKEFILE" 'uci -q delete c2000max_app.main.upgrade_enable'
 assert_contains "$MAKEFILE" 'c2000max-app-httpd'
 assert_contains "$MAKEFILE" '/etc/init.d/c2000max-app enable'
@@ -490,4 +503,4 @@ assert_contains "$QMODEM_HUAWEI" 'AT+CGEQOSRDP=$cid'
 assert_contains "$QMODEM_HUAWEI" 'cache_c2000max_huawei_detail_'
 assert_contains "$QMODEM_HUAWEI" '[ "$age" -ge 0 ] && [ "$age" -le 60 ]'
 
-echo "PASS: V35.25-TEST local cellular and official remote-control compatibility"
+echo "PASS: V35.35 local cellular and official remote-control compatibility"

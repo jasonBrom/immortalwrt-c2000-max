@@ -928,6 +928,10 @@ function M.publish(event, payload, reply)
 	local topic = "kp/mosca/" .. device_id .. "/" ..
 		(reply and "reply/" or "") .. event
 	local command = table.concat({
+		"/usr/bin/timeout",
+		"-s TERM",
+		"-k 2",
+		"10",
 		"/usr/bin/mosquitto_pub",
 		"-h 127.0.0.1",
 		"-p 1884",
@@ -966,7 +970,14 @@ function M.publish_cpe_status()
 end
 
 function M.publish_online_status()
-	return M.publish("status", { uniq = presence_timestamp() }, false)
+	local device_id = core.device_id()
+	if not device_id then
+		return false
+	end
+	return M.publish("status", {
+		id = device_id,
+		uniq = presence_timestamp()
+	}, false)
 end
 
 return M

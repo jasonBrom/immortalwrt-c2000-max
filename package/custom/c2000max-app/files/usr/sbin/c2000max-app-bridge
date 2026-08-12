@@ -6,7 +6,15 @@ STATE_DIR=/var/run/c2000max-app
 CONF="$STATE_DIR/mosquitto.conf"
 LOG="$STATE_DIR/mosquitto.log"
 BRIDGE_STATE="$STATE_DIR/bridge.state"
+BRIDGE_SESSION_STATE="$STATE_DIR/bridge-session.state"
+BRIDGE_RECONNECT_COUNT="$STATE_DIR/bridge-reconnect.count"
 LOCAL_PORT=1884
+SESSION_RESTART_INTERVAL="$(uci -q get c2000max_app.main.bridge_restart_interval)"
+case "$SESSION_RESTART_INTERVAL" in
+	''|*[!0-9]*) SESSION_RESTART_INTERVAL=86400 ;;
+esac
+[ "$SESSION_RESTART_INTERVAL" -ge 3600 ] || SESSION_RESTART_INTERVAL=3600
+[ "$SESSION_RESTART_INTERVAL" -le 172800 ] || SESSION_RESTART_INTERVAL=172800
 
 umask 077
 mkdir -p "$STATE_DIR" || exit 2
@@ -19,6 +27,17 @@ bridge_state()
 	printf '{"state":"%s","message":"%s","updated":%s}\n' \
 		"$state" "$message" "$(date +%s)" > "$BRIDGE_STATE"
 	chmod 0600 "$BRIDGE_STATE"
+}
+
+bridge_session_state()
+{
+	state="$1"
+	message="$2"
+	session_started="${3:-0}"
+	printf '{"state":"%s","message":"%s","session_started":%s,"reconnect_count":%s,"reconnect_interval":%s,"updated":%s}\n' \
+		"$state" "$message" "$session_started" "$reconnect_count" \
+		"$SESSION_RESTART_INTERVAL" "$(date +%s)" > "$BRIDGE_SESSION_STATE"
+	chmod 0600 "$BRIDGE_SESSION_STATE"
 }
 
 fail()
@@ -46,6 +65,15 @@ esac
 [ "$remote_identity_available" = true ] || fail "remote identity unavailable"
 [ "$device_code_present" = true ] || fail "device code unavailable"
 [ "$broker" = "$device_id.dev.nradio.com.cn" ] || fail "broker identity mismatch"
+
+reconnect_sequence="$(cat "$BRIDGE_RECONNECT_COUNT" 2>/dev/null)"
+case "$reconnect_sequence" in
+	''|*[!0-9]*) reconnect_sequence=0 ;;
+esac
+reconnect_sequence=$((reconnect_sequence + 1))
+reconnect_count=$((reconnect_sequence - 1))
+printf '%s\n' "$reconnect_sequence" > "$BRIDGE_RECONNECT_COUNT"
+chmod 0600 "$BRIDGE_RECONNECT_COUNT"
 
 rm -f "$LOG"
 
@@ -104,4 +132,20 @@ if id mosquitto >/dev/null 2>&1; then
 fi
 
 bridge_state starting "local broker and official bridge starting"
-exec /usr/sbin/mosquitto -c "$CONF"
+bridge_session_state starting "new official MQTT session starting" 0
+
+/usr/bin/timeout -s TERM -k 15 "$SESSION_RESTART_INTERVAL" \
+	/usr/sbin/mosquitto -c "$CONF"
+result=$?
+
+if [ "$result" -eq 124 ]; then
+	bridge_state reconnecting "scheduled official MQTT session refresh"
+	bridge_session_state reconnecting \
+		"scheduled official MQTT session refresh" 0
+	# procd respawns only this bridge instance.  Local HTTP, routing, QModem and
+	# the rest of the device remain untouched.
+	exit 1
+fi
+
+bridge_session_state stopped "official MQTT bridge exited" 0
+exit "$result"

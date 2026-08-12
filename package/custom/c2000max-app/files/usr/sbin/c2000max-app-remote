@@ -14,6 +14,7 @@ local STATE_FILE = STATE_DIR .. "/remote.state"
 local BRIDGE_LOG = STATE_DIR .. "/mosquitto.log"
 local AGENT_LOG = STATE_DIR .. "/agent.log"
 local BRIDGE_STATE = STATE_DIR .. "/bridge.state"
+local BRIDGE_SESSION_STATE = STATE_DIR .. "/bridge-session.state"
 local CACHE_STATE = STATE_DIR .. "/cache.state"
 local WIFI_STATE = STATE_DIR .. "/wifi.state"
 local COMMAND_STATE = STATE_DIR .. "/remote-command.state"
@@ -74,6 +75,18 @@ local function read_runtime_state(path)
 	end
 	local ok, value = pcall(json.parse, raw)
 	return ok and type(value) == "table" and value or {}
+end
+
+local function update_bridge_session(state, message)
+	local value = read_runtime_state(BRIDGE_SESSION_STATE)
+	if state == "connected" and
+	   (value.state ~= "connected" or
+	    (tonumber(value.session_started) or 0) <= 0) then
+		value.session_started = os.time()
+	end
+	value.state = state
+	value.message = message
+	write_runtime_state(BRIDGE_SESSION_STATE, value)
 end
 
 local function mqtt_client_preflight()
@@ -142,11 +155,30 @@ local function identity()
 	state.bridge_log = last_log_line()
 	state.agent_log = last_file_line(AGENT_LOG)
 	local bridge = read_runtime_state(BRIDGE_STATE)
+	local bridge_session = read_runtime_state(BRIDGE_SESSION_STATE)
 	local cache = read_runtime_state(CACHE_STATE)
 	local wifi = read_runtime_state(WIFI_STATE)
 	local remote_command = read_runtime_state(COMMAND_STATE)
 	state.bridge_state = bridge.state or ""
 	state.bridge_diagnostic = bridge.message or ""
+	state.bridge_session_state = bridge_session.state or ""
+	state.bridge_session_message = bridge_session.message or ""
+	state.bridge_session_started =
+		tonumber(bridge_session.session_started) or 0
+	state.bridge_reconnect_count =
+		tonumber(bridge_session.reconnect_count) or 0
+	state.bridge_reconnect_interval =
+		tonumber(bridge_session.reconnect_interval) or 0
+	if state.bridge_session_started > 0 then
+		state.bridge_session_age = math.max(0,
+			os.time() - state.bridge_session_started)
+		state.bridge_next_reconnect =
+			state.bridge_session_started +
+			state.bridge_reconnect_interval
+	else
+		state.bridge_session_age = 0
+		state.bridge_next_reconnect = 0
+	end
 	state.cache_state = cache.state or ""
 	state.cache_message = cache.message or ""
 	state.cache_elapsed_ms = tonumber(cache.elapsed_ms) or 0
@@ -255,6 +287,8 @@ for line in pipe:lines() do
 			-- the root password hash.
 			nixio.nanosleep(5)
 			local announced = announce_online(device_id)
+			update_bridge_session("connected",
+				"official MQTT session established")
 			write_runtime_state(BRIDGE_STATE, {
 				state = "connected",
 				message = "official MQTT bridge connected"
@@ -263,6 +297,8 @@ for line in pipe:lines() do
 				"official MQTT bridge connected; initial sync sent" or
 				"official MQTT bridge connected; initial sync incomplete")
 		elseif payload_text == "0" then
+			update_bridge_session("disconnected",
+				"official MQTT session disconnected")
 			write_runtime_state(BRIDGE_STATE, {
 				state = "disconnected",
 				message = "official MQTT bridge disconnected"

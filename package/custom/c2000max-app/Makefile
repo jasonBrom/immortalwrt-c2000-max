@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=c2000max-app
-PKG_VERSION:=1.9.7
+PKG_VERSION:=1.10.0
 PKG_RELEASE:=1
 PKG_LICENSE:=GPL-2.0-or-later
 PKG_BUILD_PARALLEL:=1
@@ -30,6 +30,8 @@ define Package/c2000max-app/description
  Remote SIM, SMS, terminal inventory and reboot replies follow the factory
  cloudd envelopes; MT5700 local band, cell and network-mode controls expose the
  fields consumed by the official APP instead of conflating band and cell locks.
+ The official MQTT bridge refreshes its session every 24 hours to prevent a
+ long-lived vendor-cloud session from becoming stale while appearing connected.
 endef
 
 define Package/c2000max-app/conffiles
