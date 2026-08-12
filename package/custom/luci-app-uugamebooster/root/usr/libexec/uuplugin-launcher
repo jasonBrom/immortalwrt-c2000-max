@@ -10,6 +10,18 @@ H3C_INFO="$RUNDIR/h3c_info"
 NETDEV_BASELINE="$RUNDIR/.netdev-before"
 STATE_FILE="/tmp/uuplugin.state"
 PLATFORM=''
+DOWNLOAD_FAILURE_STATE=''
+
+# NetEase openwrt-aarch64 v14.2.2.  The C2000MAX compatibility patch changes
+# only the platform used by Connect/capability negotiation.  CheckUpgrade and
+# proxy requests are redirected to a second openwrt-aarch64 literal so the
+# generic OpenWrt bundle and network backend remain in use.
+C2000MAX_PC_OFFICIAL_SHA256='7dcc8c1768560a7b5e414f97e7bf919982d1a0be6662bb692ccb2ad46353345a'
+C2000MAX_PC_PATCHED_SHA256='9fdc8e6bfe8e5d73ddd75e9cdde653e7cd504dce3f6b65657c984026dcf94ced'
+C2000MAX_PC_PLATFORM_OFFSET=3356696
+C2000MAX_PC_GENERIC_OFFSET=3389464
+C2000MAX_PC_CHECK_UPGRADE_OFFSET=291272
+C2000MAX_PC_PROXY_OFFSET=662780
 
 state() {
 	printf '%s\n' "$1" > "$STATE_FILE"
@@ -25,6 +37,53 @@ load_platform() {
 			logger -t uuplugin 'invalid platform in UCI; using openwrt-aarch64'
 			;;
 	esac
+}
+
+sha256_file() {
+	sha256sum "$1" 2>/dev/null | awk '{ print $1 }'
+}
+
+apply_c2000max_pc_compat() {
+	local source candidate source_sha patched_sha
+
+	source="$1"
+	source_sha="$(sha256_file "$source")"
+	case "$source_sha" in
+		"$C2000MAX_PC_PATCHED_SHA256")
+			return 0
+			;;
+		"$C2000MAX_PC_OFFICIAL_SHA256") ;;
+		*)
+			DOWNLOAD_FAILURE_STATE="网易 OpenWrt 核心已更新或文件异常（SHA-256: ${source_sha:-unknown}）；C2000MAX PC 兼容补丁已安全停止，等待固件适配"
+			logger -t uuplugin "$DOWNLOAD_FAILURE_STATE"
+			return 1
+			;;
+	esac
+
+	candidate="$source.c2000max.$$"
+	cp -f "$source" "$candidate" || return 1
+
+	# Keep every write fixed-width.  The final SHA-256 check below makes a
+	# short write, an incompatible BusyBox dd, or an offset error fail closed.
+	printf 'h3c-nx30pro\000\000\000\000\000' | dd of="$candidate" bs=1 \
+		seek="$C2000MAX_PC_PLATFORM_OFFSET" conv=notrunc 2>/dev/null || return 1
+	printf 'openwrt-aarch64\000' | dd of="$candidate" bs=1 \
+		seek="$C2000MAX_PC_GENERIC_OFFSET" conv=notrunc 2>/dev/null || return 1
+	printf '\267\027\000\220' | dd of="$candidate" bs=1 \
+		seek="$C2000MAX_PC_CHECK_UPGRADE_OFFSET" conv=notrunc 2>/dev/null || return 1
+	printf '\301\024\000\320' | dd of="$candidate" bs=1 \
+		seek="$C2000MAX_PC_PROXY_OFFSET" conv=notrunc 2>/dev/null || return 1
+
+	patched_sha="$(sha256_file "$candidate")"
+	if [ "$patched_sha" != "$C2000MAX_PC_PATCHED_SHA256" ]; then
+		DOWNLOAD_FAILURE_STATE="C2000MAX PC 兼容补丁输出校验失败（SHA-256: ${patched_sha:-unknown}）；未安装修改后的核心"
+		logger -t uuplugin "$DOWNLOAD_FAILURE_STATE"
+		rm -f "$candidate"
+		return 1
+	fi
+
+	chmod 0755 "$candidate" || return 1
+	mv -f "$candidate" "$source"
 }
 
 cleanup_stage() {
@@ -43,7 +102,8 @@ valid_install() {
 
 	case "$PLATFORM" in
 		openwrt-aarch64)
-			[ -x "$XTABLES" ]
+			[ -x "$XTABLES" ] &&
+				[ "$(sha256_file "$PROG")" = "$C2000MAX_PC_PATCHED_SHA256" ]
 			;;
 		h3c-nx30pro)
 			# The official H3C archive contains exactly three files and uses
@@ -382,6 +442,7 @@ valid_stage_file() {
 download_plugin() {
 	local response plugin_url plugin_md5 mirror actual_md5 api_url
 
+	DOWNLOAD_FAILURE_STATE=''
 	state "正在从网易获取 $PLATFORM 核心"
 	api_url="https://router.uu.163.com/api/plugin?type=$PLATFORM"
 	response="$(curl -4 -fLsS --retry 2 --retry-all-errors --retry-delay 2 \
@@ -425,6 +486,9 @@ download_plugin() {
 			[ -x "$stage/xtables-nft-multi" ] || return 1
 	fi
 	grep -Eq '^version=v[0-9]+\.[0-9]+\.[0-9]+' "$stage/uu.conf" || return 1
+	if [ "$PLATFORM" = 'openwrt-aarch64' ]; then
+		apply_c2000max_pc_compat "$stage/uuplugin" || return 1
+	fi
 	"$stage/uuplugin" -v >/dev/null 2>&1 || return 1
 
 	mkdir -p "$RUNDIR"
@@ -511,7 +575,7 @@ while :; do
 		cleanup_stage
 		stage=''
 		archive=''
-		state '主程序下载或校验失败，30 秒后重试'
+		state "${DOWNLOAD_FAILURE_STATE:-主程序下载或校验失败，30 秒后重试}"
 		sleep 30
 	fi
 done
