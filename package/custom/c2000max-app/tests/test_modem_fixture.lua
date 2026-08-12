@@ -704,6 +704,47 @@ equal(band_status.result.band.status, "1", "APP band lock state")
 equal(band_status.result.band.freq, "nr-78:41,lte-3:41",
 	"APP multi-band lock value")
 
+lock_commands = {}
+local bands_locked = core.handle("earfcn", {
+	trans_id = "multi-band-lock", action = 1, index = "1",
+	band = {
+		enabled = "1",
+		freq = "nr-78:41:79:28:1:8:5:3,lte-1:3:5:8:34:38:39:40:41"
+	}
+})
+equal(bands_locked.code, "0", "multi-band lock result code")
+equal(lock_commands[1], "AT+CFUN=0", "multi-band lock enters airplane mode")
+equal(lock_commands[2],
+	'AT^NRFREQLOCK=3,0,8,"78,41,79,28,1,8,5,3"',
+	"all selected NR bands are applied in one MT5700 command")
+equal(lock_commands[3],
+	'AT^LTEFREQLOCK=3,0,9,"1,3,5,8,34,38,39,40,41"',
+	"all selected LTE bands are applied in one MT5700 command")
+equal(lock_commands[4], "AT+CFUN=1", "multi-band lock leaves airplane mode")
+
+nr_lock_response = table.concat({
+	"^NRFREQLOCK: 2", "0,2",
+	"41,504990,1,896", "78,633984,1,334", "OK"
+}, "\r\n")
+lte_lock_response = "^LTEFREQLOCK: 0\r\nOK"
+local multi_cell_status = core.handle("earfcn", {
+	trans_id = "multi-cell-status", action = "2", index = "1"
+})
+equal(#multi_cell_status.result.earfcn, 3,
+	"multi-cell query returns every lock plus the LTE state")
+equal(multi_cell_status.result.earfcn[1].MODE, "NR",
+	"multi-cell query first NR mode")
+equal(multi_cell_status.result.earfcn[1].PCI, "896",
+	"multi-cell query first NR PCI")
+equal(multi_cell_status.result.earfcn[2].MODE, "NR",
+	"multi-cell query second NR mode")
+equal(multi_cell_status.result.earfcn[2].EARFCN, "633984",
+	"multi-cell query second NR EARFCN")
+equal(multi_cell_status.result.earfcn[2].PCI, "334",
+	"multi-cell query second NR PCI")
+equal(multi_cell_status.result.earfcn[3].MODE, "LTE",
+	"multi-cell query preserves the LTE state row")
+
 nr_lock_response = table.concat({
 	"^NRFREQLOCK: 2", "0,1", "41,504990,1,896", "OK"
 }, "\r\n")
@@ -718,24 +759,50 @@ local allowed = core.local_action_allowed("earfcn", {
 equal(allowed, false, "cell lock requires local network write permission")
 app_options.local_network_write_enable = "1"
 
-local locked = core.handle("earfcn", {
-	trans_id = "cell-lock",
-	action = 1,
-	index = "1",
+lock_commands = {}
+local single_cell_locked = core.handle("earfcn", {
+	trans_id = "single-cell-lock", action = 1, index = "1",
 	earfcns = {
 		{ enabled = "1", MODE = "NR5G", BAND = "41",
 			EARFCN = "504990", PCI = "896" },
 		{ enabled = "0", MODE = "LTE", BAND = "", EARFCN = "", PCI = "" }
 	}
 })
-equal(locked.code, "0", "cell lock result code")
-equal(lock_commands[1], "AT+CFUN=0", "cell lock enters airplane mode")
+equal(single_cell_locked.code, "0", "single-cell lock remains compatible")
+equal(lock_commands[1], "AT+CFUN=0", "single-cell lock enters airplane mode")
 equal(lock_commands[2],
 	'AT^NRFREQLOCK=2,0,1,"41","504990","1","896"',
-	"cell lock uses MT5700 NR command")
+	"single-cell lock keeps the existing MT5700 NR command")
 equal(lock_commands[3], "AT^LTEFREQLOCK=0",
-	"disabled LTE row is explicitly unlocked")
-equal(lock_commands[4], "AT+CFUN=1", "cell lock leaves airplane mode")
+	"single-cell request still explicitly unlocks disabled LTE")
+equal(lock_commands[4], "AT+CFUN=1", "single-cell lock leaves airplane mode")
+
+lock_commands = {}
+local locked = core.handle("earfcn", {
+	trans_id = "multi-cell-lock",
+	action = 1,
+	index = "1",
+	band = { enabled = "0", freq = "" },
+	earfcns = {
+		{ enabled = "1", MODE = "NR5G", BAND = "41",
+			EARFCN = "504990", PCI = "896" },
+		{ enabled = "1", MODE = "NR", BAND = "78",
+			EARFCN = "633984", PCI = "334" },
+		{ enabled = "1", MODE = "LTE", BAND = "3",
+			EARFCN = "1650", PCI = "298" },
+		{ enabled = "1", MODE = "LTE", BAND = "41",
+			EARFCN = "40000", PCI = "123" }
+	}
+})
+equal(locked.code, "0", "multi-cell lock result code")
+equal(lock_commands[1], "AT+CFUN=0", "multi-cell lock enters airplane mode")
+equal(lock_commands[2],
+	'AT^NRFREQLOCK=2,0,2,"41,78","504990,633984","1,1","896,334"',
+	"all selected NR cells are applied in one MT5700 command")
+equal(lock_commands[3],
+	'AT^LTEFREQLOCK=2,0,2,"3,41","1650,40000","298,123"',
+	"all selected LTE cells are applied in one MT5700 command")
+equal(lock_commands[4], "AT+CFUN=1", "multi-cell lock leaves airplane mode")
 
 lock_commands = {}
 local mode_changed = core.handle("earfcn", {

@@ -1696,6 +1696,23 @@ local function first_csv_value(value)
 	return trim_field(tostring(value or ""):match("^([^,]+)") or "")
 end
 
+local function huawei_lock_row(mode, lock_type, fields)
+	local row = {
+		MODE = mode, status = "1", EARFCN = "", PCI = "", BAND = "",
+		lock_type = lock_type
+	}
+	row.BAND = first_csv_value(fields[1])
+	row.EARFCN = first_csv_value(fields[2])
+	if lock_type == 2 then
+		row.PCI = first_csv_value(fields[mode == "NR" and 4 or 3])
+	end
+	if row.BAND == "" or row.EARFCN == "" or
+	   (lock_type == 2 and row.PCI == "") then
+		return nil
+	end
+	return row
+end
+
 local function parse_huawei_lock_response(response, mode)
 	local prefix = mode == "NR" and "NRFREQLOCK" or "LTEFREQLOCK"
 	local lines = {}
@@ -1731,7 +1748,7 @@ local function parse_huawei_lock_response(response, mode)
 		lock_type = lock_type
 	}
 	if lock_type == 0 then
-		return result
+		return result, { result }
 	end
 	if lock_type == 3 then
 		local bands, seen = {}, {}
@@ -1754,25 +1771,31 @@ local function parse_huawei_lock_response(response, mode)
 			end
 		end
 		result.BAND = table.concat(bands, ":")
-		return result
+		return result, { result }
 	end
 
 	-- MT5700 returns a header, a mobility/count row, then one data row per
-	-- lock.  APP-originated locks currently use one row; preserving the first
-	-- row matches the official APP schema.
-	local data = lines[header_index + 2]
-	if not data and #header_fields > 3 then
-		data = table.concat(header_fields, ",", 4)
-	end
-	local fields = split_quoted_csv(data or "")
-	result.BAND = first_csv_value(fields[1])
-	if lock_type == 1 or lock_type == 2 then
-		result.EARFCN = first_csv_value(fields[2])
-		if lock_type == 2 then
-			result.PCI = first_csv_value(fields[mode == "NR" and 4 or 3])
+	-- lock.  Return every row so a multi-cell lock survives the APP readback
+	-- instead of being collapsed to the first configured cell.
+	local rows = {}
+	for index = header_index + 2, #lines do
+		local row = huawei_lock_row(mode, lock_type,
+			split_quoted_csv(lines[index]))
+		if row then
+			rows[#rows + 1] = row
 		end
 	end
-	return result
+	if #rows == 0 and #header_fields > 3 then
+		local row = huawei_lock_row(mode, lock_type,
+			split_quoted_csv(table.concat(header_fields, ",", 4)))
+		if row then
+			rows[1] = row
+		end
+	end
+	if #rows > 0 then
+		return rows[1], rows
+	end
+	return result, { result }
 end
 
 local function qmodem_lock_status(value, mode)
@@ -1830,12 +1853,12 @@ local function app_earfcn(data, selector)
 	if not modem then
 		return result
 	end
-	local nr, lte
+	local nr, lte, nr_rows, lte_rows
 	if fast_signal_supported(modem) then
 		result.mode = read_huawei_network_mode(modem)
-		nr = parse_huawei_lock_response(
+		nr, nr_rows = parse_huawei_lock_response(
 			query_serialized_at(modem, "AT^NRFREQLOCK?"), "NR")
-		lte = parse_huawei_lock_response(
+		lte, lte_rows = parse_huawei_lock_response(
 			query_serialized_at(modem, "AT^LTEFREQLOCK?"), "LTE")
 	else
 		local raw = modem_call("get_neighborcell")
@@ -1844,7 +1867,13 @@ local function app_earfcn(data, selector)
 	end
 	nr = nr or result.earfcn[1]
 	lte = lte or result.earfcn[2]
-	result.earfcn = { nr, lte }
+	result.earfcn = {}
+	for _, row in ipairs(nr_rows or { nr }) do
+		result.earfcn[#result.earfcn + 1] = row
+	end
+	for _, row in ipairs(lte_rows or { lte }) do
+		result.earfcn[#result.earfcn + 1] = row
+	end
 	local band_parts = {}
 	for _, row in ipairs({ nr, lte }) do
 		if tonumber(row.lock_type) == 3 and row.BAND ~= "" then
@@ -1892,85 +1921,148 @@ local function nr_scs_for_band(band)
 	return "0"
 end
 
-local function huawei_row_command(row)
-	if type(row) ~= "table" then
-		return nil, "invalid cell lock row"
-	end
-	local mode = tostring(row.MODE or row.mode or ""):upper()
+local function huawei_row_mode(row)
+	local mode = type(row) == "table" and
+		tostring(row.MODE or row.mode or ""):upper() or ""
 	if mode:find("NR", 1, true) then
-		mode = "NR"
+		return "NR"
 	elseif mode == "LTE" then
-		mode = "LTE"
-	else
-		return nil, "invalid radio mode"
+		return "LTE"
 	end
-	local enabled = tostring(row.enabled or "1")
-	if enabled == "0" or enabled == "false" then
-		return "AT^" .. (mode == "NR" and "NRFREQLOCK" or
-			"LTEFREQLOCK") .. "=0", nil, mode
-	end
-	local earfcn, message = strict_integer(row.EARFCN or row.earfcn,
-		0, 3279165, "EARFCN")
-	if not earfcn then
-		return nil, message
-	end
-	local band
-	band, message = strict_integer(row.BAND or row.band, 1, 1024, "band")
-	if not band then
-		return nil, message
-	end
-	local pci
-	pci, message = strict_integer(row.PCI or row.pci, 0,
-		mode == "NR" and 1007 or 503, "PCI", true)
-	if pci == nil then
-		return nil, message
-	end
-	local prefix = mode == "NR" and "AT^NRFREQLOCK=" or
-		"AT^LTEFREQLOCK="
-	if mode == "NR" then
-		local scs = nr_scs_for_band(band)
-		if pci == "" then
-			return prefix .. '1,0,1,"' .. band .. '","' .. earfcn ..
-				'","' .. scs .. '"', nil, mode
+	return nil
+end
+
+local function huawei_row_enabled(row)
+	local value = type(row) == "table" and row.enabled or nil
+	if value == nil then value = "1" end
+	value = tostring(value):lower()
+	return value ~= "0" and value ~= "false"
+end
+
+local function quoted_values(values)
+	return '"' .. table.concat(values, ",") .. '"'
+end
+
+local function huawei_cell_commands(rows)
+	local grouped = {
+		NR = { present = false, items = {}, seen = {} },
+		LTE = { present = false, items = {}, seen = {} }
+	}
+	for _, row in ipairs(rows) do
+		if type(row) ~= "table" then
+			return nil, "invalid cell lock row"
 		end
-		return prefix .. '2,0,1,"' .. band .. '","' .. earfcn ..
-			'","' .. scs .. '","' .. pci .. '"', nil, mode
+		local mode = huawei_row_mode(row)
+		if not mode then
+			return nil, "invalid radio mode"
+		end
+		local group = grouped[mode]
+		group.present = true
+		if huawei_row_enabled(row) then
+			local earfcn, message = strict_integer(row.EARFCN or row.earfcn,
+				0, 3279165, "EARFCN")
+			if not earfcn then return nil, message end
+			local band
+			band, message = strict_integer(row.BAND or row.band,
+				1, 1024, "band")
+			if not band then return nil, message end
+			local pci
+			pci, message = strict_integer(row.PCI or row.pci, 0,
+				mode == "NR" and 1007 or 503, "PCI", true)
+			if pci == nil then return nil, message end
+			local lock_type = pci == "" and 1 or 2
+			if group.lock_type and group.lock_type ~= lock_type then
+				return nil, "cannot mix frequency and cell locks for " .. mode
+			end
+			group.lock_type = lock_type
+			local item = {
+				band = band, earfcn = earfcn, pci = pci,
+				scs = mode == "NR" and nr_scs_for_band(band) or ""
+			}
+			local key = table.concat({ item.band, item.earfcn,
+				item.scs, item.pci }, ":")
+			if not group.seen[key] then
+				group.seen[key] = true
+				group.items[#group.items + 1] = item
+			end
+		end
 	end
-	if pci == "" then
-		return prefix .. '1,0,1,"' .. band .. '","' .. earfcn .. '"',
-			nil, mode
+
+	local commands = {}
+	for _, mode in ipairs({ "NR", "LTE" }) do
+		local group = grouped[mode]
+		if group.present then
+			local prefix = mode == "NR" and "AT^NRFREQLOCK=" or
+				"AT^LTEFREQLOCK="
+			if #group.items == 0 then
+				commands[#commands + 1] = prefix .. "0"
+			else
+				local bands, earfcns, scs, pcis = {}, {}, {}, {}
+				for _, item in ipairs(group.items) do
+					bands[#bands + 1] = item.band
+					earfcns[#earfcns + 1] = item.earfcn
+					if mode == "NR" then scs[#scs + 1] = item.scs end
+					if group.lock_type == 2 then pcis[#pcis + 1] = item.pci end
+				end
+				local parts = { tostring(group.lock_type), "0",
+					tostring(#group.items), quoted_values(bands),
+					quoted_values(earfcns) }
+				if mode == "NR" then parts[#parts + 1] = quoted_values(scs) end
+				if group.lock_type == 2 then
+					parts[#parts + 1] = quoted_values(pcis)
+				end
+				commands[#commands + 1] = prefix .. table.concat(parts, ",")
+			end
+		end
 	end
-	return prefix .. '2,0,1,"' .. band .. '","' .. earfcn ..
-		'","' .. pci .. '"', nil, mode
+	if #commands == 0 then
+		return nil, "cell lock data is empty"
+	end
+	return commands
 end
 
 local function huawei_band_commands(band)
 	if type(band) ~= "table" then
 		return nil, "invalid band lock"
 	end
-	if tostring(band.enabled or "1") == "0" then
+	if not huawei_row_enabled(band) then
 		return { "AT^NRFREQLOCK=0", "AT^LTEFREQLOCK=0" }
 	end
-	local grouped = { NR = {}, LTE = {} }
+	local grouped = {
+		NR = { values = {}, seen = {}, present = false },
+		LTE = { values = {}, seen = {}, present = false }
+	}
 	for token in tostring(band.freq or ""):gmatch("[^,]+") do
-		local lower = token:lower()
-		local value = token:match("(%d+)%s*$")
-		local mode = lower:find("lte", 1, true) and "LTE" or
-			((lower:find("nr", 1, true) or lower:find("sa", 1, true) or
-			  lower:find("5g", 1, true)) and "NR" or nil)
-		local normalized = value and strict_integer(value, 1, 1024, "band")
-		if mode and normalized then
-			grouped[mode][#grouped[mode] + 1] = normalized
+		local label, values = token:match("^%s*([^%-]+)%-(.-)%s*$")
+		label = tostring(label or ""):lower()
+		local mode = label:find("lte", 1, true) and "LTE" or
+			((label:find("nr", 1, true) or label:find("sa", 1, true) or
+			  label:find("5g", 1, true)) and "NR" or nil)
+		if mode then
+			local group = grouped[mode]
+			group.present = true
+			for value in tostring(values or ""):gmatch("[^:;/%s]+") do
+				local normalized, message = strict_integer(value, 1, 1024, "band")
+				if not normalized then return nil, message end
+				if not group.seen[normalized] then
+					group.seen[normalized] = true
+					group.values[#group.values + 1] = normalized
+				end
+			end
 		end
 	end
 	local commands = {}
 	for _, mode in ipairs({ "NR", "LTE" }) do
-		local values = grouped[mode]
+		local group = grouped[mode]
+		local values = group.values
 		if #values > 0 then
 			commands[#commands + 1] = "AT^" ..
 				(mode == "NR" and "NRFREQLOCK" or "LTEFREQLOCK") ..
 				'=3,0,' .. tostring(#values) .. ',"' ..
 				table.concat(values, ",") .. '"'
+		elseif group.present then
+			commands[#commands + 1] = "AT^" ..
+				(mode == "NR" and "NRFREQLOCK" or "LTEFREQLOCK") .. "=0"
 		end
 	end
 	if #commands == 0 then
@@ -1984,29 +2076,21 @@ local function huawei_lock_commands(data)
 	if action == 0 then
 		return { "AT^NRFREQLOCK=0", "AT^LTEFREQLOCK=0" }
 	end
-	if type(data.band) == "table" then
-		return huawei_band_commands(data.band)
-	end
 	local rows = type(data.earfcns) == "table" and data.earfcns or nil
 	if not rows and type(data.earfcn) == "table" then
 		rows = { data.earfcn }
 	end
-	if not rows then
+	local band_enabled = type(data.band) == "table" and
+		huawei_row_enabled(data.band) and
+		trim_field(data.band.freq) ~= ""
+	local has_rows = rows and #rows > 0
+	if type(data.band) == "table" and (band_enabled or not has_rows) then
+		return huawei_band_commands(data.band)
+	end
+	if not has_rows then
 		return nil, "cell lock data is missing"
 	end
-	local commands, modes = {}, {}
-	for _, row in ipairs(rows) do
-		local command, message, mode = huawei_row_command(row)
-		if not command then
-			return nil, message
-		end
-		commands[#commands + 1] = command
-		modes[mode] = true
-	end
-	if #commands == 0 then
-		return nil, "cell lock data is empty"
-	end
-	return commands
+	return huawei_cell_commands(rows)
 end
 
 local function at_command_ok(response)
