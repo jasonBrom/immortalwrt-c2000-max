@@ -6,9 +6,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOP="$(cd "$ROOT/../../.." && pwd)"
 WORKER="$ROOT/files/usr/sbin/c2000max-service-worker"
 SIM="$ROOT/files/usr/sbin/c2000max-sim"
+SIM_INIT="$ROOT/files/etc/init.d/c2000max-sim"
 FAN_INIT="$ROOT/files/etc/init.d/c2000max-fan"
 LEDS="$ROOT/files/usr/sbin/c2000max-leds"
 MT5700="$TOP/package/custom/mt5700-web-go/src/main.go"
+AT_DAEMON_INIT="$TOP/package/custom/qmodem/application/ubus_at_daemon/files/etc/init.d/ubus-at-daemon"
+DTS="$TOP/target/linux/mediatek/dts/mt7987a-nradio-c2000-max.dts"
 
 fail()
 {
@@ -28,12 +31,24 @@ grep -Fq 'get c2000max.fan.enabled' "$FAN_INIT" ||
 grep -Fq "interval=15" "$LEDS" ||
 	fail 'RGB status poll is not reduced to 15 seconds'
 
-grep -Fq 'at_timeout "$port" "$command" 10' "$SIM" ||
+grep -Fq 'C2000MAX_SIM_AT_BACKEND:-ubus' "$SIM" ||
 	fail 'SIM switching bypasses the QModem AT queue'
 grep -Fq 'begin_at_transaction "$at_port"' "$SIM" ||
 	fail 'SIM command sequence is not wrapped in one AT transaction'
 ! grep -Eq 'tom_modem[[:space:]]+-d' "$SIM" ||
 	fail 'SIM switching still opens the modem serial port directly'
+grep -q '^START=75$' "$SIM_INIT" ||
+	fail 'saved SIM restore does not run before QModem startup'
+grep -Fq 'C2000MAX_SIM_AT_BACKEND=tom_modem' "$SIM_INIT" ||
+	fail 'early SIM restore does not use the pre-QModem direct transaction'
+grep -Fq 'boot-restore' "$SIM_INIT" ||
+	fail 'SIM init service does not restore the saved slot at boot'
+! grep -Fq 'sleep 10; exec /usr/sbin/c2000max-sim apply' "$SIM_INIT" ||
+	fail 'old asynchronous SIM/QModem startup race is still present'
+grep -q '^START=79$' "$AT_DAEMON_INIT" ||
+	fail 'ubus-at-daemon still starts after QModem scanners/dialers'
+sed -n '/modem-power {/,/};/p' "$DTS" | grep -Fq 'gpio-export,output = <1>;' ||
+	fail 'kernel does not keep the active-low modem supply off before mux restore'
 
 grep -Fq 'newQModemQueuedBackend' "$MT5700" ||
 	fail 'MT5700 panel does not use the QModem queue backend'

@@ -9,6 +9,8 @@ TAG="c2000max-sim"
 LOCK="/var/lock/c2000max-sim.lock"
 GPIO_SIM="/sys/class/gpio/cpe-sel0/value"
 GPIO_POWER="/sys/class/gpio/cpe-pwr/value"
+MODEM_POWER_OFF_SECONDS=3
+MODEM_PORT_WAIT_SECONDS=45
 LAST_ERROR=""
 SWITCH_MESSAGE=""
 HUAWEI_ACTIVATION_WARNING=0
@@ -38,7 +40,7 @@ qmodem_get() {
 }
 
 resolve_port() {
-	local section="$1" configured candidate
+	local section="$1" configured candidate remembered
 	configured="$(uci -q get c2000max.sim.at_port)"
 	if [ -n "$configured" ] && [ "$configured" != auto ]; then
 		echo "$configured"
@@ -49,8 +51,14 @@ resolve_port() {
 		configured="$(qmodem_get "$section" override_at_port)"
 		[ -n "$configured" ] || configured="$(qmodem_get "$section" at_port)"
 		[ -n "$configured" ] && {
-			echo "$configured"
-			return
+			if [ -c "$configured" ]; then
+				echo "$configured"
+				return
+			fi
+			# A preserved QModem device can retain a stale tty path after a
+			# host/modem power-cycle. Prefer a live fallback port and use this
+			# remembered value only while waiting for enumeration.
+			remembered="$configured"
 		}
 	fi
 
@@ -61,6 +69,7 @@ resolve_port() {
 			return
 		}
 	done
+	[ -z "$remembered" ] || echo "$remembered"
 }
 
 wait_for_port() {
@@ -77,7 +86,10 @@ send_at() {
 	local port="$1" command="$2"
 	# Never open the modem TTY beside QModem.  at_timeout() enters the shared
 	# per-port/global queue, or recognises the surrounding SIM transaction.
-	QMODEM_AT_BACKEND=ubus at_timeout "$port" "$command" 10
+	# The one exception is the serialized early-boot restore, which runs before
+	# ubus-at-daemon and every QModem scanner/dialer have started.
+	QMODEM_AT_BACKEND="${C2000MAX_SIM_AT_BACKEND:-ubus}" \
+		at_timeout "$port" "$command" 10
 }
 
 begin_at_transaction() {
@@ -196,6 +208,67 @@ write_gpio_mux() {
 		fail "无法写入 SIM 复用 GPIO"
 		return 1
 	}
+}
+
+write_modem_power() {
+	local value="$1" actual
+	[ -w "$GPIO_POWER" ] || {
+		fail "模组电源 GPIO 不可用"
+		return 1
+	}
+	echo "$value" > "$GPIO_POWER" || {
+		fail "无法切换模组电源 GPIO"
+		return 1
+	}
+	actual="$(cat "$GPIO_POWER" 2>/dev/null)"
+	[ "$actual" = "$value" ] || {
+		fail "模组电源 GPIO 状态未生效"
+		return 1
+	}
+}
+
+wait_for_modem_port() {
+	local retries="${1:-$MODEM_PORT_WAIT_SECONDS}" section port
+	while [ "$retries" -gt 0 ]; do
+		section="$(first_qmodem_section)"
+		port="$(resolve_port "$section")"
+		if [ -n "$port" ] && [ -c "$port" ]; then
+			echo "$port"
+			return 0
+		fi
+		sleep 1
+		retries=$((retries - 1))
+	done
+	return 1
+}
+
+prepare_modem_boot() {
+	local requested="$1" slot target_mux off_seconds
+	slot="$(normalize_slot "$requested")"
+	[ -n "$slot" ] || {
+		fail "无效的开机恢复卡槽：$requested"
+		return 1
+	}
+	target_mux="$(gpio_sim_value "$slot")"
+	off_seconds="${C2000MAX_MODEM_POWER_OFF_SECONDS:-$MODEM_POWER_OFF_SECONDS}"
+	case "$off_seconds" in
+		''|*[!0-9]*) off_seconds="$MODEM_POWER_OFF_SECONDS" ;;
+	esac
+	[ "$off_seconds" -ge 2 ] 2>/dev/null || off_seconds=2
+	[ "$off_seconds" -le 10 ] 2>/dev/null || off_seconds=10
+
+	# cpe-pwr is exported as active-low, so its sysfs logical values are
+	# 0=off and 1=on. Power must be removed before GPIO48 changes; otherwise a
+	# warm reboot can briefly attach channel 2 to the internal SIM.
+	write_modem_power 0 || return 1
+	sleep "$off_seconds"
+	if ! write_gpio_mux "$target_mux"; then
+		write_modem_power 1 >/dev/null 2>&1
+		return 1
+	fi
+	sleep 1
+	write_modem_power 1 || return 1
+	log "prepared modem boot (slot=$slot, mux=$target_mux, power-off=${off_seconds}s)"
 }
 
 force_gpio_slot() {
@@ -500,7 +573,8 @@ apply_slot() {
 	uci -q delete c2000max.sim.last_forced_slot
 	uci -q delete c2000max.sim.last_forced_gpio
 	uci -q commit c2000max
-	if [ -n "$section" ] && [ -x /etc/init.d/qmodem_network ]; then
+	if [ "${C2000MAX_SIM_SKIP_REDIAL:-0}" != 1 ] &&
+	   [ -n "$section" ] && [ -x /etc/init.d/qmodem_network ]; then
 		/etc/init.d/qmodem_network redial "$section" >/dev/null 2>&1 &
 	fi
 	log "selected $slot (mux=$target_mux, module-channel=$target_channel, modem=$model, port=$port)"
@@ -596,10 +670,9 @@ serialized_status_json() {
 }
 
 reset_modem() {
-	[ -w "$GPIO_POWER" ] || fail "模组电源 GPIO 不可用"
-	echo 0 > "$GPIO_POWER"
-	sleep 1
-	echo 1 > "$GPIO_POWER"
+	write_modem_power 0 || return 1
+	sleep "$MODEM_POWER_OFF_SECONDS"
+	write_modem_power 1 || return 1
 	log "modem hard reset requested"
 }
 
@@ -607,6 +680,39 @@ reset_modem() {
 
 command="${1:-apply}"
 case "$command" in
+	boot-restore)
+		slot="$(normalize_slot "$(uci -q get c2000max.sim.slot)")"
+		[ -n "$slot" ] || slot=external2
+		lock -n "$LOCK" || {
+			status_json 0 "开机恢复 SIM 卡槽时锁正忙"
+			exit 1
+		}
+		SIM_LOCK_HELD=1
+		trap cleanup_locks EXIT
+		trap 'exit 128' INT TERM
+		if ! prepare_modem_boot "$slot"; then
+			status_json 0 "${LAST_ERROR:-模组开机预处理失败}"
+			exit 1
+		fi
+		at_port="$(wait_for_modem_port "$MODEM_PORT_WAIT_SECONDS")" || {
+			fail "模组重新上电后 AT 串口未在 ${MODEM_PORT_WAIT_SECONDS} 秒内出现"
+			status_json 0 "$LAST_ERROR"
+			exit 1
+		}
+		begin_at_transaction "$at_port" || {
+			status_json 0 "开机恢复无法取得 QModem AT 事务锁"
+			exit 1
+		}
+		C2000MAX_SIM_SKIP_REDIAL=1
+		export C2000MAX_SIM_SKIP_REDIAL
+		if apply_slot "$slot"; then
+			sleep 2
+			status_json 1 "${SWITCH_MESSAGE:-已恢复保存的 SIM 卡槽}"
+		else
+			status_json 0 "${LAST_ERROR:-开机恢复 SIM 卡槽失败}"
+			exit 1
+		fi
+		;;
 	apply|switch)
 		slot="${2:-$(uci -q get c2000max.sim.slot)}"
 		# BusyBox lock(1) takes no timeout argument. Its -w option merely waits
@@ -664,7 +770,7 @@ case "$command" in
 		fi
 		;;
 	*)
-		echo "Usage: $0 {status|switch [internal|external1|external2]|force [external1|external2]|reset}" >&2
+		echo "Usage: $0 {boot-restore|status|switch [internal|external1|external2]|force [external1|external2]|reset}" >&2
 		exit 2
 		;;
 esac

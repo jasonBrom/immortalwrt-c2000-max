@@ -14,6 +14,22 @@ uci -q set system.@system[0].hostname='C2000MAX'
 uci -q set system.@system[0].timezone='CST-8'
 uci -q set system.@system[0].zonename='Asia/Shanghai'
 
+# Preserve the last successfully selected physical SIM slot. Older images may
+# have an incomplete section; normalize it before the early boot restore runs.
+[ -n "$(uci -q get c2000max.sim)" ] || uci -q set c2000max.sim='sim'
+sim_slot="$(uci -q get c2000max.sim.slot)"
+case "$sim_slot" in
+	internal|external1|external2) ;;
+	*) uci -q set c2000max.sim.slot='external2' ;;
+esac
+sim_vendor="$(uci -q get c2000max.sim.vendor)"
+case "$sim_vendor" in
+	auto|huawei|fibocom|quectel) ;;
+	*) uci -q set c2000max.sim.vendor='auto' ;;
+esac
+[ -n "$(uci -q get c2000max.sim.at_port)" ] ||
+	uci -q set c2000max.sim.at_port='auto'
+
 # Add the role controller without trusting a stale marker during sysupgrade.
 # The actual network topology is authoritative.
 if [ -z "$(uci -q get c2000max.ethernet)" ]; then

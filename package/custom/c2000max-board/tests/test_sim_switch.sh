@@ -72,6 +72,11 @@ write_gpio_mux() {
 	printf 'GPIO=%s\n' "$1" >> "$STATE_DIR/commands"
 }
 
+write_modem_power() {
+	state_set power "$1"
+	printf 'POWER=%s\n' "$1" >> "$STATE_DIR/commands"
+}
+
 send_at() {
 	local _port="$1" command="$2"
 	printf '%s\n' "$command" >> "$STATE_DIR/commands"
@@ -205,6 +210,34 @@ switch_huawei /dev/mock 2 0 ||
 assert_eq 2 "$(state_get channel)" "all-empty target channel"
 assert_eq 0 "$(state_get gpio)" "all-empty target GPIO"
 assert_eq 1 "$HUAWEI_ACTIVATION_WARNING" "all-empty activation warning"
+
+# A warm boot must remove modem power before restoring GPIO48 and may only
+# power the module back on after the saved physical mux is stable.
+: > "$STATE_DIR/commands"
+state_set power 1
+state_set gpio 1
+prepare_modem_boot external1 ||
+	fail_test "external1 early boot preparation failed"
+mapfile -t boot_external1 < "$STATE_DIR/commands"
+expected_boot_external1=(
+	'POWER=0'
+	'GPIO=0'
+	'POWER=1'
+)
+[[ "${boot_external1[*]}" == "${expected_boot_external1[*]}" ]] ||
+	fail_test "external1 boot power/mux order changed: ${boot_external1[*]}"
+
+: > "$STATE_DIR/commands"
+prepare_modem_boot internal ||
+	fail_test "internal SIM early boot preparation failed"
+mapfile -t boot_internal < "$STATE_DIR/commands"
+expected_boot_internal=(
+	'POWER=0'
+	'GPIO=1'
+	'POWER=1'
+)
+[[ "${boot_internal[*]}" == "${expected_boot_internal[*]}" ]] ||
+	fail_test "internal boot power/mux order changed: ${boot_internal[*]}"
 
 grep -Fq '目标卡槽未能立即激活 SIM（空槽时属于正常状态）' "$SCRIPT" ||
 	fail_test "single-card success warning is missing"

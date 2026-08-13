@@ -41,7 +41,9 @@
 
 		modem-power {
 			gpio-export,name = "cpe-pwr";
-			gpio-export,output = <0>;
+			/* Active-low power enable: keep the modem off until the saved
+			 * SIM mux has been restored by c2000max-sim at START=75. */
+			gpio-export,output = <1>;
 			gpios = <&pio 49 GPIO_ACTIVE_LOW>;
 		};
 
