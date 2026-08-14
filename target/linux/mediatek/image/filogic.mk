@@ -2864,6 +2864,7 @@ define Device/nradio_c2000-max
 	luci-app-mwan3 luci-i18n-mwan3-zh-cn mwan3 \
 	cnspeedtest luci-app-cnspeedtest \
 	speedtest-x-go luci-app-speedtest-x \
+	c2000max-app luci-app-c2000max-app \
 	luci-app-uugamebooster
   KERNEL := kernel-bin | lzma | \
 	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb

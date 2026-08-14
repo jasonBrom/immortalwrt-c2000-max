@@ -1,0 +1,43 @@
+#!/bin/sh
+
+# Promote only this package's known script files. Never scan or overwrite
+# arbitrary user files, and reject a symlink or syntactically broken candidate.
+ROOT="${1:-${IPKG_INSTROOT:-/}}"
+case "$ROOT" in
+	/) ROOT='' ;;
+	/*) ROOT="${ROOT%/}" ;;
+	*) echo "invalid root prefix" >&2; exit 1 ;;
+esac
+
+promote_script() {
+	local target candidate mode
+
+	target="$ROOT$1"
+	candidate="$target.apk-new"
+	mode="$2"
+	[ -e "$candidate" ] || return 0
+	[ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+	/bin/sh -n "$candidate" || return 1
+	chmod "$mode" "$candidate" || return 1
+	mv -f "$candidate" "$target"
+}
+
+promote_script /etc/init.d/uuplugin 0755 || exit 1
+promote_script /usr/libexec/uuplugin-service 0755 || exit 1
+promote_script /usr/libexec/uuplugin-launcher 0755 || exit 1
+promote_script /usr/bin/uuclearnat 0755 || exit 1
+# Promote the migrator last: the running shell has already parsed this file, so
+# replacing its directory entry is safe and future upgrades cannot stay pinned
+# to a stale migration policy.
+promote_script /usr/libexec/uuplugin-migrate-apk-new 0755 || exit 1
+
+# APK can leave an rc.d link pointing at uuplugin.apk-new. Delete only that
+# exact broken target; canonical S99/K10 links are recreated by enable.
+for link in "$ROOT"/etc/rc.d/S[0-9][0-9]uuplugin.apk-new \
+	"$ROOT"/etc/rc.d/K[0-9][0-9]uuplugin.apk-new; do
+	[ -L "$link" ] || continue
+	[ "$(readlink "$link" 2>/dev/null)" = '../init.d/uuplugin.apk-new' ] || continue
+	rm -f "$link" || exit 1
+done
+
+exit 0

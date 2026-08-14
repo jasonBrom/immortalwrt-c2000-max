@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 LUCI_ROOT="$(dirname "$ROOT")/luci-app-c2000max-app"
+REPO="$(CDPATH= cd "$ROOT/../../.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -341,7 +342,8 @@ assert_contains "$VIEW" "name: 'developer_enable'"
 assert_not_contains "$VIEW" "'checked': checked"
 assert_not_contains "$VIEW" "'c2000max-app-device-id'"
 assert_contains "$VIEW" '局域网和云端总开关默认关闭'
-assert_contains "$VIEW" '当前界面：V35.35'
+assert_contains "$VIEW" '当前界面：'
+assert_contains "$VIEW" "text(status.app_build, 'V35.35')"
 assert_contains "$VIEW" '软件更新权限'
 assert_contains "$VIEW" '永久关闭'
 assert_not_contains "$VIEW" "name: 'upgrade_enable'"
@@ -457,7 +459,8 @@ assert_contains "$CLOUD" 'device_code = current_identity.device_code'
 assert_contains "$CLOUD" 'traffic = {'
 assert_contains "$CLOUD" 'wired_client = {'
 assert_contains "$CLOUD" 'M.publish("cpestatus", { uniq = presence_timestamp() }, false)'
-assert_contains "$CLOUD" 'M.publish("status", { uniq = presence_timestamp() }, false)'
+assert_contains "$CLOUD" 'return M.publish("status", {'
+assert_contains "$CLOUD" 'uniq = presence_timestamp()'
 assert_not_contains "$CLOUD" 'sys.uniqueid(4) or "00000000"'
 assert_contains "$CLOUD" 'state = "permanently_disabled"'
 assert_contains "$CLOUD" 'message = "software update permanently disabled"'
@@ -482,6 +485,10 @@ assert_contains "$REPORTER" '"report_interval"'
 MAKEFILE="$ROOT/Makefile"
 assert_contains "$MAKEFILE" '+mosquitto-nossl'
 assert_contains "$MAKEFILE" 'PKG_VERSION:=1.10.0'
+assert_contains "$MAKEFILE" 'PKG_RELEASE:=2'
+for dependency in '+flock' '+blkid' '+ip-full' '+iw' '+uclient-fetch'; do
+	assert_contains "$MAKEFILE" "$dependency"
+done
 assert_contains "$MAKEFILE" 'uci -q delete c2000max_app.main.upgrade_enable'
 assert_contains "$MAKEFILE" 'c2000max-app-httpd'
 assert_contains "$MAKEFILE" '/etc/init.d/c2000max-app enable'
@@ -494,6 +501,12 @@ assert_not_contains "$MAKEFILE" 'app_v30.js $(1)'
 LUCI_MAKEFILE="$LUCI_ROOT/Makefile"
 assert_contains "$LUCI_MAKEFILE" 'LUCI_TITLE:=LuCI configuration for C2000-MAX APP support'
 assert_contains "$LUCI_MAKEFILE" 'LUCI_DEPENDS:=+c2000max-app'
+assert_contains "$LUCI_MAKEFILE" 'PKG_RELEASE:=2'
+assert_contains "$LUCI_MAKEFILE" '# call BuildPackage - OpenWrt buildroot signature'
+assert_contains "$ACL" '"c2000max_app": [ "set", "restart" ]'
+
+PROFILE="$REPO/target/linux/mediatek/image/filogic.mk"
+assert_contains "$PROFILE" 'c2000max-app luci-app-c2000max-app'
 
 CNSPEEDTEST="${ROOT%/c2000max-app}/luci-app-cnspeedtest/root/usr/share/luci/menu.d/luci-app-cnspeedtest.json"
 python3 -m json.tool "$CNSPEEDTEST" >/dev/null

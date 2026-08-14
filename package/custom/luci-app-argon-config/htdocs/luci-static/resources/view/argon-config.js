@@ -52,10 +52,16 @@ return view.extend({
 		o = s.option(form.ListValue, 'online_wallpaper', _('Wallpaper source'));
 		o.value('none', _('Built-in'));
 		o.value('bing', _('Bing'));
+		o.value('bing_cn', _('Bing China (Mainland optimized)'));
 		o.value('unsplash', _('Unsplash'));
-		o.value('wallhaven', _('Wallhaven'));
 		o.default = 'bing';
 		o.rmempty = false;
+
+		o = s.option(form.Value, 'unsplash_access_key', _('Unsplash Access Key'),
+			_('Optional. When empty, Argon uses a built-in curated Unsplash wallpaper pool; when set, it uses the official Unsplash random photo API.'));
+		o.password = true;
+		o.rmempty = true;
+		o.depends('online_wallpaper', 'unsplash');
 
 		o = s.option(form.ListValue, 'mode', _('Theme mode'));
 		o.value('normal', _('Follow system'));

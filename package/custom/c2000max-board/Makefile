@@ -1,8 +1,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=c2000max-board
-PKG_VERSION:=2.35.25
-PKG_RELEASE:=1
+PKG_VERSION:=2.35.35
+PKG_RELEASE:=3
 PKG_LICENSE:=GPL-2.0-or-later
 
 include $(INCLUDE_DIR)/package.mk
@@ -15,7 +15,7 @@ define Package/c2000max-board
 	DEPENDS:=+qmodem +luci-base +jq +jsonfilter +ip-full +firewall4 \
 	+kmod-dummy +kmod-mediatek_hnat +mtkhnat_util +hnat-detect \
 	+luci-app-turboacc-mtk +luci-app-eqos-mtk +mwan3 +coreutils-timeout \
-	+flock +zram-swap +gawk +grep +sed +coreutils-sort \
+	+flock +uboot-envtools +zram-swap +gawk +grep +sed +coreutils-sort \
 	+luci-app-netbird +netbird
 endef
 
@@ -98,6 +98,10 @@ rm -f \
 	"$${IPKG_INSTROOT}/www/luci-static/resources/view/c2000max/access_v351.js" \
 	"$${IPKG_INSTROOT}/www/luci-static/resources/view/c2000max/swap_v351.js"
 [ -n "$${IPKG_INSTROOT}" ] || {
+	# Seed the persistent slot before a later sysupgrade -n can erase UCI.
+	# Failure is visible to the installer; never claim cross-reset persistence
+	# when fw_setenv or its readback is unavailable.
+	/usr/sbin/c2000max-sim persist >/dev/null 2>&1 || exit 1
 	/usr/sbin/c2000max-adblock-compat seed >/dev/null 2>&1 || true
 	/etc/init.d/c2000max-service-worker enable >/dev/null 2>&1 || true
 	/etc/init.d/c2000max-service-worker restart >/dev/null 2>&1 || true

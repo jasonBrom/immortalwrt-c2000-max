@@ -3,14 +3,18 @@ XHR.poll(3, '<%=url([[admin]], [[services]], [[uuplugin]], [[status]])%>', null,
 	function(x, data) {
 		var tb = document.getElementById('uuplugin_status');
 		var selected = data && data.configured_platform == 'h3c-nx30pro'
-			? 'H3C NX30 Pro（实验）' : 'OpenWrt aarch64';
+			? 'H3C NX30 Pro（推荐）' : 'OpenWrt aarch64（官方通用回退）';
 		var detail = data && data.status ? String(data.status)
 			.replace(/&/g, '&amp;').replace(/</g, '&lt;')
 			.replace(/>/g, '&gt;').replace(/"/g, '&quot;') : '';
 		var health = data && data.health_detail ? String(data.health_detail)
 			.replace(/&/g, '&amp;').replace(/</g, '&lt;')
 			.replace(/>/g, '&gt;').replace(/"/g, '&quot;') : '';
+		var acceleration = data && data.acceleration_detail ? String(data.acceleration_detail)
+			.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;').replace(/"/g, '&quot;') : '';
 		detail = '<small><%:所选核心%>: ' + selected + '</small>' +
+			(acceleration ? '<br><small>' + acceleration + '</small>' : '') +
 			(health ? '<br><small>' + health + '</small>' : '') +
 			(detail ? '<br><small>' + detail + '</small>' : '');
 		if (data && tb) {

@@ -12,7 +12,7 @@ end
 function act_status()
 	local e = {}
 	local uci = require("luci.model.uci").cursor()
-	local configured = uci:get("uuplugin", "uuplugin", "platform") or "openwrt-aarch64"
+	local configured = uci:get("uuplugin", "uuplugin", "platform") or "h3c-nx30pro"
 	local platform = nixio.fs.readfile("/tmp/uu/.platform") or ""
 	local activate_raw = nixio.fs.readfile("/tmp/uu/activate_status") or ""
 	local activate_lower = activate_raw:lower()
@@ -21,47 +21,46 @@ function act_status()
 		or activate_lower:match("^%s*(%d+)%s*$")
 	local problems = {}
 	if configured ~= "openwrt-aarch64" and configured ~= "h3c-nx30pro" then
-		configured = "openwrt-aarch64"
+		configured = "h3c-nx30pro"
 	end
 	platform = platform:gsub("[\r\n]+$", "")
-	e.running = luci.sys.call("pidof uuplugin >/dev/null") == 0
-	e.guardian = luci.sys.call("pidof xuplugin-guardian >/dev/null") == 0
+	e.enabled = uci:get("uuplugin", "uuplugin", "enabled") == "1"
+	e.running = luci.sys.call(
+		"/usr/libexec/uuplugin-launcher --core-running >/dev/null 2>&1") == 0
+	e.guardian = luci.sys.call(
+		"/usr/libexec/uuplugin-launcher --guardian-running >/dev/null 2>&1") == 0
+	e.acceleration_suspended = nixio.fs.access("/etc/uuplugin.accel-state")
+		and luci.sys.call("/usr/bin/uuclearnat --check >/dev/null 2>&1") == 0
 	e.uu_status = tonumber(uu_status)
 	e.activated = e.uu_status ~= nil and e.uu_status > 0
 	e.rules_ready = luci.sys.call(
 		"/usr/libexec/uuplugin-launcher --rules-present >/dev/null 2>&1") == 0
 
-	if platform ~= configured then
+	if (e.enabled or e.running) and platform ~= configured then
 		problems[#problems + 1] = "核心平台尚未切换完成"
 	end
-	if not nixio.fs.access("/dev/net/tun") then
+	if (e.enabled or e.running) and not nixio.fs.access("/dev/net/tun") then
 		problems[#problems + 1] = "缺少 /dev/net/tun"
 	end
-	if luci.sys.call("ip -4 route show default 2>/dev/null | grep -q '^default '") ~= 0 then
+	if (e.enabled or e.running) and luci.sys.call("/usr/libexec/ip-full -4 route show default 2>/dev/null | grep -q '^default '") ~= 0 then
 		problems[#problems + 1] = "缺少 IPv4 默认路由"
 	end
 	if e.running and not e.guardian then
 		problems[#problems + 1] = "guardian 未运行"
 	end
-	if platform == "openwrt-aarch64" then
-		if not nixio.fs.access("/tmp/uu/xtables-nft-multi") then
-			problems[#problems + 1] = "OpenWrt xtables 不完整"
-		end
-	elseif platform == "h3c-nx30pro" then
+	if (e.enabled or e.running) and not nixio.fs.access("/tmp/uu/xtables-nft-multi") then
+		problems[#problems + 1] = "官方 xtables 兼容组件不完整"
+	end
+	if e.running and platform == "h3c-nx30pro" then
 		if not nixio.fs.access("/tmp/uu/h3c_info") then
 			problems[#problems + 1] = "缺少 h3c_info"
 		end
-		if luci.sys.call("[ \"$(readlink /lib/libxt_TPROXY.so 2>/dev/null)\" = /usr/lib/iptables/libxt_TPROXY.so ] && [ \"$(readlink /lib/libxt_socket.so 2>/dev/null)\" = /usr/lib/iptables/libxt_socket.so ]") ~= 0 then
-			problems[#problems + 1] = "H3C xtables 兼容链接未就绪"
-		end
-		-- These hooks are proprietary to the NX30 Pro firmware.  Do not fake
-		-- them and never report the experimental core ready without them.
-		if not nixio.fs.access("/dev/natflushdev") then
-			problems[#problems + 1] = "缺少 H3C /dev/natflushdev"
-		end
 		if not nixio.fs.access("/usr/bin/uuclearnat") then
-			problems[#problems + 1] = "缺少 H3C /usr/bin/uuclearnat"
+			problems[#problems + 1] = "缺少 OpenWrt uuclearnat 清理后端"
 		end
+	end
+	if e.running and not e.acceleration_suspended then
+		problems[#problems + 1] = "软件卸载/HNAT 暂停保护未生效"
 	end
 
 	e.ready = e.running and e.guardian and e.activated and e.rules_ready
@@ -84,6 +83,13 @@ function act_status()
 	end
 	e.platform = platform
 	e.configured_platform = configured
+	if e.running and e.acceleration_suspended then
+		e.acceleration_detail = "UU 运行期间已暂停软件流量卸载与 MediaTek HNAT"
+	elseif e.acceleration_suspended then
+		e.acceleration_detail = "UU 当前未运行；软件流量卸载与 MediaTek HNAT 暂时保持禁用，完成安全清理后恢复"
+	else
+		e.acceleration_detail = "UU 停用后会恢复启用前保存的加速设置"
+	end
 	e.health_detail = table.concat(problems, "；")
 	e.status = nixio.fs.readfile("/tmp/uuplugin.state") or "已停用"
 	e.status = e.status:gsub("[\r\n]+$", "")

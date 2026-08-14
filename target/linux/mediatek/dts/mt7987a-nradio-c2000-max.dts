@@ -41,9 +41,10 @@
 
 		modem-power {
 			gpio-export,name = "cpe-pwr";
-			/* Active-low power enable: keep the modem off until the saved
-			 * SIM mux has been restored by c2000max-sim at START=75. */
-			gpio-export,output = <1>;
+			/* gpio-export values are logical after GPIO_ACTIVE_LOW is
+			 * applied: 0 is deasserted/off and 1 is asserted/on. Keep the
+			 * modem off until c2000max-sim restores the saved mux. */
+			gpio-export,output = <0>;
 			gpios = <&pio 49 GPIO_ACTIVE_LOW>;
 		};
 
@@ -328,7 +329,7 @@
 &spi2 {
 	compatible = "mediatek,ipm-spi-quad", "mediatek,spi-ipm";
 	pinctrl-names = "default";
-	pinctrl-0 = <&spi2_pins>;
+	pinctrl-0 = <&spi2_flash_pins>;
 	#address-cells = <1>;
 	#size-cells = <0>;
 	status = "okay";

@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_VERSION:=1.5.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 LUCI_TITLE:=LuCI configuration for C2000-MAX APP support
 LUCI_DEPENDS:=+c2000max-app
@@ -21,3 +21,5 @@ rm -rf "$${IPKG_INSTROOT}/tmp/luci-modulecache" 2>/dev/null || true
 }
 exit 0
 endef
+
+# call BuildPackage - OpenWrt buildroot signature

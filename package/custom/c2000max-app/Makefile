@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=c2000max-app
 PKG_VERSION:=1.10.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-or-later
 PKG_BUILD_PARALLEL:=1
 
@@ -14,7 +14,8 @@ define Package/c2000max-app
   TITLE:=C2000-MAX official APP compatibility service
   DEPENDS:=+luci-base +luci-compat +luci-lua-runtime +libopenssl \
 	+mosquitto-nossl +mosquitto-client-nossl +qmodem +jq +jsonfilter \
-	+coreutils-timeout +ca-bundle
+	+coreutils-timeout +ca-bundle +flock +blkid +ip-full +iw \
+	+uclient-fetch
 endef
 
 define Package/c2000max-app/description

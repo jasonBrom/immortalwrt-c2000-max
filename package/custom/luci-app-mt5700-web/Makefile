@@ -4,8 +4,8 @@ LUCI_TITLE:=LuCI support for the MT5700 Web control panel
 LUCI_DESCRIPTION:=Manage the lightweight MT5700 Go WebSocket and AT service
 LUCI_DEPENDS:=+mt5700-web-go
 LUCI_PKGARCH:=all
-PKG_VERSION:=1.0.0
-PKG_RELEASE:=2
+PKG_VERSION:=1.1.0
+PKG_RELEASE:=4
 
 include $(TOPDIR)/feeds/luci/luci.mk
 

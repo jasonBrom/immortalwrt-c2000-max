@@ -1,49 +1,14 @@
 #!/bin/sh /etc/rc.common
 
-USE_PROCD=1
-START=99
-STOP=10
+# Keep this shim deliberately small and stable. APK may preserve a locally
+# changed file as uuplugin.apk-new; all release-specific logic lives in
+# /usr/libexec so the canonical rc.d target cannot fork an old implementation.
+UU_ROOT="${IPKG_INSTROOT:-}"
+UU_SERVICE="$UU_ROOT/usr/libexec/uuplugin-service"
 
-CONF="uuplugin"
-RUNDIR="/tmp/uu"
-LAUNCHER="/usr/libexec/uuplugin-launcher"
-STATE_FILE="/tmp/uuplugin.state"
+if [ ! -r "$UU_SERVICE" ]; then
+	echo "uuplugin service helper is missing: $UU_SERVICE" >&2
+	exit 1
+fi
 
-start_service() {
-	local enabled
-
-	config_load "$CONF"
-	config_get_bool enabled "uuplugin" "enabled" "0"
-	# This also handles a platform change made together with disabling UU:
-	# the stopped core's rules and old bundle must not survive the switch.
-	"$LAUNCHER" --prepare-only
-	[ "$enabled" -eq 1 ] || {
-		echo '已停用' > "$STATE_FILE"
-		return 0
-	}
-
-	mkdir -p "$RUNDIR"
-
-	procd_open_instance uuplugin
-	procd_set_param command "$LAUNCHER"
-	procd_set_param file /etc/config/uuplugin
-	procd_set_param limits core="unlimited"
-	procd_set_param term_timeout 10
-	procd_set_param respawn 3600 5 5
-	procd_set_param stdout 1
-	procd_set_param stderr 1
-	procd_close_instance
-}
-
-service_stopped() {
-	killall xuplugin-guardian >/dev/null 2>&1
-}
-
-reload_service() {
-	stop
-	start
-}
-
-service_triggers() {
-	procd_add_reload_trigger uuplugin
-}
+. "$UU_SERVICE"

@@ -16,7 +16,7 @@ boot() {
 	(
 		for delay in 15 30 60; do
 			sleep "$delay"
-			/usr/sbin/c2000max-sim apply >"$state" 2>&1 && exit 0
+			/usr/sbin/c2000max-sim boot-restore >"$state" 2>&1 && exit 0
 		done
 		exit 1
 	) &

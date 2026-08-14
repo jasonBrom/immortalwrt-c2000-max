@@ -453,6 +453,15 @@ platform_pre_upgrade() {
 	local board=$(board_name)
 
 	case "$board" in
+	nradio,c2000-max)
+		# sysupgrade -n discards the overlay, so persist the verified physical
+		# selection in the dedicated GPT U-Boot environment before stage2.
+		# Abort rather than silently boot the new image's external2 default.
+		/usr/sbin/c2000max-sim persist || {
+			echo "Unable to preserve the C2000MAX SIM slot; upgrade aborted." >&2
+			exit 1
+		}
+		;;
 	asus,rt-ax52|\
 	asus,rt-ax57m|\
 	asus,rt-ax59u|\

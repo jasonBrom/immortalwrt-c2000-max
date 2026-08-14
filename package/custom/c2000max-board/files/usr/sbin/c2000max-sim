@@ -1,6 +1,7 @@
 #!/bin/sh
 
 if [ "${C2000MAX_SIM_LIBRARY_ONLY:-0}" != 1 ]; then
+	. /lib/functions.sh
 	. /usr/share/libubox/jshn.sh
 	. /usr/share/qmodem/modem_util.sh
 fi
@@ -9,6 +10,8 @@ TAG="c2000max-sim"
 LOCK="/var/lock/c2000max-sim.lock"
 GPIO_SIM="/sys/class/gpio/cpe-sel0/value"
 GPIO_POWER="/sys/class/gpio/cpe-pwr/value"
+UBOOT_SLOT_KEY="c2000max_sim_slot"
+FW_ENV_CONFIG="${C2000MAX_FW_ENV_CONFIG:-/etc/fw_env.config}"
 MODEM_POWER_OFF_SECONDS=3
 MODEM_PORT_WAIT_SECONDS=45
 LAST_ERROR=""
@@ -178,6 +181,83 @@ normalize_slot() {
 		external1|sim1) echo external1 ;;
 		external2|sim2) echo external2 ;;
 	esac
+}
+
+ensure_fw_env_config() {
+	local dev block size tmp
+	[ "${C2000MAX_SIM_LIBRARY_ONLY:-0}" != 1 ] || return 0
+	if [ -s "$FW_ENV_CONFIG" ] &&
+	   grep -Eq '^/dev/mmcblk[0-9]+p[0-9]+[[:space:]]+0x0[[:space:]]+0x80000([[:space:]]|$)' \
+		"$FW_ENV_CONFIG"; then
+		return 0
+	fi
+	command -v find_mmc_part >/dev/null 2>&1 || return 1
+	dev="$(find_mmc_part u-boot-env 2>/dev/null)"
+	case "$dev" in /dev/mmcblk[0-9]p[0-9]*|/dev/mmcblk[0-9][0-9]p[0-9]*) ;; *) return 1 ;; esac
+	block="${dev##*/}"
+	size="$(cat "/sys/class/block/$block/size" 2>/dev/null)"
+	[ "$size" = 1024 ] || return 1
+	tmp="$FW_ENV_CONFIG.new.$$"
+	umask 077
+	printf '%s 0x0 0x80000\n' "$dev" > "$tmp" || return 1
+	chmod 0600 "$tmp" || return 1
+	mv -f "$tmp" "$FW_ENV_CONFIG"
+}
+
+read_persisted_slot() {
+	local value
+	ensure_fw_env_config || return 1
+	command -v fw_printenv >/dev/null 2>&1 || return 1
+	value="$(fw_printenv -n "$UBOOT_SLOT_KEY" 2>/dev/null)" || return 1
+	value="$(normalize_slot "$value")"
+	[ -n "$value" ] || return 1
+	printf '%s\n' "$value"
+}
+
+saved_boot_slot() {
+	local slot
+	slot="$(read_persisted_slot 2>/dev/null)" && {
+		printf '%s\n' "$slot"
+		return 0
+	}
+	slot="$(normalize_slot "$(uci -q get c2000max.sim.slot 2>/dev/null)")"
+	printf '%s\n' "${slot:-external2}"
+}
+
+sync_configured_slot() {
+	local slot current
+	slot="$(normalize_slot "$1")"
+	[ -n "$slot" ] || return 1
+	current="$(normalize_slot "$(uci -q get c2000max.sim.slot 2>/dev/null)")"
+	[ "$current" != "$slot" ] || return 0
+	uci -q set "c2000max.sim.slot=$slot" || return 1
+	uci -q commit c2000max || return 1
+	[ "$(normalize_slot "$(uci -q get c2000max.sim.slot 2>/dev/null)")" = "$slot" ]
+}
+
+persist_physical_slot() {
+	local slot current
+	slot="$(normalize_slot "$1")"
+	[ -n "$slot" ] || return 1
+	if ! ensure_fw_env_config; then
+		log "U-Boot 环境分区配置不可用；卡槽 $slot 已切换，但无法写入跨重置记录"
+		return 1
+	fi
+	current="$(read_persisted_slot 2>/dev/null)" || current=
+	[ "$current" != "$slot" ] || return 0
+	if ! command -v fw_setenv >/dev/null 2>&1; then
+		log "U-Boot 环境工具不可用；卡槽 $slot 已切换，但无法写入跨重置记录"
+		return 1
+	fi
+	if ! fw_setenv "$UBOOT_SLOT_KEY" "$slot" >/dev/null 2>&1; then
+		log "U-Boot 环境写入失败；卡槽 $slot 已切换，本次成功状态不会回滚"
+		return 1
+	fi
+	if [ "$(read_persisted_slot 2>/dev/null)" != "$slot" ]; then
+		log "U-Boot 环境读回校验失败；卡槽 $slot 已切换，但跨重置记录无效"
+		return 1
+	fi
+	log "persisted physical SIM slot $slot in U-Boot environment"
 }
 
 gpio_sim_value() {
@@ -573,6 +653,11 @@ apply_slot() {
 	uci -q delete c2000max.sim.last_forced_slot
 	uci -q delete c2000max.sim.last_forced_gpio
 	uci -q commit c2000max
+	# The physical switch has already been verified. A flash-environment write
+	# failure must be visible in logs, but must never roll back a working SIM.
+	if ! persist_physical_slot "$slot"; then
+		SWITCH_MESSAGE="${SWITCH_MESSAGE:+$SWITCH_MESSAGE；}卡槽已切换，但跨重置保存失败；请勿直接执行不保留数据升级"
+	fi
 	if [ "${C2000MAX_SIM_SKIP_REDIAL:-0}" != 1 ] &&
 	   [ -n "$section" ] && [ -x /etc/init.d/qmodem_network ]; then
 		/etc/init.d/qmodem_network redial "$section" >/dev/null 2>&1 &
@@ -681,8 +766,13 @@ reset_modem() {
 command="${1:-apply}"
 case "$command" in
 	boot-restore)
-		slot="$(normalize_slot "$(uci -q get c2000max.sim.slot)")"
-		[ -n "$slot" ] || slot=external2
+		# U-Boot environment survives a sysupgrade performed without preserving
+		# the overlay. Fall back to UCI only for devices not yet carrying it.
+		slot="$(saved_boot_slot)"
+		if ! sync_configured_slot "$slot"; then
+			status_json 0 "保存的 SIM 卡槽无法同步到系统配置"
+			exit 1
+		fi
 		lock -n "$LOCK" || {
 			status_json 0 "开机恢复 SIM 卡槽时锁正忙"
 			exit 1
@@ -712,6 +802,14 @@ case "$command" in
 			status_json 0 "${LAST_ERROR:-开机恢复 SIM 卡槽失败}"
 			exit 1
 		fi
+		;;
+	persist)
+		slot="$(normalize_slot "${2:-$(uci -q get c2000max.sim.slot 2>/dev/null)}")"
+		[ -n "$slot" ] || {
+			echo "SIM 卡槽配置无效，拒绝写入跨重置记录" >&2
+			exit 1
+		}
+		persist_physical_slot "$slot" || exit 1
 		;;
 	apply|switch)
 		slot="${2:-$(uci -q get c2000max.sim.slot)}"
@@ -770,7 +868,7 @@ case "$command" in
 		fi
 		;;
 	*)
-		echo "Usage: $0 {boot-restore|status|switch [internal|external1|external2]|force [external1|external2]|reset}" >&2
+		echo "Usage: $0 {boot-restore|persist [internal|external1|external2]|status|switch [internal|external1|external2]|force [external1|external2]|reset}" >&2
 		exit 2
 		;;
 esac

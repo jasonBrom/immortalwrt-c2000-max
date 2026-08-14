@@ -8,15 +8,19 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=leigod-acc
 PKG_VERSION:=1.3.0.30
-PKG_RELEASE:=3-c2000max1
+PKG_RELEASE:=4
 
 include $(INCLUDE_DIR)/package.mk
+
+# The vendor executable is a packed, sectionless AArch64 ELF.  The generic
+# sstrip pass truncates its opaque trailer, so preserve it byte-for-byte.
+RSTRIP:=:
 
 define Package/$(PKG_NAME)
 	SECTION:=net
 	CATEGORY:=Network
 	TITLE:=Powerful Leigod Game Accelerater
-	DEPENDS:=@aarch64 +libpcap1 +iptables-nft +ipset +kmod-tun +curl
+	DEPENDS:=@aarch64 +libpcap +iptables-nft +ipset +kmod-tun +curl
 	URL:=https://www.leigod.com/
 endef
 

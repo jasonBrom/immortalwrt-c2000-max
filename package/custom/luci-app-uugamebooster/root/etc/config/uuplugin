@@ -1,4 +1,4 @@
 
 config uuplugin 'uuplugin'
 	option enabled '0'
-	option platform 'openwrt-aarch64'
+	option platform 'h3c-nx30pro'

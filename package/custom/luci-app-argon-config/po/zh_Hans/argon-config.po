@@ -135,6 +135,15 @@ msgstr "主题模式"
 msgid "Unsplash"
 msgstr "Unsplash"
 
+msgid "Bing China (Mainland optimized)"
+msgstr "必应中国（大陆优化）"
+
+msgid "Unsplash Access Key"
+msgstr "Unsplash 访问密钥"
+
+msgid "Optional. When empty, Argon uses a built-in curated Unsplash wallpaper pool; when set, it uses the official Unsplash random photo API."
+msgstr "可选。留空时使用 Argon 内置的 Unsplash 精选壁纸池；填写后使用 Unsplash 官方随机图片 API。"
+
 #: applications/luci-app-argon-config/htdocs/luci-static/resources/view/argon-config.js:128
 msgid "Upload background"
 msgstr "上传背景"
@@ -146,10 +155,6 @@ msgstr "上传背景（可用空间：%1024.2mB）"
 #: applications/luci-app-argon-config/htdocs/luci-static/resources/view/argon-config.js:131
 msgid "Upload..."
 msgstr "上传..."
-
-#: applications/luci-app-argon-config/htdocs/luci-static/resources/view/argon-config.js:56
-msgid "Wallhaven"
-msgstr "Wallhaven"
 
 #: applications/luci-app-argon-config/htdocs/luci-static/resources/view/argon-config.js:52
 msgid "Wallpaper source"

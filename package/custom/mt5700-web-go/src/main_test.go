@@ -3,10 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"io"
-	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -29,15 +29,10 @@ func (testBackend) Target() string { return "test-at" }
 
 func testApp(t *testing.T) *webApp {
 	t.Helper()
-	root, err := fs.Sub(embeddedWeb, "web")
-	if err != nil {
-		t.Fatal(err)
-	}
 	return &webApp{
-		config:  serverConfig{Listen: "127.0.0.1:9010", Transport: "serial", Timeout: 4e9},
+		config:  serverConfig{ID: "test", Name: "Test modem", Listen: "127.0.0.1:9010", Transport: "serial", Timeout: 4e9},
 		hub:     newHub(4),
 		backend: testBackend{},
-		web:     http.StripPrefix("/5700/", http.FileServer(http.FS(root))),
 	}
 }
 
@@ -54,6 +49,114 @@ func TestHTTPRoutes(t *testing.T) {
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("GET %s returned %d", path, response.StatusCode)
 		}
+	}
+}
+
+func TestPasswordAuthentication(t *testing.T) {
+	sum := sha256.Sum256([]byte("router-secret"))
+	auth := authConfig{Enabled: true, Username: "admin", PasswordHash: sum[:]}
+
+	unauthorized := httptest.NewRecorder()
+	if auth.require(unauthorized, httptest.NewRequest(http.MethodGet, "/", nil)) {
+		t.Fatal("request without credentials was accepted")
+	}
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d", unauthorized.Code)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.SetBasicAuth("admin", "router-secret")
+	if !auth.require(httptest.NewRecorder(), request) {
+		t.Fatal("valid credentials were rejected")
+	}
+	request.SetBasicAuth("admin", "wrong")
+	if auth.require(httptest.NewRecorder(), request) {
+		t.Fatal("invalid password was accepted")
+	}
+}
+
+func TestInstanceAssetRewrite(t *testing.T) {
+	rewritten := string(rewriteWebAsset("index.html", []byte(
+		`<link href="/5700/app.css"><script src="/scripts/loading.js"></script>`), "/modem/ak68"))
+	for _, expected := range []string{
+		`/modem/ak68/5700/app.css`, `/modem/ak68/scripts/loading.js`,
+	} {
+		if !strings.Contains(rewritten, expected) {
+			t.Fatalf("rewritten asset is missing %q: %s", expected, rewritten)
+		}
+	}
+	shim := string(rewriteWebAsset("scripts/loading.js", []byte("ready();"), "/modem/ak68"))
+	if !strings.Contains(shim, `/modem/ak68`) || !strings.Contains(shim, `RoutedWebSocket`) {
+		t.Fatalf("WebSocket routing shim is missing: %s", shim)
+	}
+}
+
+func TestMultiInstanceRoutes(t *testing.T) {
+	app := testApp(t)
+	app.config.ID = "ak68"
+	app.config.Name = "AK68 聚合模组"
+	app.config.BasePath = "/modem/ak68"
+	multi := &multiWebApp{
+		instances: []*webApp{app},
+		byPath:    map[string]*webApp{"/modem/ak68": app},
+	}
+	server := httptest.NewServer(multi)
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "/modem/ak68/5700/") {
+		t.Fatalf("dashboard response = %d, %s", response.StatusCode, body)
+	}
+
+	response, err = http.Get(server.URL + "/modem/ak68/5700/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "/modem/ak68/5700/umi.31851818.css") {
+		t.Fatalf("instance page response = %d", response.StatusCode)
+	}
+}
+
+func TestInstancePathValidation(t *testing.T) {
+	for _, value := range []string{"internal", "ak68-2", "modem_3"} {
+		if !validInstancePath(value) {
+			t.Fatalf("valid instance path %q was rejected", value)
+		}
+	}
+	for _, value := range []string{"", "AK68", "../modem", "-modem", strings.Repeat("a", 33)} {
+		if validInstancePath(value) {
+			t.Fatalf("invalid instance path %q was accepted", value)
+		}
+	}
+}
+
+func TestDiscoveryMatchesExplicitPortToModem(t *testing.T) {
+	dir := t.TempDir()
+	uci := filepath.Join(dir, "uci")
+	script := `#!/bin/sh
+cat <<'EOF'
+qmodem.first.name='Internal MT5700'
+qmodem.first.model='MT5700M-CN'
+qmodem.first.at_port='/dev/ttyUSB1'
+qmodem.second.name='AK68 MT5700'
+qmodem.second.model='MT5700M-CN'
+qmodem.second.at_port='/dev/ttyUSB9'
+EOF
+`
+	if err := os.WriteFile(uci, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	discovery := discoverModems("auto", "/dev/ttyUSB9")
+	if discovery.SelectedSection != "second" || discovery.SelectedPort != "/dev/ttyUSB9" || discovery.SelectedModel != "MT5700M-CN" {
+		t.Fatalf("explicit port selected wrong modem: %+v", discovery)
 	}
 }
 
@@ -223,6 +326,17 @@ func TestQModemBackendCloseStopsActiveHelper(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("active helper did not return after close")
+	}
+}
+
+func TestQModemQueuedBackendInitialDiscoveryTarget(t *testing.T) {
+	backend := newQModemQueuedBackend("auto", "auto", "/bin/false", time.Second, time.Second)
+	if got := backend.Target(); !strings.Contains(got, "等待发现模组") {
+		t.Fatalf("unexpected undiscovered target: %q", got)
+	}
+	backend.setDiscoveredPort(" /dev/ttyUSB1 ")
+	if got := backend.Target(); got != "/dev/ttyUSB1（QModem 已发现，等待 AT 命令）" {
+		t.Fatalf("connected modem is still reported as undiscovered: %q", got)
 	}
 }
 

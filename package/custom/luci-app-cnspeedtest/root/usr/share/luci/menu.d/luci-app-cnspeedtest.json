@@ -4,7 +4,7 @@
 		"order": 60,
 		"action": {
 			"type": "view",
-			"path": "cnspeedtest/status_v8"
+			"path": "cnspeedtest/status_v9"
 		},
 		"depends": {
 			"acl": [ "luci-app-cnspeedtest" ]

@@ -4,15 +4,15 @@ set -euo pipefail
 
 BOARD_ROOT="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 TOP="$(CDPATH= cd "$BOARD_ROOT/../../.." && pwd)"
-ADB_ROOT="$TOP/feeds/packages/net/adblock-fast"
+ADB_ROOT="$TOP/package/custom/adblock-fast"
 NB_APP="$TOP/package/custom/luci-app-netbird"
-NB_PKG="$TOP/feeds/packages/net/netbird"
+NB_PKG="$TOP/package/custom/netbird"
 
 if [ ! -d "$ADB_ROOT" ]; then
-	ADB_ROOT="$TOP/feed-overlays/packages/net/adblock-fast"
+	ADB_ROOT="$TOP/feeds/packages/net/adblock-fast"
 fi
 if [ ! -d "$NB_PKG" ]; then
-	NB_PKG="$TOP/feed-overlays/packages/net/netbird"
+	NB_PKG="$TOP/feeds/packages/net/netbird"
 fi
 
 fail()
@@ -87,8 +87,8 @@ grep -Fq 'procd_set_param respawn 3600 5 5' "$NB_INIT" ||
 		fail "NetBird timeout helper took ${elapsed}s for a one-second limit"
 )
 
-grep -Fq 'PKG_VERSION:=2.35.21' "$BOARD_ROOT/Makefile" ||
-	fail "board package version is not V35.21"
+grep -Fq 'PKG_VERSION:=2.35.35' "$BOARD_ROOT/Makefile" ||
+	fail "board package version is not V35.35"
 grep -Fq 'PKG_RELEASE:=14' "$NB_APP/Makefile" ||
 	fail "luci-app-netbird release was not bumped"
 grep -Fq 'PKG_RELEASE:=2' "$NB_PKG/Makefile" ||

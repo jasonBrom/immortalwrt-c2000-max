@@ -1,8 +1,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mt5700-web-go
-PKG_VERSION:=1.1.0
-PKG_RELEASE:=1
+PKG_VERSION:=1.2.1
+PKG_RELEASE:=2
 PKG_LICENSE:=Proprietary
 PKG_MAINTAINER:=C2000MAX firmware project
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
@@ -26,9 +26,9 @@ endef
 
 define Package/mt5700-web-go/description
  A self-contained Go HTTP/WebSocket service for the supplied MT5700 control
- panel. It discovers the modem and AT port through QModem, supports manual
- serial or network AT selection, serializes local AT through QModem, and
- embeds all Web assets in one binary.
+ panel. It supports multiple path-routed modem instances, manual serial or
+ network AT selection, serializes local AT through QModem, offers optional
+ password protection, and embeds all Web assets in one binary.
 endef
 
 define Package/mt5700-web-go/conffiles

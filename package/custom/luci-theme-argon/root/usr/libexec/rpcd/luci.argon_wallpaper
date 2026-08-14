@@ -7,62 +7,103 @@
 # the script will be excuted when `argon.@global[0].bing_background == '1'`
 # defaults to 'bing' to be compatible with old config
 WEB_PIC_SRC="$(uci -q get argon.@global[0].online_wallpaper || echo 'bing')"
+case "$WEB_PIC_SRC" in
+	bing|bing_cn|unsplash|none) ;;
+	unsplash_*)
+		case "$WEB_PIC_SRC" in
+			*[!A-Za-z0-9_-]*) WEB_PIC_SRC='bing' ;;
+		esac
+		;;
+	# Migrate removed Wallhaven selections to the keyless mainland endpoint.
+	wallhaven|wallhaven_*) WEB_PIC_SRC='bing_cn' ;;
+	*) WEB_PIC_SRC='bing' ;;
+esac
 
-# For now, the next two variables are used for wallhaven.cc with specified Tag ID
-# API_KEY if user has an account with wallhaven and want to use their apikey to allow for more images
-# EXACT_RESO is used for exact resolution by default, if not use 'atleast' instead of 'resolutions'
-API_KEY="$(uci -q get argon.@global[0].use_api_key)"
-EXACT_RESO="$(uci -q get argon.@global[0].use_exact_resolution || echo '1')"
+# Unsplash Source was retired in 2024. Use the official API when an access key
+# is configured and a small curated images.unsplash.com pool otherwise.
+UNSPLASH_KEY="$(uci -q get argon.@global[0].unsplash_access_key)"
 
 CACHE="/var/run/argon_${WEB_PIC_SRC}.url"
 WRLOCK="/var/lock/argon_${WEB_PIC_SRC}.lock"
 
+valid_key() {
+	case "$1" in
+		''|*[!A-Za-z0-9_-]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+unsplash_fallback() {
+	# These are stable Unsplash CDN photo IDs. Rotate every 12 hours so the
+	# login page remains useful even without a per-installation API key.
+	set -- \
+		photo-1500530855697-b586d89ba3ee \
+		photo-1470770841072-f978cf4d019e \
+		photo-1501785888041-af3ef285b470 \
+		photo-1441974231531-c6227db76b6e \
+		photo-1464822759023-fed622ff2c3b \
+		photo-1439853949127-fa647821eba0 \
+		photo-1497436072909-60f360e1d4b1 \
+		photo-1500534314209-a25ddb2bd429
+	local wanted="$(( ($(date '+%s') / 43200) % $# + 1 ))"
+	local index=1
+	for photo_id in "$@"; do
+		if [ "$index" -eq "$wanted" ]; then
+			echo "https://images.unsplash.com/${photo_id}?auto=format&fit=crop&w=1920&h=1080&q=85"
+			return 0
+		fi
+		index="$((index + 1))"
+	done
+}
+
+unsplash_api() {
+	local collection_id="$1"
+	local query="orientation=landscape&query=wallpaper"
+	[ -z "$collection_id" ] || query="orientation=landscape&collections=${collection_id}"
+	valid_key "$UNSPLASH_KEY" || return 1
+	wget -T10 -qO- \
+		"https://api.unsplash.com/photos/random?client_id=${UNSPLASH_KEY}&${query}" |
+		jsonfilter -qe '@.urls.full'
+}
+
+bing_pic() {
+	local host="$1" market="$2" picpath
+	picpath="$(wget -T5 -qO- \
+		"https://${host}/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=${market}" |
+		jsonfilter -qe '@.images[0].url' |
+		sed 's/1920x1080/UHD/g')"
+	[ -n "$picpath" ] || return 1
+	printf 'https://%s%s\n' "$host" "$picpath"
+}
+
+valid_pic_url() {
+	case "$1" in
+		https://cn.bing.com/*|https://www.bing.com/*|https://images.unsplash.com/*)
+			return 0
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
 fetch_pic_url() {
 	case "$WEB_PIC_SRC" in
 	bing)
-		local picpath="$(wget -T3 -qO- \
-			"https://www.bing.com/HPImageArchive.aspx?format=js&n=1" |
-			jsonfilter -qe '@.images[0].url' |
-			sed 's/1920x1080/UHD/g')"
-		[ -n "${picpath}" ] && echo "//www.bing.com${picpath}"
+		bing_pic www.bing.com en-US
+		;;
+	bing_cn)
+		# cn.bing.com is served inside mainland China and needs no API key.
+		# A global Bing request is the immediate fallback; the cache remains the
+		# final fallback in try_update().
+		bing_pic cn.bing.com zh-CN || bing_pic www.bing.com zh-CN
 		;;
 	unsplash)
-		if [ -z "$API_KEY" ]; then
-			local pic_id="$(wget -T3 --spider \
-				"https://source.unsplash.com/1920x1080/daily?wallpapers" 2>&1 |
-				grep -Eo "photo-\w+-\w+" | head -n1)"
-			[ -n "${pic_id}" ] && echo "https://images.unsplash.com/${pic_id}?fm=jpg&fit=crop&w=1920&h=1080"
-		else
-			wget -T3 -qO- "https://api.unsplash.com/photos/random?client_id=${API_KEY}" |
-				jsonfilter -qe '@["urls"]["regular"]'
-		fi
+		unsplash_api || unsplash_fallback
 		;;
 	unsplash_*)
 		local collection_id="${WEB_PIC_SRC#unsplash_}"
-		if [ -z "$API_KEY" ]; then
-			local pic_id="$(wget -T3 --spider \
-				"https://source.unsplash.com/collection/${collection_id}/1920x1080" 2>&1 |
-				grep -Eo "photo-\w+-\w+" | head -n1)"
-			[ -n "${pic_id}" ] && echo "https://images.unsplash.com/${pic_id}?fm=jpg&fit=crop&w=1920&h=1080"
-		else
-			wget -T3 -qO- \
-				"https://api.unsplash.com/photos/random?client_id=${API_KEY}&collections=${collection_id}" |
-				jsonfilter -qe '@["urls"]["regular"]'
-		fi
-		;;
-	wallhaven)
-		wget -T3 -qO- \
-			"https://wallhaven.cc/api/v1/search?resolutions=1920x1080&sorting=random" |
-			jsonfilter -qe "@.data[0].path"
-		;;
-	wallhaven_*)
-		local tag_id="${WEB_PIC_SRC#wallhaven_}"
-		local use_reso="resolutions"
-		[ "$EXACT_RESO" -eq "1" ] || use_reso="atleast"
-		[ -z "$API_KEY" ] || API_KEY="apikey=$API_KEY&"
-		wget -T3 -qO- \
-			"https://wallhaven.cc/api/v1/search?${API_KEY}q=id%3A${tag_id}&${use_reso}=1920x1080&sorting=random" |
-			jsonfilter -qe '@.data[0].path'
+		unsplash_api "$collection_id" || unsplash_fallback
 		;;
 	esac
 }
@@ -73,17 +114,7 @@ try_update() {
 
 	if flock -n 200 >"/dev/null" 2>&1; then
 		local picurl="$(fetch_pic_url)"
-		if [ -n "$picurl" ]; then
-
-			# below is quirk fix for all browsers
-			# for some weird reason on first load, wallhaven images needs to be
-			# download or browsed first before it can be shown as a background image
-			# if not, browser only displays a blank image
-			# NOTE: only happens to Wallhaven.cc source images
-			if [[ "$WEB_PIC_SRC" == wallhave* ]] ; then
-				wget -T3 -qO- "${picurl}" > /dev/null
-			fi
-
+		if valid_pic_url "$picurl"; then
 			echo "$picurl" | tee "$CACHE"
 		else
 			if [ -s "$CACHE" ]; then

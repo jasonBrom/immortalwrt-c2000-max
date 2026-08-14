@@ -4,22 +4,28 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/subtle"
 	"embed"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"html/template"
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -29,7 +35,7 @@ import (
 	"time"
 )
 
-const version = "1.1.0"
+const version = "1.2.1"
 
 //go:embed web
 var embeddedWeb embed.FS
@@ -59,6 +65,102 @@ func trimUCIValue(value string) string {
 		value = value[1 : len(value)-1]
 	}
 	return strings.ReplaceAll(value, "'\\''", "'")
+}
+
+type uciSection struct {
+	Name    string
+	Type    string
+	Options map[string]string
+}
+
+func readUCISections(packageName string) ([]uciSection, error) {
+	if packageName == "" {
+		return nil, errors.New("UCI package is empty")
+	}
+	output, err := exec.Command("uci", "-q", "show", packageName).Output()
+	if err != nil {
+		return nil, err
+	}
+	sections := make(map[string]*uciSection)
+	order := make([]string, 0)
+	prefix := packageName + "."
+	for _, line := range strings.Split(string(output), "\n") {
+		left, value, ok := strings.Cut(line, "=")
+		if !ok || !strings.HasPrefix(left, prefix) {
+			continue
+		}
+		remainder := strings.TrimPrefix(left, prefix)
+		parts := strings.SplitN(remainder, ".", 2)
+		name := parts[0]
+		if name == "" {
+			continue
+		}
+		section, exists := sections[name]
+		if !exists {
+			section = &uciSection{Name: name, Options: make(map[string]string)}
+			sections[name] = section
+			order = append(order, name)
+		}
+		if len(parts) == 1 {
+			section.Type = trimUCIValue(value)
+		} else {
+			section.Options[parts[1]] = trimUCIValue(value)
+		}
+	}
+	result := make([]uciSection, 0, len(order))
+	for _, name := range order {
+		result = append(result, *sections[name])
+	}
+	return result, nil
+}
+
+func optionBool(options map[string]string, name string, fallback bool) bool {
+	value, exists := options[name]
+	if !exists || value == "" {
+		return fallback
+	}
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func optionInt(options map[string]string, name string, fallback int) int {
+	value, err := strconv.Atoi(options[name])
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func optionDuration(options map[string]string, name string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(options[name])
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func validInstancePath(value string) bool {
+	if len(value) < 1 || len(value) > 32 {
+		return false
+	}
+	for index, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') ||
+			(index > 0 && (char == '-' || char == '_')) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func mt5700Model(model, manufacturer string) bool {
@@ -143,6 +245,14 @@ func discoverModems(requestedSection, requestedPort string) discoveryInfo {
 	sort.Strings(result.Ports)
 
 	selectedSection := requestedSection
+	if requestedPort != "" && requestedPort != "auto" {
+		for _, modem := range result.Modems {
+			if modem.ATPort == requestedPort {
+				selectedSection = modem.Section
+				break
+			}
+		}
+	}
 	if selectedSection == "" || selectedSection == "auto" {
 		if len(result.Modems) > 0 {
 			selectedSection = result.Modems[0].Section
@@ -426,6 +536,16 @@ func (b *qmodemQueuedBackend) Target() string {
 	return b.target
 }
 
+func (b *qmodemQueuedBackend) setDiscoveredPort(port string) {
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return
+	}
+	b.stateMu.Lock()
+	b.target = port + "（QModem 已发现，等待 AT 命令）"
+	b.stateMu.Unlock()
+}
+
 func (b *qmodemQueuedBackend) Execute(ctx context.Context, command string) (string, error) {
 	command = normalizeATCommand(command)
 	if command == "" {
@@ -664,6 +784,9 @@ func (h *wsHub) broadcastRaw(data string) {
 }
 
 type serverConfig struct {
+	ID            string
+	Name          string
+	BasePath      string
 	Listen        string
 	Transport     string
 	Section       string
@@ -675,6 +798,7 @@ type serverConfig struct {
 	LongTimeout   time.Duration
 	QueueTimeout  time.Duration
 	WSIdleTimeout time.Duration
+	MaxClients    int
 	LogFile       string
 	Model         string
 	Manufacturer  string
@@ -684,7 +808,58 @@ type webApp struct {
 	config  serverConfig
 	hub     *wsHub
 	backend atBackend
-	web     http.Handler
+}
+
+type authConfig struct {
+	Enabled      bool
+	Username     string
+	PasswordHash []byte
+}
+
+type multiWebApp struct {
+	listen    string
+	auth      authConfig
+	instances []*webApp
+	byPath    map[string]*webApp
+}
+
+func parsePasswordHash(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != sha256.Size {
+		return nil, errors.New("password hash must be a 64-character SHA-256 hex digest")
+	}
+	return decoded, nil
+}
+
+func (a authConfig) verify(username, password string) bool {
+	if !a.Enabled {
+		return true
+	}
+	if len(a.PasswordHash) != sha256.Size {
+		return false
+	}
+	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(a.Username)) == 1
+	sum := sha256.Sum256([]byte(password))
+	passwordOK := subtle.ConstantTimeCompare(sum[:], a.PasswordHash) == 1
+	return userOK && passwordOK
+}
+
+func (a authConfig) require(w http.ResponseWriter, r *http.Request) bool {
+	if !a.Enabled {
+		return true
+	}
+	username, password, ok := r.BasicAuth()
+	if ok && a.verify(username, password) {
+		return true
+	}
+	w.Header().Set("WWW-Authenticate", `Basic realm="MT5700 Control Panel", charset="UTF-8"`)
+	w.Header().Set("Cache-Control", "no-store")
+	http.Error(w, "需要输入 MT5700 控制面板用户名和密码", http.StatusUnauthorized)
+	return false
 }
 
 func websocketRequest(r *http.Request) bool {
@@ -886,7 +1061,8 @@ func (a *webApp) wsInfo(w http.ResponseWriter, r *http.Request) {
 		"data": map[string]any{
 			"host": host, "port": port, "allow_wan": 0,
 			"require_auth": false,
-			"ws_url":       fmt.Sprintf("ws://%s:%d", displayHost, port),
+			"ws_url":       fmt.Sprintf("ws://%s:%d%s/ws", displayHost, port, a.config.BasePath),
+			"instance":     a.config.ID,
 			"timestamp":    time.Now().Unix(),
 		},
 	}
@@ -902,7 +1078,7 @@ func (a *webApp) configJSON(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"at":     map[string]any{"host": host, "port": listenPort(a.config.Listen)},
-		"status": "true", "require_auth": false,
+		"status": "true", "require_auth": false, "instance": a.config.ID,
 	})
 }
 
@@ -911,11 +1087,97 @@ func (a *webApp) health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok": true, "service": "mt5700-web-go", "version": version,
+		"id": a.config.ID, "name": a.config.Name, "path": a.config.BasePath,
 		"transport": a.config.Transport, "target": a.backend.Target(),
 		"model": a.config.Model, "manufacturer": a.config.Manufacturer,
 		"supported":         mt5700Model(a.config.Model, a.config.Manufacturer),
 		"websocket_clients": a.hub.count(),
 	})
+}
+
+func browserRouteShim(basePath string) string {
+	encoded, _ := json.Marshal(basePath)
+	return `(function(base){
+var NativeWebSocket=window.WebSocket;
+function RoutedWebSocket(url,protocols){
+ try {
+  var parsed=new URL(url,window.location.href);
+  if(parsed.host===window.location.host&&(parsed.pathname==="/"||parsed.pathname==="")){
+   parsed.pathname=base+"/ws";
+   url=parsed.toString();
+  }
+ } catch(e) {}
+ return arguments.length>1?new NativeWebSocket(url,protocols):new NativeWebSocket(url);
+}
+RoutedWebSocket.prototype=NativeWebSocket.prototype;
+["CONNECTING","OPEN","CLOSING","CLOSED"].forEach(function(name){
+ Object.defineProperty(RoutedWebSocket,name,{value:NativeWebSocket[name]});
+});
+window.WebSocket=RoutedWebSocket;
+})(` + string(encoded) + `);
+`
+}
+
+func rewriteWebAsset(name string, data []byte, basePath string) []byte {
+	if basePath == "" {
+		return data
+	}
+	extension := strings.ToLower(path.Ext(name))
+	if extension != ".html" && extension != ".js" && extension != ".css" && extension != ".json" && extension != ".svg" {
+		return data
+	}
+	content := string(data)
+	content = strings.ReplaceAll(content, "/5700/", basePath+"/5700/")
+	content = strings.ReplaceAll(content, "/scripts/loading.js", basePath+"/scripts/loading.js")
+	content = strings.ReplaceAll(content, "/cgi-bin/at-ws-info", basePath+"/cgi-bin/at-ws-info")
+	content = strings.ReplaceAll(content, "/cgi-bin/at-log-clear", basePath+"/cgi-bin/at-log-clear")
+	if name == "scripts/loading.js" {
+		content = browserRouteShim(basePath) + content
+	}
+	return []byte(content)
+}
+
+func contentTypeFor(name string) string {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".js":
+		return "application/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".json":
+		return "application/json; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	}
+	return mime.TypeByExtension(path.Ext(name))
+}
+
+func (a *webApp) serveWebAsset(w http.ResponseWriter, r *http.Request, name string) {
+	name = strings.TrimPrefix(path.Clean("/"+name), "/")
+	if name == "." || name == "" || strings.HasSuffix(r.URL.Path, "/") {
+		if name == "." || name == "" {
+			name = "index.html"
+		} else {
+			name += "/index.html"
+		}
+	}
+	data, err := fs.ReadFile(embeddedWeb, "web/"+name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	data = rewriteWebAsset(name, data, a.config.BasePath)
+	if contentType := contentTypeFor(name); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	if strings.HasSuffix(name, ".html") {
+		w.Header().Set("Cache-Control", "no-cache")
+	} else {
+		w.Header().Set("Cache-Control", "public, max-age=604800")
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	_, _ = w.Write(data)
 }
 
 func (a *webApp) clearLog(w http.ResponseWriter, r *http.Request) {
@@ -935,7 +1197,11 @@ func (a *webApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
 	if websocketRequest(r) {
-		a.upgradeWebSocket(w, r)
+		if r.URL.Path == "/" || r.URL.Path == "/ws" {
+			a.upgradeWebSocket(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
 		return
 	}
 	switch r.URL.Path {
@@ -955,23 +1221,105 @@ func (a *webApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.health(w, r)
 		return
 	case "/scripts/loading.js":
-		data, err := fs.ReadFile(embeddedWeb, "web/scripts/loading.js")
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		w.Header().Set("Cache-Control", "public, max-age=86400")
-		_, _ = w.Write(data)
+		a.serveWebAsset(w, r, "scripts/loading.js")
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/5700/") {
-		if strings.HasSuffix(r.URL.Path, "/") || strings.HasSuffix(r.URL.Path, "/index.html") {
-			w.Header().Set("Cache-Control", "no-cache")
-		} else {
-			w.Header().Set("Cache-Control", "public, max-age=604800")
+		a.serveWebAsset(w, r, strings.TrimPrefix(r.URL.Path, "/5700/"))
+		return
+	}
+	http.NotFound(w, r)
+}
+
+var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MT5700 模组管理地址</title><style>
+:root{color-scheme:light dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;background:#f3f5f7;color:#1f2937}.wrap{max-width:980px;margin:0 auto;padding:32px 18px}.head{margin-bottom:22px}.head h1{margin:0 0 8px;font-size:28px}.head p{margin:0;color:#64748b}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}.card{padding:20px;border:1px solid #dbe3ea;border-radius:14px;background:#fff;box-shadow:0 8px 28px rgba(15,23,42,.06)}.card h2{margin:0 0 8px;font-size:18px}.meta{margin:6px 0;color:#64748b;font-size:14px;overflow-wrap:anywhere}.open{display:inline-block;margin-top:12px;padding:9px 14px;border-radius:8px;background:#168ab0;color:#fff;text-decoration:none;font-weight:700}.empty{padding:24px;border:1px dashed #94a3b8;border-radius:12px}.foot{margin-top:20px;color:#64748b;font-size:13px}@media(prefers-color-scheme:dark){body{background:#0f172a;color:#e5e7eb}.card{background:#111827;border-color:#334155}.head p,.meta,.foot{color:#94a3b8}}
+</style></head><body><main class="wrap"><div class="head"><h1>MT5700 模组控制面板</h1><p>请选择要管理的模组；每个路径对应独立的串口或网络 AT 后端。</p></div>
+{{if .Instances}}<div class="grid">{{range .Instances}}<section class="card"><h2>{{.Name}}</h2><div class="meta">实例：{{.ID}}</div><div class="meta">连接：{{.Transport}} · {{.Target}}</div><div class="meta">地址：{{.URL}}</div><a class="open" href="{{.Path}}/5700/">打开控制面板</a></section>{{end}}</div>{{else}}<div class="empty">当前没有启用的模组实例，请在 LuCI 的“MT5700 控制面板”中添加并启用。</div>{{end}}
+<div class="foot">MT5700 Web {{.Version}}</div></main></body></html>`))
+
+type dashboardInstance struct {
+	ID        string
+	Name      string
+	Transport string
+	Target    string
+	Path      string
+	URL       string
+}
+
+func requestBaseURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
+}
+
+func (m *multiWebApp) dashboard(w http.ResponseWriter, r *http.Request) {
+	items := make([]dashboardInstance, 0, len(m.instances))
+	baseURL := requestBaseURL(r)
+	for _, app := range m.instances {
+		items = append(items, dashboardInstance{
+			ID: app.config.ID, Name: app.config.Name,
+			Transport: app.config.Transport, Target: app.backend.Target(),
+			Path: app.config.BasePath, URL: baseURL + app.config.BasePath + "/5700/",
+		})
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = dashboardTemplate.Execute(w, map[string]any{"Instances": items, "Version": version})
+}
+
+func (m *multiWebApp) health(w http.ResponseWriter) {
+	instances := make([]map[string]any, 0, len(m.instances))
+	for _, app := range m.instances {
+		instances = append(instances, map[string]any{
+			"id": app.config.ID, "name": app.config.Name, "path": app.config.BasePath,
+			"transport": app.config.Transport, "target": app.backend.Target(),
+		})
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok": true, "service": "mt5700-web-go", "version": version, "instances": instances,
+	})
+}
+
+func (m *multiWebApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "same-origin")
+	if !m.auth.require(w, r) {
+		return
+	}
+	if r.URL.Path == "/healthz" {
+		m.health(w)
+		return
+	}
+	if websocketRequest(r) && r.URL.Path == "/" && len(m.instances) > 0 {
+		request := r.Clone(r.Context())
+		request.URL.Path = "/"
+		m.instances[0].ServeHTTP(w, request)
+		return
+	}
+	if r.URL.Path == "/" {
+		m.dashboard(w, r)
+		return
+	}
+	if (r.URL.Path == "/5700" || strings.HasPrefix(r.URL.Path, "/5700/")) && len(m.instances) > 0 {
+		http.Redirect(w, r, m.instances[0].config.BasePath+r.URL.Path, http.StatusTemporaryRedirect)
+		return
+	}
+	for basePath, app := range m.byPath {
+		if r.URL.Path != basePath && !strings.HasPrefix(r.URL.Path, basePath+"/") {
+			continue
 		}
-		a.web.ServeHTTP(w, r)
+		request := r.Clone(r.Context())
+		request.URL.Path = strings.TrimPrefix(r.URL.Path, basePath)
+		if request.URL.Path == "" {
+			request.URL.Path = "/"
+		}
+		app.ServeHTTP(w, request)
 		return
 	}
 	http.NotFound(w, r)
@@ -1055,6 +1403,111 @@ func setupLogger(path string, maxSize int64, backups int) func() {
 	return func() { _ = file.Close() }
 }
 
+func loadInstanceConfigs(packageName string, defaults serverConfig) ([]serverConfig, bool, error) {
+	sections, err := readUCISections(packageName)
+	if err != nil {
+		return nil, false, err
+	}
+	configs := make([]serverConfig, 0)
+	found := false
+	paths := make(map[string]struct{})
+	for _, section := range sections {
+		if section.Type != "modem" {
+			continue
+		}
+		found = true
+		if !optionBool(section.Options, "enabled", true) {
+			continue
+		}
+		instancePath := strings.ToLower(strings.TrimSpace(section.Options["path"]))
+		if instancePath == "" {
+			instancePath = strings.ToLower(section.Name)
+		}
+		if !validInstancePath(instancePath) {
+			log.Printf("忽略 MT5700 实例 %q：路径 %q 无效", section.Name, instancePath)
+			continue
+		}
+		if _, duplicate := paths[instancePath]; duplicate {
+			log.Printf("忽略 MT5700 实例 %q：路径 %q 重复", section.Name, instancePath)
+			continue
+		}
+		paths[instancePath] = struct{}{}
+		config := defaults
+		config.ID = section.Name
+		config.Name = strings.TrimSpace(section.Options["name"])
+		if config.Name == "" {
+			config.Name = section.Name
+		}
+		config.BasePath = "/modem/" + instancePath
+		config.Transport = strings.ToLower(strings.TrimSpace(section.Options["transport"]))
+		if config.Transport == "" {
+			config.Transport = "serial"
+		}
+		if config.Transport != "serial" && config.Transport != "network" {
+			log.Printf("忽略 MT5700 实例 %q：AT 类型 %q 无效", section.Name, config.Transport)
+			continue
+		}
+		config.Section = section.Options["modem_section"]
+		if config.Section == "" {
+			config.Section = "auto"
+		}
+		config.SerialPort = section.Options["at_port"]
+		if config.SerialPort == "" {
+			config.SerialPort = "auto"
+		}
+		config.Baud = optionInt(section.Options, "baudrate", defaults.Baud)
+		config.NetworkHost = strings.TrimSpace(section.Options["network_host"])
+		if config.NetworkHost == "" {
+			config.NetworkHost = defaults.NetworkHost
+		}
+		config.NetworkPort = optionInt(section.Options, "network_port", defaults.NetworkPort)
+		if config.NetworkPort < 1 || config.NetworkPort > 65535 {
+			log.Printf("忽略 MT5700 实例 %q：网络 AT 端口 %d 无效", section.Name, config.NetworkPort)
+			continue
+		}
+		config.Timeout = optionDuration(section.Options, "command_timeout", defaults.Timeout)
+		config.LongTimeout = optionDuration(section.Options, "long_command_timeout", defaults.LongTimeout)
+		if config.LongTimeout < config.Timeout {
+			config.LongTimeout = config.Timeout
+		}
+		config.QueueTimeout = optionDuration(section.Options, "queue_timeout", defaults.QueueTimeout)
+		config.WSIdleTimeout = optionDuration(section.Options, "websocket_idle_timeout", defaults.WSIdleTimeout)
+		config.MaxClients = optionInt(section.Options, "max_clients", defaults.MaxClients)
+		if config.MaxClients < 1 {
+			config.MaxClients = defaults.MaxClients
+		}
+		config.Model = section.Options["model"]
+		config.Manufacturer = section.Options["manufacturer"]
+		configs = append(configs, config)
+	}
+	return configs, found, nil
+}
+
+func createWebApp(config serverConfig, qmodemHelper string) *webApp {
+	discovery := discoverModems(config.Section, config.SerialPort)
+	if config.Model == "" {
+		config.Model = discovery.SelectedModel
+	}
+	if config.Manufacturer == "" {
+		for _, modem := range discovery.Modems {
+			if modem.Section == discovery.SelectedSection {
+				config.Manufacturer = modem.Manufacturer
+				break
+			}
+		}
+	}
+	hub := newHub(config.MaxClients)
+	var backend atBackend
+	if config.Transport == "network" {
+		backend = newNetworkBackend(config.NetworkHost, config.NetworkPort, config.Timeout, config.LongTimeout, hub.broadcastRaw)
+	} else {
+		queued := newQModemQueuedBackend(config.Section, config.SerialPort, qmodemHelper, config.Timeout, config.LongTimeout)
+		queued.setDiscoveredPort(discovery.SelectedPort)
+		backend = queued
+	}
+	return &webApp{config: config, hub: hub, backend: backend}
+}
+
 func main() {
 	listen := flag.String("listen", "0.0.0.0:9010", "HTTP 与 WebSocket 监听地址")
 	transport := flag.String("transport", "serial", "AT 连接类型：serial 或 network")
@@ -1072,6 +1525,10 @@ func main() {
 	logMaxBytes := flag.Int64("log-max-bytes", 2*1024*1024, "单个日志文件最大字节数")
 	logBackups := flag.Int("log-backups", 3, "轮转日志保留份数")
 	maxClients := flag.Int("max-clients", 8, "最大 WebSocket 客户端数")
+	uciPackage := flag.String("uci-package", "mt5700-web", "多模组实例 UCI 配置包；留空使用单实例参数")
+	authEnabled := flag.Bool("auth-enabled", false, "启用控制面板 HTTP Basic 密码认证")
+	authUsername := flag.String("auth-username", "admin", "控制面板认证用户名")
+	authPasswordHash := flag.String("auth-password-hash", "", "控制面板密码 SHA-256 摘要")
 	discover := flag.Bool("discover", false, "输出 QModem 与串口发现结果")
 	showVersion := flag.Bool("version", false, "输出版本")
 	flag.Parse()
@@ -1113,38 +1570,48 @@ func main() {
 		log.Fatalf("不支持的 AT 连接类型：%s", *transport)
 	}
 
-	webRoot, err := fs.Sub(embeddedWeb, "web")
-	if err != nil {
-		log.Fatal(err)
-	}
-	hub := newHub(*maxClients)
-	var backend atBackend
-	if *transport == "network" {
-		backend = newNetworkBackend(*networkHost, *networkPort, *timeout, *longTimeout, hub.broadcastRaw)
-	} else {
-		backend = newQModemQueuedBackend(*section, *serialPort, *qmodemHelper, *timeout, *longTimeout)
-	}
-	defer backend.Close()
-	config := serverConfig{
+	defaults := serverConfig{
+		ID: "internal", Name: "内置 MT5700", BasePath: "/modem/internal",
 		Listen: *listen, Transport: *transport, Section: *section,
 		SerialPort: *serialPort, Baud: *baud,
 		NetworkHost: *networkHost, NetworkPort: *networkPort,
 		Timeout: *timeout, LongTimeout: *longTimeout, QueueTimeout: *queueTimeout,
-		WSIdleTimeout: *wsIdleTimeout, LogFile: *logFile,
-		Model: discovery.SelectedModel,
+		WSIdleTimeout: *wsIdleTimeout, MaxClients: *maxClients, LogFile: *logFile,
 	}
-	for _, modem := range discovery.Modems {
-		if modem.Section == discovery.SelectedSection {
-			config.Manufacturer = modem.Manufacturer
-			break
+	configs := []serverConfig{defaults}
+	if *uciPackage != "" {
+		loaded, found, err := loadInstanceConfigs(*uciPackage, defaults)
+		if err != nil {
+			log.Printf("读取 %s 多模组配置失败，使用兼容单实例：%v", *uciPackage, err)
+		} else if found {
+			configs = loaded
 		}
 	}
-	app := &webApp{
-		config: config, hub: hub, backend: backend,
-		web: http.StripPrefix("/5700/", http.FileServer(http.FS(webRoot))),
+	passwordHash, err := parsePasswordHash(*authPasswordHash)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *authEnabled && len(passwordHash) != sha256.Size {
+		log.Fatal("已启用控制面板密码，但没有有效的 SHA-256 密码摘要")
+	}
+	username := strings.TrimSpace(*authUsername)
+	if username == "" {
+		username = "admin"
+	}
+	multi := &multiWebApp{
+		listen:    *listen,
+		auth:      authConfig{Enabled: *authEnabled, Username: username, PasswordHash: passwordHash},
+		instances: make([]*webApp, 0, len(configs)),
+		byPath:    make(map[string]*webApp),
+	}
+	for _, config := range configs {
+		app := createWebApp(config, *qmodemHelper)
+		multi.instances = append(multi.instances, app)
+		multi.byPath[config.BasePath] = app
+		defer app.backend.Close()
 	}
 	server := &http.Server{
-		Addr: *listen, Handler: app,
+		Addr: *listen, Handler: multi,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       90 * time.Second,
 		MaxHeaderBytes:    32 * 1024,
@@ -1158,13 +1625,14 @@ func main() {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	transportLabel := *transport
-	if *transport == "serial" {
-		transportLabel = "QModem 串行队列"
-	}
-	log.Printf("MT5700 Web 控制面板 %s 已监听 %s，AT=%s", version, *listen, transportLabel)
-	if config.Model != "" && !mt5700Model(config.Model, config.Manufacturer) {
-		log.Printf("警告：QModem 当前模组 %q 不是已验证的 MT5700 系列", config.Model)
+	log.Printf("MT5700 Web 控制面板 %s 已监听 %s，启用 %d 个模组实例，密码认证=%t",
+		version, *listen, len(multi.instances), multi.auth.Enabled)
+	for _, app := range multi.instances {
+		log.Printf("MT5700 实例 %s：%s，AT=%s，路径=%s/5700/",
+			app.config.ID, app.config.Name, app.backend.Target(), app.config.BasePath)
+		if app.config.Model != "" && !mt5700Model(app.config.Model, app.config.Manufacturer) {
+			log.Printf("警告：实例 %s 的模组 %q 不是已验证的 MT5700 系列", app.config.ID, app.config.Model)
+		}
 	}
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)

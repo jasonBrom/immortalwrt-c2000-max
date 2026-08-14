@@ -45,6 +45,13 @@ function value(v, fallback) {
 	return (v != null && String(v).length) ? v : (fallback || _('未知'));
 }
 
+function isRecognizedMT5700(data) {
+	var identity = [ data && data.model, data && data.manufacturer, data && data.platform ]
+		.filter(function(part) { return part != null; }).join(' ').toLowerCase();
+	return !!(data && (data.available === true || data.available === 1) &&
+		/(?:mt\s*-?\s*5700|\b5700\b)/.test(identity));
+}
+
 return view.extend({
 	load: function() {
 		return L.resolveDefault(callStatus(), {});
@@ -92,7 +99,7 @@ return view.extend({
 			forceButtons
 		]);
 
-		return E([ table, buttons, forceBox ]);
+		return E(isRecognizedMT5700(data) ? [ table, buttons ] : [ table, buttons, forceBox ]);
 	},
 
 	updateStatus: function(data) {

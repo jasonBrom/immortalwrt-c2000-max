@@ -1,0 +1,10 @@
+#!/bin/sh
+
+# Real OpenWrt fallback used by the H3C core when its proprietary
+# /dev/natflushdev device is absent. The no-argument form performs the locked
+# C2000MAX HNAT reload; --check is strictly read-only for service diagnostics.
+case "$#:$1" in
+	0:) exec /usr/libexec/uuplugin-launcher --uuclearnat ;;
+	1:--check) exec /usr/libexec/uuplugin-launcher --uuclearnat-check ;;
+	*) exit 2 ;;
+esac

@@ -102,6 +102,7 @@ define prepare_rootfs
 			$(if $(SOURCE_DATE_EPOCH),sed -i "s/Installed-Time: .*/Installed-Time: $(SOURCE_DATE_EPOCH)/" $(1)/usr/lib/opkg/status ;) \
 		fi; \
 		for script in ./etc/init.d/*; do \
+			case "$$script" in *.apk-new) continue ;; esac; \
 			grep '#!/bin/sh /etc/rc.common' $$script >/dev/null || continue; \
 			if ! echo " $(3) " | grep -q " $$(basename $$script) "; then \
 				IPKG_INSTROOT=$(1) $$(command -v bash) ./etc/rc.common $$script enable; \
@@ -112,6 +113,9 @@ define prepare_rootfs
 			fi; \
 		done || true \
 	)
+	@-find $(1)/etc/rc.d -maxdepth 1 -type l \
+		-name '[SK][0-9][0-9]*.apk-new' \
+		-lname '../init.d/*.apk-new' -delete
 
 	@-find $(1) -name CVS -o -name .svn -o -name .git -o -name '.#*' | $(XARGS) rm -rf
 	rm -rf \
