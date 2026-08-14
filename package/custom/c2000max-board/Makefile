@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=c2000max-board
 PKG_VERSION:=2.35.35
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 PKG_LICENSE:=GPL-2.0-or-later
 
 include $(INCLUDE_DIR)/package.mk
@@ -60,6 +60,7 @@ define Package/c2000max-board/install
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-adblock-compat $(1)/usr/sbin/c2000max-adblock-compat
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-netbird-job $(1)/usr/sbin/c2000max-netbird-job
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-service-worker $(1)/usr/sbin/c2000max-service-worker
+	$(INSTALL_BIN) ./files/usr/sbin/c2000max-factory $(1)/usr/sbin/c2000max-factory
 	$(INSTALL_DIR) $(1)/usr/lib/c2000max
 	$(INSTALL_DATA) ./files/usr/lib/c2000max/port-role.sh $(1)/usr/lib/c2000max/port-role.sh
 	$(INSTALL_DATA) ./files/usr/lib/c2000max/uplink-mode.sh $(1)/usr/lib/c2000max/uplink-mode.sh

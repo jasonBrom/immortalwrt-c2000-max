@@ -69,15 +69,18 @@ redial()
 
 _update_modem()
 {
-    local target
+    local target current_status data instance
     target=1
     config_get enabled $1 enable_dial
     config_get state $1 state
     if [ "$state" = "disabled" ] || [ "$enabled" = "0" ] || [ "$g_enabled" = "0" ] || [ "$force_stop" = "1" ];then
         target=0
     fi
-    data=$(_procd_ubus_call list | jq -r  ".$service.instances.modem_$1")
-    [ "$data" == "null" ] && current_status=0 || current_status=1
+    instance="modem_$1"
+    data="$(ubus call service list "{\"name\":\"$service\"}" 2>/dev/null |
+        jq -r --arg service "$service" --arg instance "$instance" \
+        '.[$service].instances[$instance] // empty' 2>/dev/null)"
+    [ -n "$data" ] && current_status=1 || current_status=0
     logger -t qmodem_network "cfg:$1 current:$current_status;target:$target "
     if [ "$current_status" != "$target" ];then
         [ "$target" -eq 1 ] && dial $1 || hang $1
@@ -105,6 +108,8 @@ _modem_status()
 { 
 	local instances="modem_$1"
 	local data
-    data=$(_procd_ubus_call list | jq  -r ".$service.instances.$instances")
-    [ "$data" == "null" ] && echo "$instances Not Running"  || echo "$data"
+    data="$(ubus call service list "{\"name\":\"$service\"}" 2>/dev/null |
+        jq -r --arg service "$service" --arg instance "$instances" \
+        '.[$service].instances[$instance] // empty' 2>/dev/null)"
+    [ -z "$data" ] && echo "$instances Not Running" || echo "$data"
 }

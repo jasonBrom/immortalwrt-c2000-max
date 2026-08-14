@@ -3,6 +3,9 @@
 manual=$(uci -q get qmodem.main.block_auto_probe)
 [ "${manual}" -eq 1 ] && exit
 
+sys_root="${QMODEM_SYS_ROOT:-/sys}"
+scan_script="${QMODEM_SCAN_SCRIPT:-/usr/share/qmodem/modem_scan.sh}"
+
 logger -t modem_hotplug "net slot: ${DEVPATH} action: ${ACTION}"
 hotplug_add_delay=$(uci -q get qmodem.main.hotplug_add_delay || echo 8)
 #网络设备名称不存在，退出
@@ -10,23 +13,35 @@ hotplug_add_delay=$(uci -q get qmodem.main.hotplug_add_delay || echo 8)
 #网络设备路径不存在，退出
 [ -z "${DEVPATH}" ] && exit
 
-slot_path=$(readlink -f "/sys/${DEVPATH}/device")
+slot_path=$(readlink -f "${sys_root}/${DEVPATH}/device")
 [ -z "${slot_path}" ] && exit
 
-slot=$(basename "$(dirname "${slot_path}")")
+# Only modem-style netdevs may schedule modem detection.  In particular, the
+# MT7993 AP interfaces and IFBs are backed by PCI and previously caused five
+# slow retries against both the PCIe root port and the Wi-Fi function.
+case "${INTERFACE}" in
+	wwan*|rmnet*|mhi*|usb*) ;;
+	eth*) echo "$slot_path" | grep -q '/usb' || exit 0 ;;
+	*) exit 0 ;;
+esac
 
-if [ -d "/sys/bus/usb/devices/${slot}" ]; then
+if echo "$slot_path" | grep -q '/usb'; then
+	usb_if=$(basename "$slot_path")
+	slot=${usb_if%%:*}
+	[ -d "${sys_root}/bus/usb/devices/${slot}" ] || exit 0
     slot_type="usb"
-elif [ -d "/sys/bus/pci/devices/${slot}" ]; then
-    slot_type="pcie"
 else
-    exit
+	# A PCI netdev's device link resolves directly to its BDF.  Taking dirname
+	# incorrectly selected the upstream root port (0000:00:00.0).
+	slot=$(basename "$slot_path")
+	[ -d "${sys_root}/bus/pci/devices/${slot}" ] || exit 0
+    slot_type="pcie"
 fi
 
 logger -t modem_hotplug "net slot: ${slot} action: ${ACTION} slot_type: ${slot_type}"
 case "${ACTION}" in
     add|\
     bind)
-        (/usr/share/qmodem/modem_scan.sh add "${slot}" "${slot_type}" "${hotplug_add_delay}" >/dev/null 2>&1) &
+        ("$scan_script" add "${slot}" "${slot_type}" "${hotplug_add_delay}" >/dev/null 2>&1) &
         ;;
 esac

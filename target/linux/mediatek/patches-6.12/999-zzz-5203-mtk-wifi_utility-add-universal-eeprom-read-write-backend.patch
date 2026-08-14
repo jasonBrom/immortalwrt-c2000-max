@@ -7,16 +7,18 @@ Legacy wifi_utility cannot handle various types of EEPROM. So we:
  - refactor raw MTD read, enhance with error handling and lower case "factory" fallback.
 
 With this patch, wifi_utility supports read priority below:
- `mediatek,eeprom-data` -> `mediatek,mtd-eeprom` -> nvmem-cells -> raw MTD "F/factory"
+ `mediatek,eeprom-data` -> `mediatek,mtd-eeprom` -> nvmem-cells -> raw MTD "F/factory".
+An explicit OF source is authoritative: read/validation failures do not fall
+through to a potentially unrelated same-named raw MTD partition.
 
 Signed-off-by: chasey-dev <ellenyoung0912@gmail.com>
 ---
  .../net/wireless/wifi_utility/Makefile        |   2 +
- .../wireless/wifi_utility/mt_wifi_eeprom.c    |  73 ++++
+ .../wireless/wifi_utility/mt_wifi_eeprom.c    |  85 +++++
  .../wireless/wifi_utility/mt_wifi_eeprom.h    |  14 +
  .../net/wireless/wifi_utility/mt_wifi_mtd.c   |  81 +++--
- .../net/wireless/wifi_utility/mt_wifi_of.c    | 331 ++++++++++++++++++
- 5 files changed, 465 insertions(+), 36 deletions(-)
+ .../net/wireless/wifi_utility/mt_wifi_of.c    | 379 ++++++++++++++++++++
+ 5 files changed, 525 insertions(+), 36 deletions(-)
  create mode 100644 drivers/net/wireless/wifi_utility/mt_wifi_eeprom.c
  create mode 100644 drivers/net/wireless/wifi_utility/mt_wifi_eeprom.h
  create mode 100644 drivers/net/wireless/wifi_utility/mt_wifi_of.c
@@ -32,7 +34,7 @@ Signed-off-by: chasey-dev <ellenyoung0912@gmail.com>
  
 --- /dev/null
 +++ b/drivers/net/wireless/wifi_utility/mt_wifi_eeprom.c
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,85 @@
 +#include <linux/kernel.h>
 +#include <linux/module.h>
 +#include <linux/types.h>
@@ -48,6 +50,18 @@ Signed-off-by: chasey-dev <ellenyoung0912@gmail.com>
 +	ret = mt_of_read_eeprom_wifi(from, len, buf);
 +	if (!ret)
 +		return 0;
++	/*
++	 * An explicit OF mapping is authoritative.  Falling through after an
++	 * I/O or size error can select an unrelated same-named MTD partition;
++	 * that is especially dangerous on systems which boot from SD/eMMC but
++	 * retain an OEM SPI-NOR Factory partition in a different format.
++	 */
++	if (ret != -ENOENT) {
++		pr_err("%s: explicit OF eeprom read failed from=0x%llx "
++		       "len=0x%zx ret=%d\n", __func__,
++		       (unsigned long long)from, len, ret);
++		return ret;
++	}
 +
 +	pr_warn("%s: read eeprom from OF failed from=0x%llx len=0x%zx ret=%d\n",
 +		__func__, (unsigned long long)from, len, ret);
@@ -264,8 +278,9 @@ Signed-off-by: chasey-dev <ellenyoung0912@gmail.com>
  
 --- /dev/null
 +++ b/drivers/net/wireless/wifi_utility/mt_wifi_of.c
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,379 @@
 +#include <linux/err.h>
++#include <linux/etherdevice.h>
 +#include <linux/kernel.h>
 +#include <linux/nvmem-consumer.h>
 +#include <linux/of.h>
@@ -498,6 +513,47 @@ Signed-off-by: chasey-dev <ellenyoung0912@gmail.com>
 +	return ret;
 +}
 +
++static int __mt_of_validate_eeprom(struct device_node *np, const void *data,
++				   size_t size)
++{
++	const u8 *bytes = data;
++	u32 expected_magic;
++	u32 offset;
++	int count;
++	int i;
++
++	if (!of_property_read_u32(np, "mediatek,eeprom-magic",
++				  &expected_magic)) {
++		if (size < sizeof(u16) ||
++		    get_unaligned_le16(bytes) != (u16)expected_magic) {
++			pr_err("%pOF: invalid eeprom magic or truncated image\n", np);
++			return -EBADMSG;
++		}
++	}
++
++	count = of_property_count_u32_elems(np,
++					    "mediatek,eeprom-mac-offsets");
++	if (count == -EINVAL)
++		return 0;
++	if (count < 0)
++		return count;
++
++	for (i = 0; i < count; i++) {
++		if (of_property_read_u32_index(np,
++					       "mediatek,eeprom-mac-offsets",
++					       i, &offset))
++			return -EINVAL;
++		if (offset > size || size - offset < ETH_ALEN ||
++		    !is_valid_ether_addr(bytes + offset)) {
++			pr_err("%pOF: invalid eeprom MAC at offset 0x%x\n",
++			       np, offset);
++			return -EBADMSG;
++		}
++	}
++
++	return 0;
++}
++
 +static int __mt_of_read_nvmem_cell(struct device_node *np, const char *name,
 +				   loff_t from, size_t len, u_char *buf,
 +				   loff_t dflt_base)
@@ -517,6 +573,12 @@ Signed-off-by: chasey-dev <ellenyoung0912@gmail.com>
 +	nvmem_cell_put(cell);
 +	if (IS_ERR(data))
 +		return PTR_ERR(data);
++
++	if (!strcmp(name, "eeprom")) {
++		ret = __mt_of_validate_eeprom(np, data, size);
++		if (ret)
++			goto out_free;
++	}
 +
 +	ret = __mt_of_get_cell_base(np, name, &base);
 +	if (ret && dflt_base < 0)

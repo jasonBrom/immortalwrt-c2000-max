@@ -3,7 +3,7 @@
 		"description": "Grant access to C2000-MAX hardware controls",
 		"read": {
 			"ubus": {
-				"c2000max": [ "sim_status", "hardware_status", "fan_status", "swap_status", "access_status", "netbird_status", "netbird_job_status", "port_status", "port_job_status" ]
+				"c2000max": [ "sim_status", "hardware_status", "factory_status", "fan_status", "swap_status", "access_status", "netbird_status", "netbird_job_status", "port_status", "port_job_status" ]
 			},
 			"uci": [ "c2000max", "qmodem" ]
 		},

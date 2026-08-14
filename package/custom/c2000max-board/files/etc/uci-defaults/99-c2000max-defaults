@@ -284,7 +284,9 @@ if [ "$wireless_is_new" = '1' ]; then
 		case "$band" in
 			2g)
 				ssid='ImmortalWrt-2.4G'
-				uci -q set "wireless.$radio.channel=auto"
+				# Avoid two full 2.4 GHz auto-channel passes during first boot.
+				# Channel 6 is the vendor profile default and remains user-editable.
+				uci -q set "wireless.$radio.channel=6"
 				;;
 			5g)
 				ssid='ImmortalWrt-5G'

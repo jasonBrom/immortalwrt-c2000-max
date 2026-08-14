@@ -330,8 +330,8 @@ grep -Fq "result.success ? value(result.message, _('SIM 卡切换成功'))" \
 	fail_test "LuCI does not display the backend single-card warning"
 
 DTS="$ROOT/../../../target/linux/mediatek/dts/mt7987a-nradio-c2000-max.dts"
-sed -n '/modem-power {/,/};/p' "$DTS" | grep -Fq 'gpio-export,output = <0>;' ||
-	fail_test "active-low modem power is not deasserted at GPIO export"
+sed -n '/modem-power {/,/};/p' "$DTS" | grep -Fq 'gpio-export,output = <1>;' ||
+	fail_test "active-low modem power does not start at raw physical high/off"
 grep -Fq '+uboot-envtools' "$ROOT/Makefile" ||
 	fail_test "board package does not depend on U-Boot environment tools"
 FWENV="$ROOT/../../../package/boot/uboot-tools/uboot-envtools/files/mediatek_filogic"

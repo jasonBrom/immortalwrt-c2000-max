@@ -177,8 +177,6 @@ return view.extend({
 
 		return E([ 
 			E('h2', {}, _('SIM 卡切换')),
-			E('div', { 'class': 'cbi-map-descr' },
-					_('实际硬件拓扑：外置卡槽 2 使用模组通道 1；外置卡槽 1 与内置贴片卡共用模组通道 2，并由 GPIO48 选择。允许切换到空卡槽；此时卡槽选择仍会成功，但 SIM 状态会显示未激活。正常安全切换支持 MT5700M-CN、FM350-GL 与 RM520N-CN；下方另提供不检查型号的强制 GPIO 模式。')),
 			this.statusNode
 		]);
 	},

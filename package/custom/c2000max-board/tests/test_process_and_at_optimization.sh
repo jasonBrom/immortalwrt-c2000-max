@@ -47,8 +47,8 @@ grep -Fq 'boot-restore' "$SIM_INIT" ||
 	fail 'old asynchronous SIM/QModem startup race is still present'
 grep -q '^START=79$' "$AT_DAEMON_INIT" ||
 	fail 'ubus-at-daemon still starts after QModem scanners/dialers'
-sed -n '/modem-power {/,/};/p' "$DTS" | grep -Fq 'gpio-export,output = <0>;' ||
-	fail 'kernel does not keep the active-low modem supply off before mux restore'
+sed -n '/modem-power {/,/};/p' "$DTS" | grep -Fq 'gpio-export,output = <1>;' ||
+	fail 'kernel does not keep the active-low modem supply at raw physical high/off before mux restore'
 
 grep -Fq 'newQModemQueuedBackend' "$MT5700" ||
 	fail 'MT5700 panel does not use the QModem queue backend'

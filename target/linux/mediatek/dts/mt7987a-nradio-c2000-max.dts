@@ -41,10 +41,14 @@
 
 		modem-power {
 			gpio-export,name = "cpe-pwr";
-			/* gpio-export values are logical after GPIO_ACTIVE_LOW is
-			 * applied: 0 is deasserted/off and 1 is asserted/on. Keep the
-			 * modem off until c2000max-sim restores the saved mux. */
-			gpio-export,output = <0>;
+			/*
+			 * The legacy gpio-export binding passes this value to
+			 * GPIOF_OUT_INIT_HIGH/LOW and therefore programs the raw physical
+			 * level. GPIO49 is active-low, so raw high keeps the modem powered
+			 * off until c2000max-sim restores the saved mux and powers it on.
+			 * This also guarantees a real power cycle across a warm reboot.
+			 */
+			gpio-export,output = <1>;
 			gpios = <&pio 49 GPIO_ACTIVE_LOW>;
 		};
 
@@ -243,6 +247,9 @@
 
 				block-partition-factory {
 					partname = "factory";
+					/* Calibration data is identity-bound and must never be written
+					 * by the running system or a firmware upgrade. */
+					read-only;
 
 					nvmem-layout {
 						compatible = "fixed-layout";
@@ -250,7 +257,13 @@
 						#size-cells = <1>;
 
 						eeprom_factory_0: eeprom@0 {
-							reg = <0x0 0x1e00>;
+							/*
+							 * The private MT7993 driver requests the base
+							 * EEPROM and pre-calibration data as one image.
+							 * Keeping only 0x1e00 here silently zero-filled
+							 * the remaining 0x148a00 bytes.
+							 */
+							reg = <0x0 0x14a800>;
 						};
 
 						macaddr_factory_4: macaddr@4 {
@@ -288,10 +301,20 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 
-			/* MT7990 + MT7976 dual-band layout, as used by GL-MT3600BE. */
+			/*
+			 * MT7990 + MT7976 dual-band layout, as used by GL-MT3600BE.
+			 *
+			 * The SPI-NOR Factory partition uses NRadio's factory format;
+			 * its band-0 bytes are not a directly consumable MT7993 MAC/
+			 * EEPROM image.  The SD factory partition contains the complete
+			 * unit-specific e2p exported by the vendor driver and is preserved
+			 * independently of both OEM and ImmortalWrt system updates.
+			 */
 			ieee80211-freq-limit = <2400000 2500000>,
 					       <5170000 5835000>;
-			nvmem-cells = <&eeprom_spi_factory_0>;
+			mediatek,eeprom-magic = <0x7993>;
+			mediatek,eeprom-mac-offsets = <0x4 0xa>;
+			nvmem-cells = <&eeprom_factory_0>;
 			nvmem-cell-names = "eeprom";
 		};
 	};
@@ -349,16 +372,6 @@
 				label = "Factory";
 				reg = <0x050000 0x100000>;
 				read-only;
-
-				nvmem-layout {
-					compatible = "fixed-layout";
-					#address-cells = <1>;
-					#size-cells = <1>;
-
-					eeprom_spi_factory_0: eeprom@0 {
-						reg = <0x0 0x1e00>;
-					};
-				};
 			};
 
 			partition@150000 {

@@ -8,6 +8,7 @@ case "$1" in
 	"sim_switch": { "slot": "string" },
 	"sim_force": { "slot": "string" },
 	"hardware_status": {},
+	"factory_status": {},
 	"fan_status": {},
 	"swap_status": {},
 	"swap_apply": {
@@ -71,6 +72,9 @@ EOF
 				;;
 			hardware_status)
 				exec /usr/sbin/c2000max-hwmon
+				;;
+			factory_status)
+				exec /usr/sbin/c2000max-factory status-json
 				;;
 			fan_status)
 				exec /usr/sbin/c2000max-fan status
