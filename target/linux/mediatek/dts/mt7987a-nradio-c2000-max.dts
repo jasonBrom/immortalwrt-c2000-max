@@ -291,7 +291,7 @@
 			/* MT7990 + MT7976 dual-band layout, as used by GL-MT3600BE. */
 			ieee80211-freq-limit = <2400000 2500000>,
 					       <5170000 5835000>;
-			nvmem-cells = <&eeprom_factory_0>;
+			nvmem-cells = <&eeprom_spi_factory_0>;
 			nvmem-cell-names = "eeprom";
 		};
 	};
@@ -318,9 +318,10 @@
 
 /*
  * The factory firmware boots from the board's 32 MiB SPI-NOR.  The SD image
- * exposes only the first 64 KiB of the unit-specific bdinfo partition.  Do not
- * register the factory firmware/rootfs partitions: OpenWrt's MTD splitters can
- * otherwise mistake them for the active SD root filesystem and overlay.
+ * exposes only the unit-specific Factory partition and the first 64 KiB of
+ * bdinfo.  Do not register the factory firmware/rootfs partitions: MTD
+ * splitters can otherwise mistake them for the active SD root filesystem and
+ * overlay.
  *
  * Identity reads do not need the vendor firmware's 52 MHz quad-I/O calibration
  * path.  Keep this deliberately conservative at 10 MHz, single-I/O and
@@ -343,6 +344,22 @@
 			compatible = "fixed-partitions";
 			#address-cells = <1>;
 			#size-cells = <1>;
+
+			partition@50000 {
+				label = "Factory";
+				reg = <0x050000 0x100000>;
+				read-only;
+
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					eeprom_spi_factory_0: eeprom@0 {
+						reg = <0x0 0x1e00>;
+					};
+				};
+			};
 
 			partition@150000 {
 				label = "bdinfo";

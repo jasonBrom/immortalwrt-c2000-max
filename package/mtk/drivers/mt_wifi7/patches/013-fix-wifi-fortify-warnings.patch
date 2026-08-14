@@ -1,0 +1,43 @@
+--- a/mt_wifi/ap/ap_data.c
++++ b/mt_wifi/ap/ap_data.c
+@@ -1137,7 +1137,8 @@ static inline VOID ap_build_cache_802_11_header(
+ 		   ) {
+ 			/* The addr3 of WDS packet is Destination Mac address and Addr4 is the Source Mac address. */
+ 			COPY_MAC_ADDR(pHeader80211->Addr3, pTxBlk->pSrcBufHeader);
+-			COPY_MAC_ADDR(pHeader80211->Octet, pTxBlk->pSrcBufHeader + MAC_ADDR_LEN);
++			COPY_MAC_ADDR((UCHAR *)pHeader80211 + offsetof(HEADER_802_11, Octet),
++				pTxBlk->pSrcBufHeader + MAC_ADDR_LEN);
+ 			pTxBlk->MpduHeaderLen += MAC_ADDR_LEN;
+ 			pTxBlk->wifi_hdr_len += MAC_ADDR_LEN;
+ 		} else
+@@ -1158,7 +1159,8 @@ static inline VOID ap_build_cache_802_11_header(
+ 				COPY_MAC_ADDR(pHeader80211->Addr2, pAd->CurrentAddress); /* from AP1 */
+ 			}
+ 			COPY_MAC_ADDR(pHeader80211->Addr3, pTxBlk->pSrcBufHeader);	/* DA */
+-			COPY_MAC_ADDR(pHeader80211->Octet, pTxBlk->pSrcBufHeader + MAC_ADDR_LEN);/* ADDR4 = SA */
++			COPY_MAC_ADDR((UCHAR *)pHeader80211 + offsetof(HEADER_802_11, Octet),
++				pTxBlk->pSrcBufHeader + MAC_ADDR_LEN);/* ADDR4 = SA */
+ 			pTxBlk->MpduHeaderLen += MAC_ADDR_LEN;
+ 			pTxBlk->wifi_hdr_len += MAC_ADDR_LEN;
+ 		} else
+--- a/mt_wifi/common/qos.c
++++ b/mt_wifi/common/qos.c
+@@ -612,14 +612,16 @@ INT receive_qos_action_frame(RTMP_ADAPTER *pAd, struct wifi_dev *wdev,
+ 	NdisZeroMemory(&event, sizeof(event));
+ 	event.ifindex = RtmpOsGetNetIfIndex(wdev->if_dev);
+ 	event.event_id = WAPP_QOS_ACTION_FRAME_EVENT;
+-	req_data = (struct wapp_qos_action_frame *)&(event.data.qos_frm);
++	req_data = (struct wapp_qos_action_frame *)&event.data;
+ 
+ 	if (frm_len < (sizeof(event) - 20)) {
+ 		NdisCopyMemory(req_data->src, peer_mac_addr, 6);
+ 		req_data->frm_len = frm_len;
+ 		req_data->chan = channel;
+ 
+-		NdisCopyMemory(req_data->frm, frm, frm_len);
++		NdisCopyMemory((u8 *)&event.data +
++			offsetof(struct wapp_qos_action_frame, frm),
++			frm, frm_len);
+ 		MTWF_DBG(NULL, DBG_CAT_PROTO, CATPROTO_QOS_MAP, DBG_LVL_INFO,
+ 			"to wapp, src mac:%02x:%02x:%02x:%02x:%02x:%02x, frm_len:%lu\n",
+ 			PRINT_MAC(req_data->src), frm_len);
