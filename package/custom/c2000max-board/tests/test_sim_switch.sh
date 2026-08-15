@@ -341,8 +341,24 @@ INIT="$ROOT/files/etc/init.d/c2000max-sim"
 if grep -Fq '/usr/sbin/c2000max-sim apply >"$state"' "$INIT"; then
 	fail_test "boot retry can still fall back to reset UCI slot"
 fi
+grep -q '^START=12$' "$INIT" ||
+	fail_test "modem power-on still waits until late QModem startup"
+grep -Fq '/usr/sbin/c2000max-sim boot-prepare >"$state"' "$INIT" ||
+	fail_test "boot does not perform exactly one early power/mux preparation"
+grep -Fq 'C2000MAX_SIM_SKIP_BOOT_PREPARE=1' "$INIT" ||
+	fail_test "normal boot verification can still power-cycle an enumerated modem"
+if grep -Fq 'for delay in 15 30 60' "$INIT"; then
+	fail_test "blind 15/30/60 hard-power retry loop is still present"
+fi
 grep -Fq '/usr/sbin/c2000max-sim boot-restore >"$state"' "$INIT" ||
 	fail_test "boot retry does not reuse the persistent slot"
+grep -q '^MODEM_POWER_OFF_SECONDS=8$' "$SCRIPT" ||
+	fail_test "warm reboot power-off interval is too short for MT5700"
+grep -Fq 'wait_for_modem_ready' "$SCRIPT" ||
+	fail_test "boot restore accepts a tty node before the modem responds to AT"
+QMODEM_REBOOT="$ROOT/../qmodem/application/qmodem/files/etc/init.d/qmodem_reboot"
+grep -Fq 'nradio,c2000-max' "$QMODEM_REBOOT" ||
+	fail_test "QModem shutdown can still race C2000-MAX GPIO power removal"
 DEFAULTS="$ROOT/files/etc/uci-defaults/99-c2000max-defaults"
 grep -Fq 'fw_printenv -n c2000max_sim_slot' "$DEFAULTS" ||
 	fail_test "first boot defaults do not import the persistent slot"

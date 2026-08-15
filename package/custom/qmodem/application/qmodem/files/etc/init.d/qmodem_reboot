@@ -10,6 +10,18 @@ start_service() {
 }
 
 stop_service() {
+	local board
+	board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+	if [ "$board" = "nradio,c2000-max" ]; then
+		# C2000-MAX owns the modem power rail through cpe-pwr. Sending
+		# AT+CFUN=1,1 here starts an asynchronous modem reboot immediately
+		# before c2000max-sim removes power, which can leave MT5700 USB
+		# enumeration stalled after a warm reboot or factory reset.
+		logger -t qmodem_reboot \
+			"skip AT soft reboot on C2000-MAX; board GPIO shutdown owns modem reset"
+		return 0
+	fi
+
 	procd_set_param timeout 30
 	config_load qmodem
 	config_foreach _soft_reboot modem-device

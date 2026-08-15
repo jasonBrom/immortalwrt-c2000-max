@@ -37,10 +37,14 @@ grep -Fq 'begin_at_transaction "$at_port"' "$SIM" ||
 	fail 'SIM command sequence is not wrapped in one AT transaction'
 ! grep -Eq 'tom_modem[[:space:]]+-d' "$SIM" ||
 	fail 'SIM switching still opens the modem serial port directly'
-grep -q '^START=75$' "$SIM_INIT" ||
-	fail 'saved SIM restore does not run before QModem startup'
-grep -Fq 'C2000MAX_SIM_AT_BACKEND=tom_modem' "$SIM_INIT" ||
-	fail 'early SIM restore does not use the pre-QModem direct transaction'
+grep -q '^START=12$' "$SIM_INIT" ||
+	fail 'saved SIM mux/power preparation does not run early in rc.d'
+grep -Fq 'boot-prepare' "$SIM_INIT" ||
+	fail 'early SIM startup does not separate GPIO preparation from AT verification'
+grep -Fq 'C2000MAX_SIM_SKIP_BOOT_PREPARE=1' "$SIM_INIT" ||
+	fail 'normal AT verification can still repeat the modem power cycle'
+! grep -Fq 'C2000MAX_SIM_AT_BACKEND=tom_modem' "$SIM_INIT" ||
+	fail 'boot restore still bypasses the serialized ubus AT backend'
 grep -Fq 'boot-restore' "$SIM_INIT" ||
 	fail 'SIM init service does not restore the saved slot at boot'
 ! grep -Fq 'sleep 10; exec /usr/sbin/c2000max-sim apply' "$SIM_INIT" ||

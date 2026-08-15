@@ -10,10 +10,11 @@ TAG="c2000max-sim"
 LOCK="/var/lock/c2000max-sim.lock"
 GPIO_SIM="/sys/class/gpio/cpe-sel0/value"
 GPIO_POWER="/sys/class/gpio/cpe-pwr/value"
+SHUTDOWN_MARKER="/tmp/c2000max-sim-shutdown"
 UBOOT_SLOT_KEY="c2000max_sim_slot"
 FW_ENV_CONFIG="${C2000MAX_FW_ENV_CONFIG:-/etc/fw_env.config}"
-MODEM_POWER_OFF_SECONDS=3
-MODEM_PORT_WAIT_SECONDS=45
+MODEM_POWER_OFF_SECONDS=8
+MODEM_PORT_WAIT_SECONDS=120
 LAST_ERROR=""
 SWITCH_MESSAGE=""
 HUAWEI_ACTIVATION_WARNING=0
@@ -86,13 +87,13 @@ wait_for_port() {
 }
 
 send_at() {
-	local port="$1" command="$2"
+	local port="$1" command="$2" timeout="${3:-10}"
 	# Never open the modem TTY beside QModem.  at_timeout() enters the shared
 	# per-port/global queue, or recognises the surrounding SIM transaction.
 	# The one exception is the serialized early-boot restore, which runs before
 	# ubus-at-daemon and every QModem scanner/dialer have started.
 	QMODEM_AT_BACKEND="${C2000MAX_SIM_AT_BACKEND:-ubus}" \
-		at_timeout "$port" "$command" 10
+		at_timeout "$port" "$command" "$timeout"
 }
 
 begin_at_transaction() {
@@ -322,8 +323,47 @@ wait_for_modem_port() {
 	return 1
 }
 
+# A tty node appearing only proves that the USB interface was registered.  The
+# MT5700 needs several more seconds before it accepts AT commands, and ttyUSB
+# numbering may change after a hard power cycle.  Probe every plausible port
+# and require both a basic AT response and a readable model identity before a
+# boot-time SIM operation is allowed to continue.
+wait_for_modem_ready() {
+	local retries="${1:-$MODEM_PORT_WAIT_SECONDS}" section port response model seen
+
+	case "$retries" in
+		''|*[!0-9]*) retries="$MODEM_PORT_WAIT_SECONDS" ;;
+	esac
+	while [ "$retries" -gt 0 ]; do
+		section="$(first_qmodem_section)"
+		seen=" "
+		for port in "$(resolve_port "$section")" \
+			/dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB0 /dev/ttyUSB3 \
+			/dev/ttyUSB4 /dev/ttyUSB5 /dev/ttyACM0 \
+			/dev/mhi_DUN /dev/wwan0at0; do
+			[ -n "$port" ] && [ -c "$port" ] || continue
+			case "$seen" in *" $port "*) continue ;; esac
+			seen="$seen$port "
+			response="$(send_at "$port" 'AT' 2 2>/dev/null)"
+			at_response_ok "$response" || continue
+			model="$(clean_identity "$(send_at "$port" 'AT+CGMM' 3 2>/dev/null)")"
+			[ -n "$model" ] || continue
+			sleep 2
+			printf '%s\n' "$port"
+			return 0
+		done
+		sleep 2
+		retries=$((retries - 2))
+	done
+	return 1
+}
+
 prepare_modem_boot() {
 	local requested="$1" slot target_mux off_seconds
+	[ ! -e "$SHUTDOWN_MARKER" ] || {
+		fail "系统正在关机，拒绝重新开启模组电源"
+		return 1
+	}
 	slot="$(normalize_slot "$requested")"
 	[ -n "$slot" ] || {
 		fail "无效的开机恢复卡槽：$requested"
@@ -347,6 +387,10 @@ prepare_modem_boot() {
 		return 1
 	fi
 	sleep 1
+	[ ! -e "$SHUTDOWN_MARKER" ] || {
+		fail "系统关机已开始，模组保持断电"
+		return 1
+	}
 	write_modem_power 1 || return 1
 	log "prepared modem boot (slot=$slot, mux=$target_mux, power-off=${off_seconds}s)"
 }
@@ -765,6 +809,29 @@ reset_modem() {
 
 command="${1:-apply}"
 case "$command" in
+	boot-prepare)
+		# This is the only unconditional hard power cycle during normal boot.
+		# It runs early, restores GPIO48 while power is removed, then returns so
+		# the rest of rc.d and QModem can initialize in parallel with the modem.
+		rm -f "$SHUTDOWN_MARKER"
+		slot="$(saved_boot_slot)"
+		if ! sync_configured_slot "$slot"; then
+			status_json 0 "保存的 SIM 卡槽无法同步到系统配置"
+			exit 1
+		fi
+		lock -n "$LOCK" || {
+			status_json 0 "开机预处理 SIM 卡槽时锁正忙"
+			exit 1
+		}
+		SIM_LOCK_HELD=1
+		trap cleanup_locks EXIT
+		trap 'exit 128' INT TERM
+		if ! prepare_modem_boot "$slot"; then
+			status_json 0 "${LAST_ERROR:-模组开机预处理失败}"
+			exit 1
+		fi
+		printf '{ "success": true, "message": "模组已按保存的卡槽开始上电", "slot": "%s" }\n' "$slot"
+		;;
 	boot-restore)
 		# U-Boot environment survives a sysupgrade performed without preserving
 		# the overlay. Fall back to UCI only for devices not yet carrying it.
@@ -780,14 +847,21 @@ case "$command" in
 		SIM_LOCK_HELD=1
 		trap cleanup_locks EXIT
 		trap 'exit 128' INT TERM
-		if ! prepare_modem_boot "$slot"; then
-			status_json 0 "${LAST_ERROR:-模组开机预处理失败}"
-			exit 1
+		if [ "${C2000MAX_SIM_SKIP_BOOT_PREPARE:-0}" != 1 ]; then
+			if ! prepare_modem_boot "$slot"; then
+				status_json 0 "${LAST_ERROR:-模组开机预处理失败}"
+				exit 1
+			fi
 		fi
-		at_port="$(wait_for_modem_port "$MODEM_PORT_WAIT_SECONDS")" || {
-			fail "模组重新上电后 AT 串口未在 ${MODEM_PORT_WAIT_SECONDS} 秒内出现"
-			status_json 0 "$LAST_ERROR"
-			exit 1
+		at_port="$(wait_for_modem_ready "${C2000MAX_MODEM_READY_WAIT_SECONDS:-$MODEM_PORT_WAIT_SECONDS}")" || {
+			fail "模组 AT 接口未在 ${C2000MAX_MODEM_READY_WAIT_SECONDS:-$MODEM_PORT_WAIT_SECONDS} 秒内完全就绪"
+			# Do not run the full status probe against a non-responsive tty;
+			# each identity/SIM query would add another command timeout.
+			printf '{ "success": false, "message": "%s", "available": false }\n' "$LAST_ERROR"
+			# A distinct status lets the init wrapper reserve its single hard
+			# recovery for a genuine enumeration/readiness timeout. AT lock or
+			# SIM command failures must never disconnect an otherwise live modem.
+			exit 10
 		}
 		begin_at_transaction "$at_port" || {
 			status_json 0 "开机恢复无法取得 QModem AT 事务锁"
@@ -867,8 +941,16 @@ case "$command" in
 			exit 1
 		fi
 		;;
+	power-off)
+		: > "$SHUTDOWN_MARKER"
+		if write_modem_power 0; then
+			log "modem powered off for system shutdown"
+		else
+			exit 1
+		fi
+		;;
 	*)
-		echo "Usage: $0 {boot-restore|persist [internal|external1|external2]|status|switch [internal|external1|external2]|force [external1|external2]|reset}" >&2
+		echo "Usage: $0 {boot-prepare|boot-restore|persist [internal|external1|external2]|status|switch [internal|external1|external2]|force [external1|external2]|reset|power-off}" >&2
 		exit 2
 		;;
 esac

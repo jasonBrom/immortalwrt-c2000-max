@@ -1,25 +1,58 @@
 #!/bin/sh /etc/rc.common
 
-START=75
+START=12
 STOP=10
 
 boot() {
 	local state=/tmp/c2000max-sim-boot.json
-	if C2000MAX_SIM_AT_BACKEND=tom_modem \
-		/usr/sbin/c2000max-sim boot-restore >"$state" 2>&1; then
-		logger -t c2000max-sim "saved SIM slot restored before QModem startup"
-		return 0
+	local pidfile=/var/run/c2000max-sim-boot.pid
+	local prepared=0 restore_rc
+
+	# Restore the persistent mux and start the modem near the beginning of rc.d.
+	# Only this short phase blocks boot. AT readiness and route verification run
+	# in the background after ubus-at-daemon and QModem become available.
+	if /usr/sbin/c2000max-sim boot-prepare >"$state" 2>&1; then
+		prepared=1
+		logger -t c2000max-sim "saved SIM mux restored; modem booting in parallel"
+	else
+		logger -t c2000max-sim "early modem power preparation failed; deferring one recovery attempt"
 	fi
 
-	logger -t c2000max-sim \
-		"early SIM restore failed; scheduling serialized runtime retries"
 	(
-		for delay in 15 30 60; do
-			sleep "$delay"
-			/usr/sbin/c2000max-sim boot-restore >"$state" 2>&1 && exit 0
-		done
-		exit 1
+		trap 'rm -f "$pidfile"' EXIT
+		if [ "$prepared" = 1 ]; then
+			# Never cut power merely because a tty node or modem identity is a
+			# few seconds late. The restore command polls until AT is genuinely
+			# ready and then performs an idempotent route check.
+			if C2000MAX_SIM_SKIP_BOOT_PREPARE=1 \
+				/usr/sbin/c2000max-sim boot-restore >"$state" 2>&1; then
+				logger -t c2000max-sim "saved SIM slot verified without another power cycle"
+				exit 0
+			else
+				restore_rc=$?
+			fi
+			if [ "$restore_rc" != 10 ]; then
+				# The modem is alive. A busy AT queue or a transient SIM command
+				# error gets one non-destructive retry and is never "recovered"
+				# by removing power from a healthy USB device.
+				logger -t c2000max-sim "SIM route verification failed with live modem; retrying once without power cycle"
+				sleep 15
+				C2000MAX_SIM_SKIP_BOOT_PREPARE=1 \
+					/usr/sbin/c2000max-sim boot-restore >"$state" 2>&1
+				exit $?
+			fi
+			logger -t c2000max-sim "modem was not AT-ready after the full wait window; allowing one hard recovery"
+		else
+			sleep 5
+		fi
+
+		# At most one recovery power cycle is permitted. The old 15/30/60
+		# loop repeatedly disconnected a healthy MT5700 while QModem was
+		# discovering it and stretched startup to more than four minutes.
+		C2000MAX_MODEM_POWER_OFF_SECONDS=10 \
+			/usr/sbin/c2000max-sim boot-restore >"$state" 2>&1
 	) &
+	echo "$!" > "$pidfile"
 }
 
 start() {
@@ -28,4 +61,17 @@ start() {
 
 reload() {
 	/usr/sbin/c2000max-sim apply >/dev/null 2>&1 &
+}
+
+stop() {
+	local pidfile=/var/run/c2000max-sim-boot.pid
+	local pid
+
+	pid="$(cat "$pidfile" 2>/dev/null)"
+	case "$pid" in
+		''|*[!0-9]*) ;;
+		*) kill "$pid" >/dev/null 2>&1 || true ;;
+	esac
+	rm -f "$pidfile"
+	/usr/sbin/c2000max-sim power-off >/dev/null 2>&1 || true
 }
