@@ -55,11 +55,11 @@ exit 0
 endef
 
 define Build/Prepare/luci-base
-	$(CP) ../../NOTICE $(PKG_BUILD_DIR)
-	$(CP) ../../LICENSE $(PKG_BUILD_DIR)
+	$(CP) $(TOPDIR)/feeds/luci/NOTICE $(PKG_BUILD_DIR)
+	$(CP) $(TOPDIR)/feeds/luci/LICENSE $(PKG_BUILD_DIR)
 endef
 
-include ../../luci.mk
+include $(TOPDIR)/feeds/luci/luci.mk
 
 define Host/Configure
 endef
