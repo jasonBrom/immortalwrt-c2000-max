@@ -1,0 +1,91 @@
+name: C2000MAX one-shot firmware build
+
+on:
+  push:
+    branches:
+      - c2000max-v35.35
+    paths:
+      - ".github/workflows/c2000max-one-shot-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: c2000max-one-shot-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      FORCE_UNSAFE_CONFIGURE: "1"
+      SOURCE_DATE_EPOCH: "1784306413"
+      LC_ALL: C
+      TZ: UTC
+
+    steps:
+      - name: Reclaim runner disk space
+        shell: bash
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
+
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib             gettext git libncurses-dev libssl-dev python3-setuptools python3-pyelftools             rsync swig unzip zlib1g-dev file wget curl libelf-dev device-tree-compiler             cpio qemu-utils ca-certificates patch perl
+
+      - name: Install locked feeds
+        shell: bash
+        run: |
+          ./scripts/feeds update -a
+          for feed in packages luci routing telephony video; do
+            ./scripts/feeds install -a -p "$feed"
+          done
+
+      - name: Generate C2000MAX configuration
+        shell: bash
+        run: |
+          cp configs/c2000max.config .config
+          make defconfig
+          grep -E '^CONFIG_(TARGET_mediatek_filogic_DEVICE_nradio_c2000-max|TARGET_ROOTFS_PARTSIZE|MTK_HWIFI_MT7993|PACKAGE_c2000max-board|PACKAGE_qmodem|PACKAGE_luci-base)=' .config
+
+      - name: Download and verify sources
+        shell: bash
+        run: |
+          make -j"$(nproc)" download
+          find dl -type f -size -1024c -print -delete
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          if ! make -j"$(nproc)" world; then
+            make -j1 V=s world
+          fi
+
+      - name: Collect and checksum images
+        shell: bash
+        run: |
+          test -d bin/targets/mediatek/filogic
+          cd bin/targets/mediatek/filogic
+          sha256sum * > c2000max-build-sha256sums.txt
+          ls -lh
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: C2000MAX-V35.35-mt5700-serialized-recovery
+          path: |
+            bin/targets/mediatek/filogic/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
