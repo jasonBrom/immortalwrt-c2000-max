@@ -67,7 +67,7 @@ jobs:
           test -n "$root_image"
           test -n "$kernel_image"
 
-          unsquashfs -no-progress -d rootfs "$root_image" >/dev/null
+          sudo unsquashfs -no-progress -d rootfs "$root_image" >/dev/null
 
           grep -qx 'START=12' rootfs/etc/init.d/c2000max-sim
           grep -q 'saved SIM mux restored; modem booting in parallel' \
