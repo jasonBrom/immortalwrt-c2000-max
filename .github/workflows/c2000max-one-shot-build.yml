@@ -66,9 +66,9 @@ jobs:
         shell: bash
         run: |
           cp configs/c2000max.config .config
-          ./scripts/config --enable CCACHE
-          ./scripts/config --set-str CCACHE_DIR "$GITHUB_WORKSPACE/.ccache"
           make defconfig
+          sed -i "s#^CONFIG_CCACHE_DIR=.*#CONFIG_CCACHE_DIR=\"$GITHUB_WORKSPACE/.ccache\"#" .config
+          printf '\nCONFIG_CCACHE=y\n' >> .config
           grep -E '^CONFIG_(TARGET_mediatek_filogic_DEVICE_nradio_c2000-max|TARGET_ROOTFS_PARTSIZE|MTK_HWIFI_MT7993|PACKAGE_c2000max-board|PACKAGE_qmodem|PACKAGE_luci-base)=' .config
 
       - name: Download and verify sources
