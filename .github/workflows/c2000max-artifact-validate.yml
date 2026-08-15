@@ -1,0 +1,117 @@
+name: Validate C2000MAX firmware artifact
+
+on:
+  push:
+    branches:
+      - c2000max-v35.35
+    paths:
+      - ".github/workflows/c2000max-artifact-validate.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE_RUN_ID: "31883066413"
+      SOURCE_ARTIFACT: C2000MAX-V35.35-mt5700-serialized-recovery
+      FINAL_BASENAME: C2000MAX-V35.35-mt5700-serialized-warm-reboot-fix
+
+    steps:
+      - name: Check out validated source
+        uses: actions/checkout@v4
+
+      - name: Download compiled firmware artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p downloaded
+          gh run download "$SOURCE_RUN_ID" --name "$SOURCE_ARTIFACT" --dir downloaded
+          find downloaded -maxdepth 2 -type f -printf '%p %s bytes\n' | sort
+
+      - name: Install validation tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential device-tree-compiler jq squashfs-tools u-boot-tools
+          git clone --depth 1 https://github.com/openwrt/fwtool.git /tmp/fwtool
+          cc -O2 -Wall -o /tmp/fwtool/fwtool /tmp/fwtool/fwtool.c
+
+      - name: Validate metadata, rootfs and device tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p validated extracted rootfs
+
+          mapfile -t images < <(
+            find downloaded -type f -name '*nradio_c2000-max*squashfs-sysupgrade.bin' | sort
+          )
+          test "${#images[@]}" -eq 1
+          image="${images[0]}"
+          final="validated/${FINAL_BASENAME}-sysupgrade.bin"
+          cp -a "$image" "$final"
+
+          /tmp/fwtool/fwtool -i validated/metadata.json "$final"
+          jq -e '.supported_devices | index("nradio,c2000-max") != null' \
+            validated/metadata.json >/dev/null
+
+          tar -xf "$final" -C extracted
+          root_image="$(find extracted -type f -name root -print -quit)"
+          kernel_image="$(find extracted -type f -name kernel -print -quit)"
+          test -n "$root_image"
+          test -n "$kernel_image"
+
+          unsquashfs -no-progress -d rootfs "$root_image" >/dev/null
+
+          grep -qx 'START=12' rootfs/etc/init.d/c2000max-sim
+          grep -q 'saved SIM mux restored; modem booting in parallel' \
+            rootfs/etc/init.d/c2000max-sim
+          grep -q 'modem was not AT-ready after the full wait window; allowing one hard recovery' \
+            rootfs/etc/init.d/c2000max-sim
+          ! grep -q 'for delay in 15 30 60' rootfs/etc/init.d/c2000max-sim
+
+          grep -q 'MODEM_PORT_WAIT_SECONDS=120' rootfs/usr/sbin/c2000max-sim
+          grep -q 'wait_for_modem_ready' rootfs/usr/sbin/c2000max-sim
+          grep -q "AT+CGMM" rootfs/usr/sbin/c2000max-sim
+
+          grep -q 'nradio,c2000-max' rootfs/etc/init.d/qmodem_reboot
+          grep -q 'skip AT soft reboot on C2000-MAX' rootfs/etc/init.d/qmodem_reboot
+          grep -Fq 'ubus call service list "{\"name\":\"$service\"}"' \
+            rootfs/etc/init.d/qmodem_network
+
+          dumpimage -T flat_dt -p 1 -o validated/c2000max.dtb "$kernel_image"
+          dtc -I dtb -O dts -o validated/c2000max.dts validated/c2000max.dtb
+          grep -q 'nradio,c2000-max' validated/c2000max.dts
+          grep -q '0x14a800' validated/c2000max.dts
+          grep -q 'cpe-pwr' validated/c2000max.dts
+
+          {
+            echo "source_run_id=$SOURCE_RUN_ID"
+            echo "source_commit=${GITHUB_SHA}"
+            echo "sysupgrade_size=$(stat -c %s "$final")"
+            echo "sysupgrade_md5=$(md5sum "$final" | awk '{print $1}')"
+            echo "sysupgrade_sha256=$(sha256sum "$final" | awk '{print $1}')"
+            echo "metadata_supported_devices=$(jq -c '.supported_devices' validated/metadata.json)"
+            echo "rootfs_c2000max_sim_start=$(sed -n 's/^START=//p' rootfs/etc/init.d/c2000max-sim)"
+            echo "rootfs_modem_ready_wait=$(sed -n 's/^MODEM_PORT_WAIT_SECONDS=//p' rootfs/usr/sbin/c2000max-sim)"
+            echo "validation=passed"
+          } | tee validated/VALIDATION.txt
+
+          sha256sum validated/* > validated/SHA256SUMS
+          md5sum "$final" > validated/MD5SUMS
+          ls -lh validated
+
+      - name: Upload validated firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: C2000MAX-V35.35-mt5700-validated-firmware
+          path: validated/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
