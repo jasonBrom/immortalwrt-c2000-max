@@ -44,9 +44,9 @@ jobs:
           path: |
             dl
             .ccache
-          key: ${{ runner.os }}-c2000max-${{ hashFiles('feeds.conf.default', 'configs/c2000max.config') }}
+          key: ${{ runner.os }}-c2000max-v2-${{ hashFiles('feeds.conf.default', 'configs/c2000max.config') }}
           restore-keys: |
-            ${{ runner.os }}-c2000max-
+            ${{ runner.os }}-c2000max-v2-
 
       - name: Install build dependencies
         shell: bash
@@ -88,16 +88,24 @@ jobs:
         shell: bash
         run: |
           test -d bin/targets/mediatek/filogic
-          cd bin/targets/mediatek/filogic
-          sha256sum * > c2000max-build-sha256sums.txt
-          ls -lh
+          mkdir -p c2000max-artifacts
+          find bin/targets/mediatek/filogic -maxdepth 1 -type f \
+            -exec cp -a {} c2000max-artifacts/ \;
+          test -n "$(find c2000max-artifacts -maxdepth 1 -type f -name '*nradio_c2000-max*' -print -quit)"
+          (
+            cd c2000max-artifacts
+            find . -maxdepth 1 -type f ! -name c2000max-build-sha256sums.txt \
+              -printf '%f\0' | sort -z | xargs -0 sha256sum \
+              > c2000max-build-sha256sums.txt
+            ls -lh
+          )
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
           name: C2000MAX-V35.35-mt5700-serialized-recovery
           path: |
-            bin/targets/mediatek/filogic/
+            c2000max-artifacts/
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
