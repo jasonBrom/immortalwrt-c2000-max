@@ -38,6 +38,16 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Restore downloads and compiler cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            dl
+            .ccache
+          key: ${{ runner.os }}-c2000max-${{ hashFiles('feeds.conf.default', 'configs/c2000max.config') }}
+          restore-keys: |
+            ${{ runner.os }}-c2000max-
+
       - name: Install build dependencies
         shell: bash
         run: |
@@ -56,6 +66,8 @@ jobs:
         shell: bash
         run: |
           cp configs/c2000max.config .config
+          ./scripts/config --enable CCACHE
+          ./scripts/config --set-str CCACHE_DIR "$GITHUB_WORKSPACE/.ccache"
           make defconfig
           grep -E '^CONFIG_(TARGET_mediatek_filogic_DEVICE_nradio_c2000-max|TARGET_ROOTFS_PARTSIZE|MTK_HWIFI_MT7993|PACKAGE_c2000max-board|PACKAGE_qmodem|PACKAGE_luci-base)=' .config
 
