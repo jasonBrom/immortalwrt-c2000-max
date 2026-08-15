@@ -29,6 +29,7 @@ jobs:
         run: |
           mkdir -p release-files
           gh run download "$VALIDATION_RUN_ID" \
+            --repo "${GITHUB_REPOSITORY}" \
             --name "$VALIDATED_ARTIFACT" --dir release-files
           test -f release-files/C2000MAX-V35.35-mt5700-serialized-warm-reboot-fix-sysupgrade.bin
           grep -qx 'validation=passed' release-files/VALIDATION.txt
