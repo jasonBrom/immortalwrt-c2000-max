@@ -25,7 +25,10 @@ ROLE_LOCK="${C2000_ROLE_LOCK:-/var/lock/c2000max-port-role.lock}"
 QUEUE_LOCK="${C2000_QUEUE_LOCK:-/var/lock/c2000max-port-role-queue.lock}"
 HNAT_LOCK="${C2000_HNAT_LOCK:-/var/lock/c2000max-hnat.lock}"
 ROLE_LOCK_WAIT="${C2000_ROLE_LOCK_WAIT:-20}"
-QUEUE_LOCK_WAIT="${C2000_QUEUE_LOCK_WAIT:-5}"
+# A repair request can spend JOB_CANCEL_WAIT seconds on TERM and another five
+# seconds on KILL before it is safe to replace the active queue entry.  Keep
+# normal enqueue calls waiting beyond that complete cancellation window.
+QUEUE_LOCK_WAIT="${C2000_QUEUE_LOCK_WAIT:-30}"
 HNAT_LOCK_WAIT="${C2000_HNAT_LOCK_WAIT:-20}"
 SWITCHING="$C2000_SWITCHING"
 DEGRADED="$C2000_DEGRADED"
@@ -111,6 +114,12 @@ hnat_lock_release()
 queue_lock_acquire()
 {
 	flock -w "$QUEUE_LOCK_WAIT" -x 9 || return 1
+	QUEUE_HELD=1
+}
+
+queue_lock_try_acquire()
+{
+	flock -n -x 9 || return 1
 	QUEUE_HELD=1
 }
 
@@ -2163,6 +2172,11 @@ queue_role()
 	if [ -n "$launcher" ]; then
 		(
 			trap - HUP INT TERM
+			# Do not let the detached apply worker inherit the queue lock's
+			# open file description.  If this short-lived RPC process dies
+			# before queue_lock_release(), an inherited descriptor would keep
+			# the queue locked for the entire network transaction.
+			exec 9>&-
 			exec "$launcher" -S -b -m -p "$pid_file" -x "$0" -- \
 				apply "$role" "$job_id" \
 				"$mode" "$ethernet_weight" "$cellular_weight" "$modem" \
@@ -2206,7 +2220,10 @@ job_status()
 		return 1
 	}
 	active="$(cat "$JOB_DIR/active" 2>/dev/null)"
-	if [ "$active" = "$job_id" ] && queue_lock_acquire; then
+	# Status polling must never queue behind a long repair/cancellation pass.
+	# The current JSON remains safe to read; orphan reaping can wait for the
+	# next poll after the enqueue owner releases the lock.
+	if [ "$active" = "$job_id" ] && queue_lock_try_acquire; then
 		reap_orphaned_active_job >/dev/null 2>&1 || true
 		queue_lock_release
 	fi

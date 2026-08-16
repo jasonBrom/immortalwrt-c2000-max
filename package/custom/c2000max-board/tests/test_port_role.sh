@@ -1947,6 +1947,16 @@ grep -q 'exec "\$launcher" -S -b -m -p' "$SCRIPT" &&
 	grep -q 'terminate_job_process' "$SCRIPT" &&
 	grep -q 'reap_orphaned_active_job' "$SCRIPT" ||
 	fail "V31 backend does not track, terminate and reap switch jobs"
+grep -Fq 'QUEUE_LOCK_WAIT="${C2000_QUEUE_LOCK_WAIT:-30}"' "$SCRIPT" ||
+	fail "queue wait does not cover the complete repair cancellation window"
+grep -q '^[[:space:]]*exec 9>&-$' "$SCRIPT" ||
+	fail "detached apply worker can inherit and retain the queue lock descriptor"
+job_status_body="$(sed -n '/^job_status()/,/^}/p' "$SCRIPT")"
+grep -q 'queue_lock_try_acquire' <<<"$job_status_body" ||
+	fail "job status polling can block the task submission queue"
+if grep -q 'queue_lock_acquire' <<<"$job_status_body"; then
+	fail "job status polling still uses the blocking queue lock"
+fi
 
 TURBOACC_VIEW="$ROOT/../../mtk/applications/luci-app-turboacc-mtk/htdocs/luci-static/resources/view/turboacc.js"
 hard_hnat_options="$(
