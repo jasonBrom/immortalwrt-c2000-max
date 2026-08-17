@@ -141,7 +141,10 @@ jobs:
                 ([
                   $source[0].tree[]
                   | select((.path | startswith(".github/workflows/")) and .type != "tree")
-                  | { key: .path, value: { path: .path, sha: null } }
+                  | {
+                      key: .path,
+                      value: { path: .path, mode: .mode, type: .type, sha: null }
+                    }
                 ] + [
                   $default[0].tree[]
                   | select((.path | startswith(".github/workflows/")) and .type != "tree")
