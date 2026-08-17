@@ -106,6 +106,80 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # GitHub refuses release creation with GITHUB_TOKEN when the target
+          # commit changes .github/workflows relative to the default branch.
+          # Build an unreferenced commit with the exact firmware source tree,
+          # except that its top-level workflow files match the default branch.
+          # The release notes still retain SOURCE_SHA as the reproducible build
+          # source; the synthetic commit is only the release/tag anchor.
+          default_branch="$(
+            gh repo view "${GITHUB_REPOSITORY}" \
+              --json defaultBranchRef --jq '.defaultBranchRef.name'
+          )"
+          default_sha="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/commits/${default_branch}" \
+              --jq '.sha'
+          )"
+          source_tree_sha="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/git/commits/${SOURCE_SHA}" \
+              --jq '.tree.sha'
+          )"
+          default_tree_sha="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/git/commits/${default_sha}" \
+              --jq '.tree.sha'
+          )"
+          gh api \
+            "/repos/${GITHUB_REPOSITORY}/git/trees/${source_tree_sha}?recursive=1" \
+            > "$RUNNER_TEMP/c2000max-source-tree.json"
+          gh api \
+            "/repos/${GITHUB_REPOSITORY}/git/trees/${default_tree_sha}?recursive=1" \
+            > "$RUNNER_TEMP/c2000max-default-tree.json"
+          workflow_entries="$(
+            jq -n \
+              --slurpfile source "$RUNNER_TEMP/c2000max-source-tree.json" \
+              --slurpfile default "$RUNNER_TEMP/c2000max-default-tree.json" '
+                ([
+                  $source[0].tree[]
+                  | select((.path | startswith(".github/workflows/")) and .type != "tree")
+                  | { key: .path, value: { path: .path, sha: null } }
+                ] + [
+                  $default[0].tree[]
+                  | select((.path | startswith(".github/workflows/")) and .type != "tree")
+                  | {
+                      key: .path,
+                      value: { path: .path, mode: .mode, type: .type, sha: .sha }
+                    }
+                ])
+                | from_entries
+                | [.[]]
+              '
+          )"
+          if test "$(jq 'length' <<<"$workflow_entries")" -eq 0; then
+            release_target="$SOURCE_SHA"
+          else
+            release_tree_sha="$(
+              jq -n \
+                --arg base_tree "$source_tree_sha" \
+                --argjson tree "$workflow_entries" \
+                '{ base_tree: $base_tree, tree: $tree }' \
+              | gh api --method POST \
+                  "/repos/${GITHUB_REPOSITORY}/git/trees" --input - \
+              | jq -r '.sha'
+            )"
+            release_target="$(
+              jq -n \
+                --arg message \
+                  "C2000MAX V36.01 release anchor for ${SOURCE_SHA}" \
+                --arg tree "$release_tree_sha" \
+                --arg parent "$SOURCE_SHA" \
+                '{ message: $message, tree: $tree, parents: [$parent] }' \
+              | gh api --method POST \
+                  "/repos/${GITHUB_REPOSITORY}/git/commits" --input - \
+              | jq -r '.sha'
+            )"
+          fi
+          test -n "$release_target"
+
           cat > release-notes.md <<EOF
           C2000MAX V36.01 正式固件。
 
@@ -140,7 +214,7 @@ jobs:
           else
             gh release create "$RELEASE_TAG" "${assets[@]}" \
               --repo "${GITHUB_REPOSITORY}" \
-              --target "$SOURCE_SHA" \
+              --target "$release_target" \
               --title 'C2000MAX V36.01 - 流量管理' \
               --notes-file release-notes.md
           fi
