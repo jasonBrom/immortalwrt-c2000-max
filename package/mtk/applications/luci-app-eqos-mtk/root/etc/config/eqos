@@ -2,9 +2,6 @@ config eqos 'config'
 	option enabled      0
 	option download     100
 	option upload       20
-	option statistics_enabled 1
-	option sample_interval 10
-	option flush_interval 3600
 
 # Per-device bandwidth is kbit/s.
 # Under MediaTek HNAT, slots 1~31 use NETSYS V2/V3 64-QDMA HQoS and later
@@ -12,11 +9,12 @@ config eqos 'config'
 # slot is automatically implemented by tc/IFB. The UCI rules never change when
 # the acceleration method changes.
 # qid0 is the default queue and qid63 is reserved for PPD.
-# Configure exactly one of ip or ip6. LuCI may also save selector.
+# Configure exactly one of ip, ip6 or mac. LuCI may also save selector.
 #config device
 #	option enabled  1
 #	option queue    1
 #	option selector 'ip'
 #	option ip       '192.168.1.100'
+#	option mac      'aa:bb:cc:dd:ee:ff'
 #	option download 10000
 #	option upload   5000

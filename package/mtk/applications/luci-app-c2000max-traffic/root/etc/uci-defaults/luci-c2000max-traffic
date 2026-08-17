@@ -1,0 +1,31 @@
+#!/bin/sh
+
+# Preserve settings written by the former combined EQoS page on upgrade.
+if [ "$(uci -q get c2000max_traffic.config.migrated_eqos)" != 1 ]; then
+	old="$(uci -q get eqos.config.statistics_enabled)"
+	[ -z "$old" ] || uci -q set "c2000max_traffic.config.enabled=$old"
+	old="$(uci -q get eqos.config.sample_interval)"
+	[ -z "$old" ] || uci -q set "c2000max_traffic.config.sample_interval=$old"
+	old="$(uci -q get eqos.config.flush_interval)"
+	[ -z "$old" ] || uci -q set "c2000max_traffic.config.flush_interval=$old"
+	uci -q set c2000max_traffic.config.migrated_eqos='1'
+	uci -q delete eqos.config.statistics_enabled
+	uci -q delete eqos.config.sample_interval
+	uci -q delete eqos.config.flush_interval
+	uci -q commit eqos
+fi
+uci -q commit c2000max_traffic
+
+uci -q batch <<-EOF >/dev/null
+	delete ucitrack.@c2000max_traffic[-1]
+	add ucitrack c2000max_traffic
+	set ucitrack.@c2000max_traffic[-1].init=c2000max-traffic
+	commit ucitrack
+EOF
+
+rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*
+[ -n "$IPKG_INSTROOT" ] || {
+	/etc/init.d/c2000max-traffic enable >/dev/null 2>&1
+	/etc/init.d/c2000max-traffic restart >/dev/null 2>&1
+}
+exit 0

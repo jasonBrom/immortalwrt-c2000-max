@@ -1,0 +1,14 @@
+{
+	"admin/services/c2000max-traffic": {
+		"title": "流量统计",
+		"order": 61,
+		"action": {
+			"type": "view",
+			"path": "c2000max/traffic"
+		},
+		"depends": {
+			"acl": [ "luci-app-c2000max-traffic" ],
+			"uci": { "c2000max_traffic": true }
+		}
+	}
+}

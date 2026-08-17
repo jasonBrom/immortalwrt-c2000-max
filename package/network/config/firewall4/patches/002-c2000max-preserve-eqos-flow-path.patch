@@ -1,13 +1,13 @@
 From: C2000MAX maintainers
 Subject: [PATCH] fw4: keep EQoS-marked connections out of flowtable
 
-C2000MAX uses mark 0x99 for a small set of connections shaped by tc/IFB.
+C2000MAX sets a dedicated high-order bit for connections shaped by tc/IFB.
 Do not add those connections to the software flowtable, otherwise the fast
-forwarding path can bypass the selected queue. All unmarked traffic remains
-eligible for flow offload.
+forwarding path can bypass the selected queue. Testing one bit preserves
+mwan3 and other applications' packet marks.
 
 --- a/root/usr/share/firewall4/templates/ruleset.uc
 +++ b/root/usr/share/firewall4/templates/ruleset.uc
 @@ -138,1 +138,1 @@
 -		meta l4proto { tcp, udp } flow offload @ft;
-+		meta mark != 0x99 meta l4proto { tcp, udp } flow offload @ft;
++		meta mark & 0x00800000 == 0 meta l4proto { tcp, udp } flow offload @ft;

@@ -71,7 +71,7 @@ c2000_desired_hnat_settings()
 	# The traffic collector consumes hardware MIB deltas through conntrack.
 	# Keep this driver bridge enabled whenever statistics are enabled, even if
 	# an older saved TurboACC configuration had disabled the optional counter.
-	statistics_enabled="$(uci -q get eqos.config.statistics_enabled)"
+	statistics_enabled="$(uci -q get c2000max_traffic.config.enabled)"
 	[ "$statistics_enabled" = 0 ] || update_nfct=1
 	printf 'bind_rate=%s update_nfct=%s\n' "$bind_rate" "$update_nfct"
 }
@@ -542,8 +542,8 @@ reload_service()
 
 service_triggers()
 {
-	# statistics_enabled changes whether type-7 HNAT MIB deltas are copied
-	# into conntrack. Reapply the driver setting immediately when EQoS traffic
+	# The collector toggle changes whether type-7 HNAT MIB deltas are copied
+	# into conntrack. Reapply the driver setting immediately when traffic
 	# accounting is toggled, without waiting for the next acceleration switch.
-	procd_add_reload_trigger turboacc eqos
+	procd_add_reload_trigger turboacc eqos c2000max_traffic
 }

@@ -3954,7 +3954,7 @@ static unsigned int mtk_hnat_nf_post_routing(
 	if (unlikely(!skb_hnat_is_hashed(skb)))
 		return 0;
 
-	if (unlikely(skb->mark == HNAT_EXCEPTION_TAG))
+	if (unlikely(skb->mark & HNAT_EXCEPTION_TAG))
 		return 0;
 
 	/* Get bond device slave for the following binding flow */

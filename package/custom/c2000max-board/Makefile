@@ -14,7 +14,8 @@ define Package/c2000max-board
   PKGARCH:=all
 	DEPENDS:=+qmodem +luci-base +jq +jsonfilter +ip-full +firewall4 \
 	+kmod-dummy +kmod-mediatek_hnat +mtkhnat_util +hnat-detect \
-	+luci-app-turboacc-mtk +luci-app-eqos-mtk +mwan3 +coreutils-timeout \
+	+luci-app-turboacc-mtk +luci-app-eqos-mtk +luci-app-c2000max-traffic \
+	+mwan3 +coreutils-timeout \
 	+flock +uboot-envtools +zram-swap +gawk +grep +sed +coreutils-sort \
 	+luci-app-netbird +netbird
 endef

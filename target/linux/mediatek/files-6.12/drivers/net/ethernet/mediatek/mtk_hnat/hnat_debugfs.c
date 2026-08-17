@@ -3311,15 +3311,15 @@ static void hnat_qos_toggle_usage(void)
 static int hnat_qos_toggle_read(struct seq_file *m, void *private)
 {
 	if (qos_toggle == 0) {
-		pr_info("HQoS is disabled now!\n");
+		seq_puts(m, "mode=disabled uplink=disabled downlink=disabled\n");
 	} else if (qos_toggle == 1) {
-		pr_info("HQoS is enabled now!\n");
-		pr_info("HQoS uplink is %s now!\n",
-				qos_ul_toggle ? "enabled" : "disabled");
-		pr_info("HQoS downlink is %s now!\n",
-				qos_dl_toggle ? "enabled" : "disabled");
+		seq_printf(m, "mode=hqos uplink=%s downlink=%s\n",
+			   qos_ul_toggle ? "enabled" : "disabled",
+			   qos_dl_toggle ? "enabled" : "disabled");
 	} else if (qos_toggle == 2) {
-		pr_info("Per-port-per-queue mode is enabled!\n");
+		seq_puts(m, "mode=pppq uplink=enabled downlink=enabled\n");
+	} else {
+		seq_printf(m, "mode=unknown value=%d\n", qos_toggle);
 	}
 
 	return 0;
@@ -4131,7 +4131,7 @@ int hnat_init_debugfs(struct mtk_hnat *h)
 			    &hnat_mcast_member_fops);
 	debugfs_create_file("mape_toggle", 0444, root, h,
 			    &hnat_mape_toggle_fops);
-	debugfs_create_file("qos_toggle", 0444, root, h,
+	debugfs_create_file("qos_toggle", 0600, root, h,
 			    &hnat_qos_toggle_fops);
 	debugfs_create_file("hnat_version", 0444, root, h,
 			    &hnat_version_fops);

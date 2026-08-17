@@ -45,6 +45,26 @@ is_uinteger() {
 	return 0
 }
 
+valid_mac() {
+	case "$1" in
+		[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]) return 0 ;;
+	esac
+	return 1
+}
+
+addresses_for_mac() {
+	local wanted
+
+	wanted="$(printf '%s' "$1" | tr 'A-F' 'a-f')"
+	{
+		awk -v mac="$wanted" 'tolower($2) == mac { print $3 }' /tmp/dhcp.leases 2>/dev/null
+		ip neigh show dev br-lan 2>/dev/null |
+			awk -v mac="$wanted" '{ for (i=1; i<NF; i++) if ($i=="lladdr" && tolower($(i+1))==mac) print $1 }'
+		ip -6 neigh show dev br-lan 2>/dev/null |
+			awk -v mac="$wanted" '{ for (i=1; i<NF; i++) if ($i=="lladdr" && tolower($(i+1))==mac) print $1 }'
+	} | sort -u
+}
+
 validate_device() {
 	local cfg="$1"
 	local enabled
@@ -52,10 +72,11 @@ validate_device() {
 	config_get_bool enabled "$cfg" enabled 1
 	[ "$enabled" -eq 1 ] || return 0
 
-	local ip ip6 queue selector selector_count selector_key
+	local ip ip6 mac queue selector selector_count selector_key
 	local download upload
 	config_get ip "$cfg" ip
 	config_get ip6 "$cfg" ip6
+	config_get mac "$cfg" mac
 	config_get download "$cfg" download 0
 	config_get upload "$cfg" upload 0
 	config_get queue "$cfg" queue
@@ -98,17 +119,18 @@ validate_device() {
 	selector_count=0
 	[ -z "$ip" ] || selector_count=$((selector_count + 1))
 	[ -z "$ip6" ] || selector_count=$((selector_count + 1))
+	[ -z "$mac" ] || selector_count=$((selector_count + 1))
 
 	if [ "$selector_count" -ne 1 ]; then
-		echo "eqos: $cfg must set exactly one match field: ip or ip6" >&2
+		echo "eqos: $cfg must set exactly one match field: ip, ip6 or mac" >&2
 		CONFIG_ERROR=1
 		return 0
 	fi
 
 	case "$selector" in
-		''|ip|ip6) ;;
+		''|ip|ip6|mac) ;;
 		*)
-			echo "eqos: $cfg selector must be ip or ip6" >&2
+			echo "eqos: $cfg selector must be ip, ip6 or mac" >&2
 			CONFIG_ERROR=1
 			return 0
 			;;
@@ -129,12 +151,27 @@ validate_device() {
 				return 0
 			fi
 			;;
+		mac)
+			if [ -z "$mac" ]; then
+				echo "eqos: $cfg selector does not match configured field" >&2
+				CONFIG_ERROR=1
+				return 0
+			fi
+			;;
 	esac
 
 	if [ -n "$ip" ]; then
 		selector_key="ip:$ip"
-	else
+	elif [ -n "$ip6" ]; then
 		selector_key="ip6:$ip6"
+	else
+		if ! valid_mac "$mac"; then
+			echo "eqos: $cfg has an invalid MAC address" >&2
+			CONFIG_ERROR=1
+			return 0
+		fi
+		mac="$(printf '%s' "$mac" | tr 'A-F' 'a-f')"
+		selector_key="mac:$mac"
 	fi
 
 	case "$USED_SELECTORS" in
@@ -154,9 +191,10 @@ parse_device() {
 	config_get_bool enabled "$cfg" enabled 1
 	[ "$enabled" -eq 1 ] || return 0
 
-	local ip ip6 address download upload queue total_download total_upload
+	local ip ip6 mac address resolved download upload queue total_download total_upload
 	config_get ip "$cfg" ip
 	config_get ip6 "$cfg" ip6
+	config_get mac "$cfg" mac
 	config_get download "$cfg" download 0
 	config_get upload "$cfg" upload 0
 	config_get queue "$cfg" queue
@@ -166,10 +204,23 @@ parse_device() {
 
 	address="$ip"
 	[ -n "$address" ] || address="$ip6"
+	[ -n "$address" ] || address="$mac"
 	if ! eqos add "$EQOS_BACKEND" "$queue" "$download" "$upload" "$address" \
 		"$total_download" "$total_upload"; then
 		CONFIG_ERROR=1
+		return 0
 	fi
+
+	# MAC is the stable selector used by tc and uplink HQoS. Add every known
+	# address too, so routed downloads are marked before br-lan rewrites L2.
+	[ -n "$mac" ] || return 0
+	for resolved in $(addresses_for_mac "$mac"); do
+		if ! eqos add "$EQOS_BACKEND" "$queue" "$download" "$upload" "$resolved" \
+			"$total_download" "$total_upload"; then
+			CONFIG_ERROR=1
+			return 0
+		fi
+	done
 }
 
 eqos_start_service_locked() {

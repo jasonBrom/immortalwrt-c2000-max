@@ -4,6 +4,7 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 TRAFFIC="$ROOT/root/usr/sbin/c2000max-traffic"
+EQOS_ROOT="$ROOT/../luci-app-eqos-mtk"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
@@ -63,13 +64,32 @@ grep -q '^aa:bb:cc:dd:ee:01	192.168.66.10	phone	200	400	0	0	0	0	1700000000$' \
 grep -q '^aa:bb:cc:dd:ee:02	192.168.66.11	laptop	0	0	50	50	0	0	1700000000$' \
 	"$TOTALS_FILE" || fail "broadband device total is wrong"
 
-sh -n "$TRAFFIC" "$ROOT/root/usr/sbin/eqos" \
-	"$ROOT/root/etc/init.d/eqos" "$ROOT/root/etc/init.d/c2000max-traffic" \
-	"$ROOT/root/usr/libexec/rpcd/c2000max.traffic"
+HISTORY_FILE="$TMP/history.tsv"
+: > "$HISTORY_FILE"
+uci() {
+	case "$*" in
+		*history_interval) echo 60 ;;
+		*history_points) echo 10 ;;
+	esac
+}
+append_history 1700000000
+append_history 1700000030
+[ "$(wc -l < "$HISTORY_FILE")" -eq 1 ] || fail "history interval was not enforced"
+append_history 1700000060
+[ "$(wc -l < "$HISTORY_FILE")" -eq 2 ] || fail "history sample was not appended"
 
-grep -Fq 'meta mark != 0x99 meta l4proto' \
+sh -n "$TRAFFIC" "$EQOS_ROOT/root/usr/sbin/eqos" \
+	"$EQOS_ROOT/root/etc/init.d/eqos" "$ROOT/root/etc/init.d/c2000max-traffic" \
+	"$ROOT/root/usr/libexec/rpcd/c2000max.traffic" \
+	"$EQOS_ROOT/root/usr/libexec/rpcd/c2000max.eqos"
+
+grep -Fq 'meta mark & 0x00800000 == 0 meta l4proto' \
 	"$ROOT/../../../network/config/firewall4/patches/002-c2000max-preserve-eqos-flow-path.patch" ||
 	fail "firewall4 does not exclude shaped flows"
+grep -q 'flower.*src_mac\|"${key}_mac"' "$EQOS_ROOT/root/usr/sbin/eqos" ||
+	fail "EQoS does not implement MAC tc matching"
+grep -q 'ether "$addr"' "$EQOS_ROOT/root/usr/sbin/eqos" ||
+	fail "EQoS does not implement MAC nft matching"
 grep -q 'debugfs_create_file("mib_sync"' \
 	"$ROOT/../../../../target/linux/mediatek/files-6.12/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c" ||
 	fail "HNAT driver does not expose the lightweight MIB sync path"

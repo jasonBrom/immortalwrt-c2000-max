@@ -1,6 +1,7 @@
 {
 	"admin/services/eqos": {
-		"title": "流量管理",
+		"title": "网络限速",
+		"order": 60,
 		"action": {
 			"type": "view",
 			"path": "eqos"

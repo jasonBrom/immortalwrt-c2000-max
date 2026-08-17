@@ -6,6 +6,7 @@ TOTALS_FILE="$RUNTIME_DIR/totals.tsv"
 SNAPSHOT_FILE="$RUNTIME_DIR/conntrack.tsv"
 UPDATED_FILE="$RUNTIME_DIR/updated"
 FLUSHED_FILE="$RUNTIME_DIR/flushed"
+HISTORY_FILE="$RUNTIME_DIR/history.tsv"
 LOCK_FILE="$RUNTIME_DIR/collector.lock"
 DAEMON_PID_FILE="$RUNTIME_DIR/daemon.pid"
 PERSIST_FILE="$PERSIST_DIR/usage.tsv"
@@ -21,6 +22,7 @@ ensure_runtime()
 			: > "$TOTALS_FILE" || return 1
 		fi
 	}
+	[ -f "$HISTORY_FILE" ] || : > "$HISTORY_FILE" || return 1
 }
 
 network_device()
@@ -278,6 +280,30 @@ merge_totals()
 		}' "$TOTALS_FILE" "$deltas" > "$tmp" && mv "$tmp" "$TOTALS_FILE"
 }
 
+append_history()
+{
+	local now="$1" interval points last tmp totals
+
+	interval="$(uci -q get c2000max_traffic.config.history_interval)"
+	points="$(uci -q get c2000max_traffic.config.history_points)"
+	case "$interval" in ''|*[!0-9]*) interval=60 ;; esac
+	case "$points" in ''|*[!0-9]*) points=1440 ;; esac
+	[ "$interval" -ge 10 ] 2>/dev/null || interval=10
+	[ "$points" -ge 10 ] 2>/dev/null || points=10
+	[ "$points" -le 2880 ] 2>/dev/null || points=2880
+	last="$(tail -n 1 "$HISTORY_FILE" 2>/dev/null | cut -f1)"
+	case "$last" in ''|*[!0-9]*) last=0 ;; esac
+	[ $((now - last)) -ge "$interval" ] || return 0
+
+	totals="$(awk -F '\t' '$0 !~ /^#/ && NF >= 10 {
+		fu += $4; fd += $5; ou += $6; od += $7; uu += $8; ud += $9
+	} END { printf "%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f", fu,fd,ou,od,uu,ud }' \
+		"$TOTALS_FILE")" || return 1
+	printf '%s\t%s\n' "$now" "$totals" >> "$HISTORY_FILE" || return 1
+	tmp="${HISTORY_FILE}.tmp"
+	tail -n "$points" "$HISTORY_FILE" > "$tmp" && mv "$tmp" "$HISTORY_FILE"
+}
+
 flush_totals()
 {
 	local tmp
@@ -308,10 +334,11 @@ sample_once()
 	parse_conntrack "$hosts" "$raw" "$current" || return 1
 	calculate_deltas "$marks" "$SNAPSHOT_FILE" "$current" "$deltas" "$fallback" "$now" || return 1
 	merge_totals "$deltas" || return 1
+	append_history "$now" || return 1
 	mv "$current" "$SNAPSHOT_FILE" || return 1
 	printf '%s\n' "$now" > "$UPDATED_FILE"
 
-	flush_interval="$(uci -q get eqos.config.flush_interval)"
+	flush_interval="$(uci -q get c2000max_traffic.config.flush_interval)"
 	case "$flush_interval" in ''|*[!0-9]*) flush_interval=3600 ;; esac
 	last_flush="$(cat "$FLUSHED_FILE" 2>/dev/null)"
 	case "$last_flush" in ''|*[!0-9]*) last_flush=0 ;; esac
@@ -320,7 +347,7 @@ sample_once()
 
 status_json()
 {
-	local effective backend source updated active=0 key ip name fu fd ou od uu ud seen
+	local effective source updated active=0 key ip name fu fd ou od uu ud seen
 	local total_fu=0 total_fd=0 total_ou=0 total_od=0 total_uu=0 total_ud=0
 	local rows="$RUNTIME_DIR/status.rows" daemon_pid
 
@@ -337,7 +364,6 @@ status_json()
 			;;
 	esac
 	effective="$(cat /var/run/c2000max-hnat-effective 2>/dev/null)"
-	backend="$(cat /var/run/eqos/backend 2>/dev/null)"
 	updated="$(cat "$UPDATED_FILE" 2>/dev/null)"
 	case "$updated" in ''|*[!0-9]*) updated=0 ;; esac
 	case "$effective" in
@@ -350,7 +376,6 @@ status_json()
 	json_init
 	json_add_boolean active "$active"
 	json_add_string acceleration "${effective:-unknown}"
-	json_add_string limiter_backend "${backend:-inactive}"
 	json_add_string counter_source "$source"
 	json_add_int updated "$updated"
 	json_add_array devices
@@ -387,6 +412,20 @@ status_json()
 	json_add_string unknown_upload "$total_uu"
 	json_add_string unknown_download "$total_ud"
 	json_close_object
+	json_add_array history
+	while IFS="$(printf '\t')" read -r seen fu fd ou od uu ud; do
+		case "$seen" in ''|*[!0-9]*) continue ;; esac
+		json_add_object ""
+		json_add_int timestamp "$seen"
+		json_add_string fiveg_upload "${fu:-0}"
+		json_add_string fiveg_download "${fd:-0}"
+		json_add_string other_upload "${ou:-0}"
+		json_add_string other_download "${od:-0}"
+		json_add_string unknown_upload "${uu:-0}"
+		json_add_string unknown_download "${ud:-0}"
+		json_close_object
+	done < "$HISTORY_FILE"
+	json_close_array
 	json_dump
 }
 
@@ -398,6 +437,7 @@ reset_totals()
 	: > "$TOTALS_FILE" || return 1
 	: > "$SNAPSHOT_FILE" || return 1
 	: > "$PERSIST_FILE" || return 1
+	: > "$HISTORY_FILE" || return 1
 	date +%s > "$UPDATED_FILE"
 	date +%s > "$FLUSHED_FILE"
 	printf '{"success":true}\n'
@@ -412,7 +452,7 @@ daemon_loop()
 	trap 'flush_totals >/dev/null 2>&1; rm -f "$DAEMON_PID_FILE"; exit 0' HUP INT TERM
 	while :; do
 		sample_once || logger -t c2000max-traffic "traffic sample failed"
-		interval="$(uci -q get eqos.config.sample_interval)"
+		interval="$(uci -q get c2000max_traffic.config.sample_interval)"
 		case "$interval" in ''|*[!0-9]*) interval=10 ;; esac
 		[ "$interval" -ge 5 ] 2>/dev/null || interval=5
 		[ "$interval" -le 300 ] 2>/dev/null || interval=300

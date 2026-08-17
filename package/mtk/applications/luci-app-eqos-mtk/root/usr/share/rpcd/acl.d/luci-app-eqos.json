@@ -1,15 +1,15 @@
 {
 	"luci-app-eqos": {
-		"description": "Grant access to C2000MAX traffic management",
+		"description": "Grant access to C2000MAX rate limiting",
 		"read": {
 			"ubus": {
-				"c2000max.traffic": [ "status" ]
+				"c2000max.eqos": [ "status" ]
 			},
 			"uci": [ "eqos" ]
 		},
 		"write": {
 			"ubus": {
-				"c2000max.traffic": [ "sample", "reset" ]
+				"c2000max.eqos": [ "apply" ]
 			},
 			"uci": [ "eqos" ]
 		}

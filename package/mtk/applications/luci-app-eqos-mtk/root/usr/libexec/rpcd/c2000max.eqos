@@ -1,0 +1,78 @@
+#!/bin/sh
+
+RUNTIME_DIR=/var/run/eqos
+ERROR_FILE="$RUNTIME_DIR/last_error"
+
+status_json()
+{
+	local enabled backend effective active=0 reason error qos_state
+
+	enabled="$(uci -q get eqos.config.enabled)"
+	[ "$enabled" = 1 ] || enabled=0
+	backend="$(cat "$RUNTIME_DIR/backend" 2>/dev/null)"
+	effective="$(cat /var/run/c2000max-hnat-effective 2>/dev/null)"
+	error="$(cat "$ERROR_FILE" 2>/dev/null)"
+
+	if [ "$enabled" = 1 ]; then
+		case "$backend" in
+			hnat)
+				qos_state="$(cat /sys/kernel/debug/hnat/qos_toggle 2>/dev/null)"
+				if [ "$effective" = mediatek_hnat ] &&
+				   [ "$(cat /sys/kernel/debug/hnat/hook_toggle 2>/dev/null)" = enabled ] &&
+				   printf '%s' "$qos_state" | grep -q 'mode=hqos' &&
+				   nft list table inet eqos >/dev/null 2>&1; then
+					active=1
+				else
+					reason="HNAT HQoS 运行态校验失败"
+				fi
+				;;
+			software)
+				if tc qdisc show dev br-lan 2>/dev/null | grep -q 'qdisc htb 1:' &&
+				   tc qdisc show dev ifb-eqos 2>/dev/null | grep -q 'qdisc htb 1:' &&
+				   nft list table inet eqos >/dev/null 2>&1; then
+					active=1
+				else
+					reason="tc/IFB 运行态校验失败"
+				fi
+				;;
+			*) reason="配置已启用，但没有已应用的限速后端" ;;
+		esac
+	fi
+	[ -n "$error" ] || error="$reason"
+
+	. /usr/share/libubox/jshn.sh
+	json_init
+	json_add_boolean enabled "$enabled"
+	json_add_boolean active "$active"
+	json_add_string acceleration "${effective:-unknown}"
+	json_add_string backend "${backend:-inactive}"
+	json_add_string error "$error"
+	json_dump
+}
+
+apply_config()
+{
+	local tmp
+
+	mkdir -p "$RUNTIME_DIR" || exit 1
+	tmp="$RUNTIME_DIR/apply.$$"
+	if /etc/init.d/eqos reload >"$tmp" 2>&1; then
+		rm -f "$ERROR_FILE" "$tmp"
+	else
+		mv "$tmp" "$ERROR_FILE"
+	fi
+	status_json
+}
+
+case "$1" in
+	list)
+		printf '%s\n' '{"status":{},"apply":{}}'
+		;;
+	call)
+		read -r input
+		case "$2" in
+			status) status_json ;;
+			apply) apply_config ;;
+		esac
+		;;
+esac

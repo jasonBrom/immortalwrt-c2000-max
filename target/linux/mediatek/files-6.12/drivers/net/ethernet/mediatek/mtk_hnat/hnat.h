@@ -259,7 +259,7 @@
 /* If the user wants to set skb->mark to prevent hardware acceleration
  * for the packet flow.
  */
-#define HNAT_EXCEPTION_TAG	0x99
+#define HNAT_EXCEPTION_TAG	0x00800000
 
 /*--------------------------------------------------------------------------*/
 /* Descriptor Structure */

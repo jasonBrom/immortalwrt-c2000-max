@@ -14,7 +14,7 @@ TABLE_FAMILY="inet"
 TABLE_NAME="eqos"
 CHAIN_NAME="forward"
 MARK_CLEAR_MASK="0xffff0000"
-HNAT_EXCEPTION_MARK="0x99"
+FLOW_BYPASS_MARK="0x00800000"
 
 QDMA_QUEUE_COUNT=64
 QDMA_RATE_MAX=1000000
@@ -66,6 +66,13 @@ valid_ipv6() {
 	esac
 
 	return 0
+}
+
+valid_mac() {
+	case "$1" in
+		[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]) return 0 ;;
+	esac
+	return 1
 }
 
 need_nft() {
@@ -176,10 +183,10 @@ EOF
 
 	if [ "$backend" = hnat ]; then
 		"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
-			iifname "$dev" meta mark != "$HNAT_EXCEPTION_MARK" \
+			iifname "$dev" meta mark '&' "$FLOW_BYPASS_MARK" '==' 0 \
 			meta mark set meta mark '&' "$MARK_CLEAR_MASK" || return 1
 		"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
-			oifname "$dev" meta mark != "$HNAT_EXCEPTION_MARK" \
+			oifname "$dev" meta mark '&' "$FLOW_BYPASS_MARK" '==' 0 \
 			meta mark set meta mark '&' "$MARK_CLEAR_MASK" || return 1
 	fi
 }
@@ -300,6 +307,10 @@ tc_filter_rule() {
 			tc filter add dev "$tcdev" parent 1: protocol ipv6 pref "$pref" u32 \
 				match ip6 "$key" "$value" flowid "1:$classid"
 			;;
+		mac)
+			tc filter add dev "$tcdev" parent 1: protocol all pref "$pref" flower \
+				"${key}_mac" "$value" classid "1:$classid"
+			;;
 		*)
 			return 1
 			;;
@@ -312,12 +323,13 @@ program_tc_queue() {
 	local rate="$3"
 	local ip4="$4"
 	local ip6="$5"
-	local dev="$6"
+	local mac="$6"
+	local dev="$7"
 	local classid tcdev
 
 	[ "$rate" -eq 0 ] && return 0
-	[ -n "$ip4$ip6" ] ||
-		die "software tc queue requires an IPv4 or IPv6 selector"
+	[ -n "$ip4$ip6$mac" ] ||
+		die "software tc queue requires an IPv4, IPv6 or MAC selector"
 
 	case "$dir" in
 		up) tcdev="$IFB_DEV" ;;
@@ -330,6 +342,7 @@ program_tc_queue() {
 		htb rate "${rate}kbit" ceil "${rate}kbit" || return 1
 	tc_filter_rule "$dir" ip "$ip4" "$slot" "$classid" "$dev" || return 1
 	tc_filter_rule "$dir" ip6 "$ip6" "$slot" "$classid" "$dev" || return 1
+	tc_filter_rule "$dir" mac "$mac" "$slot" "$classid" "$dev" || return 1
 }
 
 nft_mark_rule() {
@@ -353,14 +366,20 @@ nft_mark_rule() {
 		ip)
 			"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
 				ip "$addr" "$value" \
-				meta mark != "$HNAT_EXCEPTION_MARK" \
-				meta mark set "$qid"
+				meta mark '&' "$FLOW_BYPASS_MARK" '==' 0 \
+				meta mark set meta mark '|' "$qid"
 			;;
 		ip6)
 			"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
 				ip6 "$addr" "$value" \
-				meta mark != "$HNAT_EXCEPTION_MARK" \
-				meta mark set "$qid"
+				meta mark '&' "$FLOW_BYPASS_MARK" '==' 0 \
+				meta mark set meta mark '|' "$qid"
+			;;
+		mac)
+			"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
+				ether "$addr" "$value" \
+				meta mark '&' "$FLOW_BYPASS_MARK" '==' 0 \
+				meta mark set meta mark '|' "$qid"
 			;;
 		*)
 			return 1
@@ -388,12 +407,17 @@ nft_exception_rule() {
 		ip)
 			"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
 				ip "$addr" "$value" \
-				meta mark set "$HNAT_EXCEPTION_MARK"
+				meta mark set meta mark '|' "$FLOW_BYPASS_MARK"
 			;;
 		ip6)
 			"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
 				ip6 "$addr" "$value" \
-				meta mark set "$HNAT_EXCEPTION_MARK"
+				meta mark set meta mark '|' "$FLOW_BYPASS_MARK"
+			;;
+		mac)
+			"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
+				ether "$addr" "$value" \
+				meta mark set meta mark '|' "$FLOW_BYPASS_MARK"
 			;;
 		*)
 			return 1
@@ -408,8 +432,9 @@ add_rule() {
 	local up="$4"
 	local ip4="$5"
 	local ip6="$6"
-	local total_dl="$7"
-	local total_up="$8"
+	local mac="$7"
+	local total_dl="$8"
+	local total_up="$9"
 	local dev="$DEV_DEFAULT"
 	local up_qid dl_qid selector_count
 
@@ -425,12 +450,15 @@ add_rule() {
 		die "invalid IPv4 selector"
 	[ -n "$ip6" ] && valid_ipv6 "$ip6" || [ -z "$ip6" ] ||
 		die "invalid IPv6 selector"
+	[ -n "$mac" ] && valid_mac "$mac" || [ -z "$mac" ] ||
+		die "invalid MAC selector"
 
 	selector_count=0
 	[ -z "$ip4" ] || selector_count=$((selector_count + 1))
 	[ -z "$ip6" ] || selector_count=$((selector_count + 1))
+	[ -z "$mac" ] || selector_count=$((selector_count + 1))
 	[ "$selector_count" -eq 1 ] ||
-		die "exactly one selector is required: IPv4 or IPv6"
+		die "exactly one selector is required: IPv4, IPv6 or MAC"
 
 	[ "$dl" -ne 0 ] || [ "$up" -ne 0 ] || return 0
 
@@ -441,15 +469,17 @@ add_rule() {
 
 	if [ "$backend" = software ]; then
 		ensure_tc_qos "$dev" "$total_dl" "$total_up" || return 1
-		program_tc_queue up "$slot" "$up" "$ip4" "$ip6" "$dev" || return 1
-		program_tc_queue dl "$slot" "$dl" "$ip4" "$ip6" "$dev" || return 1
+		program_tc_queue up "$slot" "$up" "$ip4" "$ip6" "$mac" "$dev" || return 1
+		program_tc_queue dl "$slot" "$dl" "$ip4" "$ip6" "$mac" "$dev" || return 1
 		# Flowtable forwarding bypasses tc. Tag both directions of every
 		# limited connection so firewall4 keeps only those flows on the regular
 		# forwarding path; mwan3's conntrack mark remains untouched.
 		nft_exception_rule up ip "$ip4" || return 1
 		nft_exception_rule up ip6 "$ip6" || return 1
+		nft_exception_rule up mac "$mac" || return 1
 		nft_exception_rule dl ip "$ip4" || return 1
 		nft_exception_rule dl ip6 "$ip6" || return 1
+		nft_exception_rule dl mac "$mac" || return 1
 		return 0
 	fi
 
@@ -458,13 +488,15 @@ add_rule() {
 
 	if [ "$slot" -gt "$QUEUE_SLOTS" ]; then
 		ensure_tc_qos "$dev" "$total_dl" "$total_up" || return 1
-		program_tc_queue up "$slot" "$up" "$ip4" "$ip6" "$dev" || return 1
-		program_tc_queue dl "$slot" "$dl" "$ip4" "$ip6" "$dev" || return 1
+		program_tc_queue up "$slot" "$up" "$ip4" "$ip6" "$mac" "$dev" || return 1
+		program_tc_queue dl "$slot" "$dl" "$ip4" "$ip6" "$mac" "$dev" || return 1
 
 		nft_exception_rule up ip "$ip4" || return 1
 		nft_exception_rule up ip6 "$ip6" || return 1
+		nft_exception_rule up mac "$mac" || return 1
 		nft_exception_rule dl ip "$ip4" || return 1
 		nft_exception_rule dl ip6 "$ip6" || return 1
+		nft_exception_rule dl mac "$mac" || return 1
 
 		return 0
 	fi
@@ -478,11 +510,13 @@ add_rule() {
 	if [ "$up" -ne 0 ]; then
 		nft_mark_rule up ip "$ip4" "$up_qid" || return 1
 		nft_mark_rule up ip6 "$ip6" "$up_qid" || return 1
+		nft_mark_rule up mac "$mac" "$up_qid" || return 1
 	fi
 
 	if [ "$dl" -ne 0 ]; then
 		nft_mark_rule dl ip "$ip4" "$dl_qid" || return 1
 		nft_mark_rule dl ip6 "$ip6" "$dl_qid" || return 1
+		nft_mark_rule dl mac "$mac" "$dl_qid" || return 1
 	fi
 
 }
@@ -495,7 +529,7 @@ add_inferred_rule() {
 	local selector="$5"
 	local total_dl="$6"
 	local total_up="$7"
-	local ip4 ip6
+	local ip4 ip6 mac
 
 	[ -n "$selector" ] || die "selector is required"
 
@@ -503,11 +537,13 @@ add_inferred_rule() {
 		ip4="$selector"
 	elif valid_ipv6 "$selector"; then
 		ip6="$selector"
+	elif valid_mac "$selector"; then
+		mac="$(printf '%s' "$selector" | tr 'A-F' 'a-f')"
 	else
-		die "selector must be an IPv4 or IPv6 address"
+		die "selector must be an IPv4, IPv6 or MAC address"
 	fi
 
-	add_rule "$backend" "$slot" "$dl" "$up" "$ip4" "$ip6" "$total_dl" "$total_up"
+	add_rule "$backend" "$slot" "$dl" "$up" "$ip4" "$ip6" "$mac" "$total_dl" "$total_up"
 }
 
 activate_backend() {
@@ -518,7 +554,7 @@ activate_backend() {
 			# Existing FOE entries were bound before the new per-device marks
 			# existed. Invalidate every PPE cache without toggling or changing
 			# the user's selected acceleration mode; the next packets rebind with
-			# the HQoS queue or 0x99 software-fallback mark.
+			# the HQoS queue or software-fallback bypass bit.
 			[ -w "$HNAT_DIR/hnat_entry" ] || return 1
 			for command in 3 5 7; do
 				printf '%s -1\n' "$command" > "$HNAT_DIR/hnat_entry" || return 1
@@ -590,7 +626,7 @@ Usage: $0 <command> [options]
 
 Commands:
   start <hnat|software> <download_mbit> <upload_mbit>
-  add <hnat|software> <slot> <download_kbit> <upload_kbit> <ipv4|ipv6> [total_down_mbit] [total_up_mbit]
+  add <hnat|software> <slot> <download_kbit> <upload_kbit> <ipv4|ipv6|mac> [total_down_mbit] [total_up_mbit]
   activate <hnat|software>
   stop
 
