@@ -58,7 +58,7 @@ sync_whnat_optional()
 
 c2000_desired_hnat_settings()
 {
-	local bind_rate update_nfct
+	local bind_rate update_nfct statistics_enabled
 
 	bind_rate="$(uci -q get turboacc.config.fastpath_mh_bind_rate)"
 	case "$bind_rate" in
@@ -68,6 +68,11 @@ c2000_desired_hnat_settings()
 		[ "$bind_rate" -le 30 ] 2>/dev/null || bind_rate=30
 	update_nfct="$(uci -q get turboacc.config.fastpath_mh_update_nfct)"
 	[ "$update_nfct" = 1 ] || update_nfct=0
+	# The traffic collector consumes hardware MIB deltas through conntrack.
+	# Keep this driver bridge enabled whenever statistics are enabled, even if
+	# an older saved TurboACC configuration had disabled the optional counter.
+	statistics_enabled="$(uci -q get eqos.config.statistics_enabled)"
+	[ "$statistics_enabled" = 0 ] || update_nfct=1
 	printf 'bind_rate=%s update_nfct=%s\n' "$bind_rate" "$update_nfct"
 }
 
@@ -327,6 +332,13 @@ apply_mode_locked()
 {
 	local requested fastpath role access_enabled sw_changed=0
 
+	# All callers own HNAT here. Settle the last hardware MIB delta directly
+	# into conntrack without taking the collector lock; a concurrent sampler can
+	# safely consume it after this acceleration transaction completes.
+	[ ! -x /usr/sbin/c2000max-traffic ] ||
+		C2000MAX_ACCEL_LOCKS_HELD=1 \
+		/usr/sbin/c2000max-traffic mib-sync >/dev/null 2>&1 || true
+
 	if ! command -v c2000_actual_role >/dev/null 2>&1; then
 		fail_closed
 		return $?
@@ -513,10 +525,25 @@ apply_mode()
 
 start_service()
 {
-	apply_mode
+	apply_mode || return $?
+	# A normal TurboACC switch has released ROLE/HNAT here. Re-evaluate the
+	# limiter backend after the effective fast path is published. Port-role
+	# transactions already reconcile EQoS while holding their ordered locks.
+	if [ "${C2000MAX_ACCEL_LOCKS_HELD:-0}" != 1 ] &&
+	   [ -d /sys/class/net/br-lan ] && [ -x /etc/init.d/eqos ]; then
+		/etc/init.d/eqos reload
+	fi
 }
 
 reload_service()
 {
-	apply_mode
+	start_service
+}
+
+service_triggers()
+{
+	# statistics_enabled changes whether type-7 HNAT MIB deltas are copied
+	# into conntrack. Reapply the driver setting immediately when EQoS traffic
+	# accounting is toggled, without waiting for the next acceleration switch.
+	procd_add_reload_trigger turboacc eqos
 }

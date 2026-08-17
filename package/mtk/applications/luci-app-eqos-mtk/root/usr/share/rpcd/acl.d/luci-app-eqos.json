@@ -1,10 +1,16 @@
 {
 	"luci-app-eqos": {
-		"description": "Grant UCI access for luci-app-eqos",
+		"description": "Grant access to C2000MAX traffic management",
 		"read": {
+			"ubus": {
+				"c2000max.traffic": [ "status" ]
+			},
 			"uci": [ "eqos" ]
 		},
 		"write": {
+			"ubus": {
+				"c2000max.traffic": [ "sample", "reset" ]
+			},
 			"uci": [ "eqos" ]
 		}
 	}

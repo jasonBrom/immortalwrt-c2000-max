@@ -243,7 +243,7 @@ return view.extend({
 			E('div', { 'class': 'cbi-map-descr' },
 				'局域网和云端总开关默认关闭；下方功能权限已默认开启，' +
 				'启用对应总开关即可使用。当前界面：' +
-				text(status.app_build, 'V35.35') + '。'),
+				text(status.app_build, 'V36.01') + '。'),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '总开关')
 			].concat(masterOptions)),

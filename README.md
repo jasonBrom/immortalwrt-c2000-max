@@ -4,10 +4,10 @@
 本分支直接建立在完整 ImmortalWrt/MTK 源码树上，可按普通 ImmortalWrt 工程维护
 和编译，不再使用单独的“补丁覆盖层”仓库结构。
 
-当前版本：**V35.35**。
+当前版本：**V36.01**。
 
 > [!WARNING]
-> V35.35 继续使用 `DfsEnable=0` 策略，5 GHz 会跳过 DFS/CAC。160 MHz 覆盖 DFS
+> V36.01 继续使用 `DfsEnable=0` 策略，5 GHz 会跳过 DFS/CAC。160 MHz 覆盖 DFS
 > 子信道时可能不符合所在地区法规，不应直接用于公开量产版本。
 
 ## 上游与分支关系
@@ -15,7 +15,7 @@
 - 上游仓库：`https://github.com/chasey-dev/immortalwrt-mt798x-rebase`
 - 上游分支：`25.12-dev-wifi7`
 - 固定基线：`ed8826fe488c72fbec35d42a965d5862b12a36ed`
-- 本项目分支：`c2000max-v35.35`
+- 本项目分支：`c2000max-v36.01`
 - 目标：`mediatek/filogic`
 - 设备：`nradio,c2000-max`
 - 内核：Linux 6.12.94
@@ -29,32 +29,30 @@ C2000-MAX 修改仅保存在独立分支中，不需要也不建议向上游提�
 - 中文 LuCI、默认管理地址 `192.168.66.1`、Argon 与 Bing 壁纸；
 - QModem，适配 MT5700M-CN、FM350-GL 和三卡槽 SIM 切换；
 - MediaTek HNAT/PPE、LAN/WAN 网口角色切换；
+- 加速方式无关的逐设备限速：HNAT 使用硬件 HQoS，Flow Offloading/普通转发
+  自动使用 tc/IFB，切换加速方式无需重建规则；
+- HNAT 硬件 MIB、Flowtable 与普通 Conntrack 统一流量统计，按 mwan3 实际出口
+  区分 5G 和其他/宽带，并提供逐设备明细；
 - 官方 APP 本地/远程 SIM、短信、接入设备、重启和蜂窝设置适配；
 - OpenClash 0.47.133，默认关闭；
 - 风扇、RGB 信号灯、ZRAM、访问控制和硬件状态页面。
 
-V35.35 包含 R2 对雷神语言包的修复：无线设置恢复显示“启用”，雷神页面
+V36.01 继承 V35.35 R2 对雷神语言包的修复：无线设置恢复显示“启用”，雷神页面
 仍显示“启用雷神加速器”。本版还会每 24 小时安全轮换官方 APP 的 MQTT
 云端会话，避免长时间运行后 bridge 仍连接、APP 却显示离线；轮换不会重启
 路由器、网络转发或 QModem，并继续禁止上传 root 密码哈希。
 
 ## 获取源码
 
-建议先在 GitHub Fork 上游仓库，再把 C2000-MAX Git bundle 导入自己的 Fork：
+可直接克隆本仓库的 V36.01 分支：
 
 ```sh
-git clone https://github.com/YOUR_ACCOUNT/immortalwrt-mt798x-rebase.git
-cd immortalwrt-mt798x-rebase
-
-# Bundle 是基于固定提交的增量分支；普通完整克隆已包含该基线。
-git fetch /path/to/ImmortalWrt_C2000_MAX-V35.35.bundle \
-  c2000max-v35.35:c2000max-v35.35
-git switch c2000max-v35.35
-git push -u origin c2000max-v35.35
+git clone --branch c2000max-v36.01 \
+  https://github.com/jasonBrom/immortalwrt-c2000-max.git
+cd immortalwrt-c2000-max
 ```
 
-也可以直接解压源码包后初始化新仓库，但使用 Git bundle 才能保留与上游基线的
-父子关系，后续维护更方便。
+如需维护自己的 Fork，保留本分支与上述固定基线的父子关系即可。
 
 ## 编译
 
@@ -88,12 +86,12 @@ make -j$(nproc) world
 ## 安装与升级
 
 - 全新安装：将 Release 中的 `*-sdcard.img.gz` 写入整张 SD 卡；
-- 正常运行的 V35.24、V35.25-TEST-R1 或 R2：使用 V35.35 `*-sysupgrade.bin` 并保留配置；
+- 正常运行的 V35.24 及以后版本：使用 V36.01 `*-sysupgrade.bin` 并保留配置；
 - 不要使用 `sysupgrade -n`；
-- 会报 `SQUASHFS error` 的 V35.25 初版不能在线升级，必须重写 V35.35 SD 镜像。
+- 会报 `SQUASHFS error` 的 V35.25 初版不能在线升级，必须重写 V36.01 SD 镜像。
 
 ```sh
-sysupgrade /tmp/immortalwrt-25.12-snapshot-c2000max-v3535-*-sysupgrade.bin
+sysupgrade /tmp/immortalwrt-25.12-snapshot-c2000max-v3601-*-sysupgrade.bin
 ```
 
 `make` 可直接生成 sysupgrade。完整 SD 镜像需要用户自行提供已验证的 C2000-MAX
@@ -103,7 +101,7 @@ U-Boot 环境、Factory 和 FIP。严禁提交 Factory、EEPROM、校准数据�
 
 ## 目录说明
 
-- `configs/c2000max.config`：V35.35 完整构建配置；
+- `configs/c2000max.config`：V36.01 完整构建配置；
 - `package/custom/`：板级服务、APP、LuCI、QModem 和固定版本组件；
 - `target/linux/mediatek/`：设备树、内核及镜像定义；
 - `package/mtk/`、`package/network/`：MediaTek/Wi-Fi/HNAT 适配；

@@ -1,0 +1,31 @@
+#!/bin/sh
+
+case "$1" in
+	list)
+		cat <<'EOF'
+{
+	"status": {},
+	"sample": {},
+	"reset": {}
+}
+EOF
+		;;
+	call)
+		read -r input
+		case "$2" in
+			status)
+				exec /usr/sbin/c2000max-traffic status
+				;;
+			sample)
+				if /usr/sbin/c2000max-traffic sample; then
+					exec /usr/sbin/c2000max-traffic status
+				else
+					echo '{"success":false,"message":"traffic sample failed"}'
+				fi
+				;;
+			reset)
+				exec /usr/sbin/c2000max-traffic reset
+				;;
+		esac
+		;;
+esac

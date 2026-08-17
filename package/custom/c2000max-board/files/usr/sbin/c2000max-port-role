@@ -286,7 +286,7 @@ status_json()
 	local configured actual consistent=0 runtime_consistent=0 accel_consistent=0
 	local uplink_consistent=0 services_consistent=0 network_converged=0 converged=0
 	local requested expected effective link=down speed=""
-	local lan_ip wan_ip hook=unavailable eqos_enabled=0 eqos_state
+	local lan_ip wan_ip hook=unavailable eqos_enabled=0 eqos_state eqos_backend
 	local switching=0 degraded=0 accel_degraded=0 wifi=0 gmac_ready=0 ppe_idle=0
 	local recovery_pending=0
 	local whnat_ready=0 rxppd_ready=0 endpoints_ready=0
@@ -380,10 +380,9 @@ status_json()
 		converged=1
 	fi
 	[ "$(uci -q get eqos.config.enabled)" = 1 ] && eqos_enabled=1
-	if { [ "$actual" != lan ] || [ "$switching" = 1 ] ||
-	     [ "$requested" != mediatek_hnat ] ||
-	     [ "$accel_consistent" != 1 ] || [ "$accel_degraded" = 1 ]; } &&
-	   [ "$eqos_enabled" = 1 ]; then
+	eqos_backend="$(cat /var/run/eqos/backend 2>/dev/null)"
+	if [ "$eqos_enabled" = 1 ] &&
+	   { [ "$switching" = 1 ] || [ -z "$eqos_backend" ]; }; then
 		eqos_state=paused
 	elif [ "$eqos_enabled" = 1 ]; then
 		eqos_state=configured
@@ -1362,11 +1361,10 @@ apply_acceleration_nonfatal()
 	expected="$(c2000_effective_fastpath "$role" "$requested")"
 	if hnat_reload && acceleration_matches "$role"; then
 		rm -f "$ACCEL_DEGRADED"
-		if [ "$role" = lan ] && [ "$eqos_enabled" = 1 ] &&
-		   [ "$requested" = mediatek_hnat ]; then
+		if [ "$eqos_enabled" = 1 ]; then
 			if ! eqos_start; then
 				mark_acceleration_degraded \
-					"MediaTek HNAT 已启用，但 EQoS 恢复失败并保持暂停"
+					"网络加速已生效，但自动限速后端恢复失败"
 			fi
 		fi
 		return 0

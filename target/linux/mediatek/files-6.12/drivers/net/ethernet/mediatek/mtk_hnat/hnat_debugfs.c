@@ -1279,6 +1279,46 @@ struct hnat_accounting *hnat_get_count(struct mtk_hnat *h, u32 ppe_id,
 }
 EXPORT_SYMBOL(hnat_get_count);
 
+static int hnat_mib_sync_show(struct seq_file *m, void *private)
+{
+	struct mtk_hnat *h = hnat_priv;
+	struct foe_entry *entry;
+	u32 index, ppe_id, synced = 0;
+
+	if (!h->data->per_flow_accounting)
+		return 0;
+
+	/* Read-clear only live hardware counters and feed their deltas through
+	 * hnat_get_count(). With nf_stat_en enabled this also updates the matching
+	 * conntrack direction. Unlike all_entry, this node emits no per-flow dump,
+	 * making frequent user-space accounting snapshots inexpensive.
+	 */
+	for (ppe_id = 0; ppe_id < CFG_PPE_NUM; ppe_id++) {
+		for (index = 0; index < h->foe_etry_num; index++) {
+			entry = &h->foe_table_cpu[ppe_id][index];
+			if (entry->bfib1.state != BIND)
+				continue;
+			hnat_get_count(h, ppe_id, index, NULL);
+			synced++;
+		}
+	}
+
+	seq_printf(m, "%u\n", synced);
+	return 0;
+}
+
+static int hnat_mib_sync_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, hnat_mib_sync_show, file->private_data);
+}
+
+static const struct file_operations hnat_mib_sync_fops = {
+	.open = hnat_mib_sync_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
 #define PRINT_COUNT(m, acct) {if (acct) \
 		seq_printf(m, "bytes=%llu|packets=%llu|", \
 			   acct->bytes, acct->packets); }
@@ -4068,6 +4108,7 @@ int hnat_init_debugfs(struct mtk_hnat *h)
 	}
 
 	debugfs_create_file("all_entry", 0444, root, h, &hnat_debug_fops);
+	debugfs_create_file("mib_sync", 0444, root, h, &hnat_mib_sync_fops);
 	debugfs_create_file("external_interface", 0444, root, h,
 			    &hnat_ext_fops);
 	debugfs_create_file("whnat_interface", 0444, root, h,

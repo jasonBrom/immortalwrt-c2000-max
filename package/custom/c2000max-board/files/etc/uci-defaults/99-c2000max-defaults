@@ -245,6 +245,7 @@ case "$fastpath" in
 esac
 uci -q set turboacc.config.fastpath="$fastpath"
 uci -q set turboacc.config.fastpath_fo_hw='0'
+uci -q set turboacc.config.fastpath_mh_update_nfct='1'
 uci -q set turboacc.config.fullcone='1'
 uci -q set turboacc.config.tcpcca='cubic'
 
@@ -348,6 +349,7 @@ fi
 /etc/init.d/c2000max-leds enable
 /etc/init.d/c2000max-fan enable
 /etc/init.d/c2000max-hnat enable
+/etc/init.d/c2000max-traffic enable
 /etc/init.d/c2000max-access enable
 /etc/init.d/c2000max-swap-tune enable
 /etc/init.d/c2000max-uplink enable

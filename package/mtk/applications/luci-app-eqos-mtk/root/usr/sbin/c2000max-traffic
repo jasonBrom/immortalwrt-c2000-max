@@ -1,0 +1,434 @@
+#!/bin/sh
+
+RUNTIME_DIR="${C2000_TRAFFIC_RUNTIME:-/tmp/c2000max-traffic}"
+PERSIST_DIR="${C2000_TRAFFIC_PERSIST_DIR:-/etc/c2000max-traffic}"
+TOTALS_FILE="$RUNTIME_DIR/totals.tsv"
+SNAPSHOT_FILE="$RUNTIME_DIR/conntrack.tsv"
+UPDATED_FILE="$RUNTIME_DIR/updated"
+FLUSHED_FILE="$RUNTIME_DIR/flushed"
+LOCK_FILE="$RUNTIME_DIR/collector.lock"
+DAEMON_PID_FILE="$RUNTIME_DIR/daemon.pid"
+PERSIST_FILE="$PERSIST_DIR/usage.tsv"
+HNAT_DIR="${C2000_HNAT_DIR:-/sys/kernel/debug/hnat}"
+
+ensure_runtime()
+{
+	mkdir -p "$RUNTIME_DIR" "$PERSIST_DIR" || return 1
+	[ -f "$TOTALS_FILE" ] || {
+		if [ -s "$PERSIST_FILE" ]; then
+			cp "$PERSIST_FILE" "$TOTALS_FILE" || return 1
+		else
+			: > "$TOTALS_FILE" || return 1
+		fi
+	}
+}
+
+network_device()
+{
+	local network="$1" status device
+
+	[ -n "$network" ] || return 1
+	status="$(ubus call "network.interface.${network}" status 2>/dev/null)"
+	device="$(printf '%s' "$status" | jsonfilter -e '@.l3_device' 2>/dev/null)"
+	[ -n "$device" ] ||
+		device="$(printf '%s' "$status" | jsonfilter -e '@.device' 2>/dev/null)"
+	[ -n "$device" ] || return 1
+	printf '%s\n' "$device"
+}
+
+cellular_network()
+{
+	local network section alias state
+
+	network="$(uci -q get c2000max.ethernet.cellular_interface)"
+	if [ -n "$network" ]; then
+		printf '%s\n' "$network"
+		return 0
+	fi
+
+	for section in $(uci -q show qmodem 2>/dev/null |
+		sed -n 's/^qmodem\.\([^.=]*\)=modem-device$/\1/p'); do
+		state="$(uci -q get "qmodem.${section}.state")"
+		[ "$state" != disabled ] || continue
+		alias="$(uci -q get "qmodem.${section}.alias")"
+		printf '%s\n' "${alias:-$section}"
+		return 0
+	done
+
+	return 1
+}
+
+device_is_cellular()
+{
+	local device="$1" cell_network cell_device configured
+
+	[ -n "$device" ] || return 1
+	cell_network="$(cellular_network 2>/dev/null)"
+	cell_device="$(network_device "$cell_network" 2>/dev/null)"
+	configured="$(uci -q get "network.${cell_network}.device")"
+
+	[ "$device" = "$cell_device" ] ||
+		[ "$device" = "$configured" ] ||
+		[ "$device" = "$cell_network" ]
+}
+
+build_hosts()
+{
+	local output="$1" raw tmp
+	raw="${output}.raw"
+	tmp="${output}.tmp"
+
+	: > "$raw" || return 1
+	if [ -r /tmp/dhcp.leases ]; then
+		awk 'NF >= 4 { print $3 "\t" tolower($2) "\t" (($4 == "*") ? "" : $4) }' \
+			/tmp/dhcp.leases >> "$raw"
+	fi
+	ip neigh show dev br-lan 2>/dev/null |
+		awk '{ mac=""; for (i=1; i<=NF; i++) if ($i=="lladdr") mac=$(i+1); if (mac!="") print $1 "\t" tolower(mac) "\t" }' \
+			>> "$raw"
+	ip -6 neigh show dev br-lan 2>/dev/null |
+		awk '{ mac=""; for (i=1; i<=NF; i++) if ($i=="lladdr") mac=$(i+1); if (mac!="") print $1 "\t" tolower(mac) "\t" }' \
+			>> "$raw"
+	ip -o address show dev br-lan 2>/dev/null |
+		awk '{ split($4, a, "/"); print a[1] "\t@router\tC2000MAX" }' >> "$raw"
+
+	awk -F '\t' 'BEGIN { OFS="\t" }
+		$1 != "" {
+			ip=$1; mac=tolower($2); name=$3;
+			if (mac != "" && mac != "00:00:00:00:00:00") key[ip]=mac;
+			else if (!(ip in key)) key[ip]=ip;
+			if (name != "") names[ip]=name;
+		}
+		END { for (ip in key) print ip, key[ip], names[ip]; }' "$raw" |
+		sort -t "$(printf '\t')" -k1,1 > "$tmp" && mv "$tmp" "$output"
+}
+
+default_uplink_class()
+{
+	local device
+
+	device="$(ip -4 route get 1.1.1.1 2>/dev/null |
+		sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)"
+	if device_is_cellular "$device"; then
+		printf '%s\n' fiveg
+	else
+		printf '%s\n' other
+	fi
+}
+
+build_mark_map()
+{
+	local output="$1" rules mark table route_dev class decimal hex
+	rules="${output}.rules"
+
+	: > "$output" || return 1
+	ip -4 rule show 2>/dev/null |
+		sed -n 's/.*fwmark \([^ /]*\)\(\/[^ ]*\)\{0,1\}.*lookup \([^ ]*\).*/\1 \3/p' > "$rules"
+	while read -r mark table; do
+		[ -n "$mark" ] && [ -n "$table" ] || continue
+		route_dev="$(ip -4 route show table "$table" default 2>/dev/null |
+			sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)"
+		[ -n "$route_dev" ] || continue
+		class=other
+		device_is_cellular "$route_dev" && class=fiveg
+		case "$mark" in
+			0x*|0X*)
+				hex="${mark#0x}"; hex="${hex#0X}"
+				case "$hex" in ''|*[!0-9A-Fa-f]*) continue ;; esac
+				decimal=$((mark))
+				;;
+			*[!0-9]*|'') continue ;;
+			*) decimal=$((mark)) ;;
+		esac
+		printf '%s\t%s\n' "$decimal" "$class" >> "$output"
+	done < "$rules"
+}
+
+sync_hardware_mib()
+{
+	local counter_node lock_held=0
+
+	if [ "${C2000MAX_ACCEL_LOCKS_HELD:-0}" != 1 ]; then
+		exec 8> /var/lock/c2000max-hnat.lock || return 1
+		flock -x 8 || return 1
+		lock_held=1
+	fi
+
+	if [ "$(cat "$HNAT_DIR/hook_toggle" 2>/dev/null)" = enabled ]; then
+		counter_node="$HNAT_DIR/mib_sync"
+		[ -r "$counter_node" ] || counter_node="$HNAT_DIR/all_entry"
+		if [ -r "$counter_node" ]; then
+			# mib_sync calls hnat_get_count() for each live FOE entry without
+			# rendering the full table. Controller-enforced type-7 accounting
+			# transfers each read-clear MIB delta to conntrack before snapshot.
+			timeout 5 sh -c 'cat "$1" >/dev/null' sh "$counter_node" \
+				2>/dev/null || true
+		fi
+	fi
+
+	[ "$lock_held" -ne 1 ] || flock -u 8
+}
+
+read_conntrack()
+{
+	local output="$1" tmp
+	tmp="${output}.tmp"
+
+	: > "$tmp" || return 1
+	timeout 8 conntrack -L -f ipv4 -o extended,id >> "$tmp" 2>/dev/null || true
+	timeout 8 conntrack -L -f ipv6 -o extended,id >> "$tmp" 2>/dev/null || true
+	mv "$tmp" "$output"
+}
+
+parse_conntrack()
+{
+	local hosts="$1" raw="$2" output="$3" tmp
+	tmp="${output}.tmp"
+
+	awk -F '\t' 'function number(s, value, i, digit) {
+			if (s !~ /^0[xX][0-9a-fA-F]+$/) return s + 0;
+			s=tolower(substr(s, 3)); value=0;
+			for (i=1; i<=length(s); i++) {
+				digit=index("0123456789abcdef", substr(s, i, 1)) - 1;
+				value=value * 16 + digit;
+			}
+			return value;
+		}
+		BEGIN { OFS="\t" }
+		FILENAME == ARGV[1] {
+			hostkey[$1]=$2; hostname[$1]=$3; next;
+		}
+		FILENAME == ARGV[2] {
+			delete src; delete dst; delete bytes;
+			nsrc=ndst=nbytes=0; mark=0; id="";
+			n=split($0, f, /[[:space:]]+/);
+			for (i=1; i<=n; i++) {
+				split(f[i], kv, "=");
+				if (kv[1]=="src") src[++nsrc]=kv[2];
+				else if (kv[1]=="dst") dst[++ndst]=kv[2];
+				else if (kv[1]=="bytes") bytes[++nbytes]=number(kv[2]);
+				else if (kv[1]=="mark") mark=number(kv[2]);
+				else if (kv[1]=="id") id=kv[2];
+			}
+			if (nsrc < 2 || ndst < 2 || nbytes < 2) next;
+			client=""; up=down=0; remote="";
+			if ((src[1] in hostkey) && hostkey[src[1]] != "@router") {
+				client=src[1]; remote=dst[1]; up=bytes[1]; down=bytes[2];
+			} else if ((src[2] in hostkey) && hostkey[src[2]] != "@router") {
+				client=src[2]; remote=dst[2]; up=bytes[2]; down=bytes[1];
+			} else next;
+			# Exclude router management and traffic between local clients.
+			if (remote in hostkey) next;
+			key=hostkey[client];
+			if (key == "" || key == "@router") key=client;
+			if (id == "") id=src[1] ":" dst[1] ":" src[2] ":" dst[2];
+			print id, key, sprintf("%.0f", up), sprintf("%.0f", down),
+				mark, client, hostname[client];
+		}' "$hosts" "$raw" > "$tmp" && mv "$tmp" "$output"
+}
+
+calculate_deltas()
+{
+	local marks="$1" old="$2" current="$3" output="$4" fallback="$5" now="$6"
+	local tmp="${output}.tmp"
+
+	[ -f "$old" ] || : > "$old"
+	awk -F '\t' -v OFS='\t' -v fallback="$fallback" -v now="$now" '
+		FILENAME == ARGV[1] { markclass[$1]=$2; next }
+		FILENAME == ARGV[2] { oldkey[$1]=$2; oldup[$1]=$3+0; olddown[$1]=$4+0; next }
+		FILENAME == ARGV[3] {
+			up=$3+0; down=$4+0;
+			if (($1 in oldkey) && oldkey[$1] == $2) {
+				up -= oldup[$1]; down -= olddown[$1];
+			}
+			if (up < 0) up=$3+0;
+			if (down < 0) down=$4+0;
+			class=markclass[$5];
+			if (class == "") class=fallback;
+			if (class != "fiveg" && class != "other") class="unknown";
+			if (up > 0 || down > 0)
+				print $2, $6, $7, class, sprintf("%.0f", up),
+					sprintf("%.0f", down), now;
+		}' "$marks" "$old" "$current" > "$tmp" && mv "$tmp" "$output"
+}
+
+merge_totals()
+{
+	local deltas="$1" tmp="${TOTALS_FILE}.tmp"
+
+	awk -F '\t' -v OFS='\t' '
+		FILENAME == ARGV[1] && $0 !~ /^#/ {
+			key=$1; ip[key]=$2; name[key]=$3;
+			fu[key]=$4+0; fd[key]=$5+0; ou[key]=$6+0; od[key]=$7+0;
+			uu[key]=$8+0; ud[key]=$9+0; seen[key]=$10+0; next;
+		}
+		FILENAME == ARGV[2] {
+			key=$1; if ($2!="") ip[key]=$2; if ($3!="") name[key]=$3;
+			if ($4=="fiveg") { fu[key]+=$5; fd[key]+=$6; }
+			else if ($4=="other") { ou[key]+=$5; od[key]+=$6; }
+			else { uu[key]+=$5; ud[key]+=$6; }
+			seen[key]=$7; next;
+		}
+		END {
+			for (key in seen)
+				print key, ip[key], name[key], sprintf("%.0f",fu[key]),
+					sprintf("%.0f",fd[key]), sprintf("%.0f",ou[key]),
+					sprintf("%.0f",od[key]), sprintf("%.0f",uu[key]),
+					sprintf("%.0f",ud[key]), seen[key];
+		}' "$TOTALS_FILE" "$deltas" > "$tmp" && mv "$tmp" "$TOTALS_FILE"
+}
+
+flush_totals()
+{
+	local tmp
+
+	ensure_runtime || return 1
+	tmp="${PERSIST_FILE}.tmp"
+	cp "$TOTALS_FILE" "$tmp" && mv "$tmp" "$PERSIST_FILE" || return 1
+	date +%s > "$FLUSHED_FILE"
+}
+
+sample_once()
+{
+	local hosts="$RUNTIME_DIR/hosts.tsv" marks="$RUNTIME_DIR/marks.tsv"
+	local raw="$RUNTIME_DIR/conntrack.raw" current="$RUNTIME_DIR/conntrack.current"
+	local deltas="$RUNTIME_DIR/deltas.tsv" fallback now flush_interval last_flush
+
+	ensure_runtime || return 1
+	exec 9> "$LOCK_FILE" || return 1
+	flock -n 9 || return 0
+
+	sysctl -qw net.netfilter.nf_conntrack_acct=1 2>/dev/null || true
+	build_hosts "$hosts" || return 1
+	build_mark_map "$marks" || return 1
+	fallback="$(default_uplink_class)"
+	now="$(date +%s)"
+	sync_hardware_mib
+	read_conntrack "$raw" || return 1
+	parse_conntrack "$hosts" "$raw" "$current" || return 1
+	calculate_deltas "$marks" "$SNAPSHOT_FILE" "$current" "$deltas" "$fallback" "$now" || return 1
+	merge_totals "$deltas" || return 1
+	mv "$current" "$SNAPSHOT_FILE" || return 1
+	printf '%s\n' "$now" > "$UPDATED_FILE"
+
+	flush_interval="$(uci -q get eqos.config.flush_interval)"
+	case "$flush_interval" in ''|*[!0-9]*) flush_interval=3600 ;; esac
+	last_flush="$(cat "$FLUSHED_FILE" 2>/dev/null)"
+	case "$last_flush" in ''|*[!0-9]*) last_flush=0 ;; esac
+	[ $((now - last_flush)) -lt "$flush_interval" ] || flush_totals
+}
+
+status_json()
+{
+	local effective backend source updated active=0 key ip name fu fd ou od uu ud seen
+	local total_fu=0 total_fd=0 total_ou=0 total_od=0 total_uu=0 total_ud=0
+	local rows="$RUNTIME_DIR/status.rows" daemon_pid
+
+	ensure_runtime || return 1
+	daemon_pid="$(cat "$DAEMON_PID_FILE" 2>/dev/null)"
+	case "$daemon_pid" in
+		''|*[!0-9]*) ;;
+		*)
+			if kill -0 "$daemon_pid" 2>/dev/null &&
+			   tr '\000' ' ' < "/proc/$daemon_pid/cmdline" 2>/dev/null |
+				grep -q '/usr/sbin/c2000max-traffic daemon'; then
+				active=1
+			fi
+			;;
+	esac
+	effective="$(cat /var/run/c2000max-hnat-effective 2>/dev/null)"
+	backend="$(cat /var/run/eqos/backend 2>/dev/null)"
+	updated="$(cat "$UPDATED_FILE" 2>/dev/null)"
+	case "$updated" in ''|*[!0-9]*) updated=0 ;; esac
+	case "$effective" in
+		mediatek_hnat) source=hardware_mib ;;
+		flow_offloading) source=flowtable_conntrack ;;
+		*) source=conntrack ;;
+	esac
+
+	. /usr/share/libubox/jshn.sh
+	json_init
+	json_add_boolean active "$active"
+	json_add_string acceleration "${effective:-unknown}"
+	json_add_string limiter_backend "${backend:-inactive}"
+	json_add_string counter_source "$source"
+	json_add_int updated "$updated"
+	json_add_array devices
+	awk -F '\t' -v OFS='|' '$0 !~ /^#/ && NF >= 10 { print $1,$2,$3,$4,$5,$6,$7,$8,$9,$10 }' \
+		"$TOTALS_FILE" > "$rows"
+	while IFS='|' read -r key ip name fu fd ou od uu ud seen; do
+		[ -n "$key" ] || continue
+		total_fu=$((total_fu + fu)); total_fd=$((total_fd + fd))
+		total_ou=$((total_ou + ou)); total_od=$((total_od + od))
+		total_uu=$((total_uu + uu)); total_ud=$((total_ud + ud))
+		json_add_object ""
+		json_add_string id "$key"
+		json_add_string ip "$ip"
+		json_add_string name "${name:-$ip}"
+		case "$key" in
+			??:??:??:??:??:??) json_add_string mac "$key" ;;
+		esac
+		json_add_string fiveg_upload "$fu"
+		json_add_string fiveg_download "$fd"
+		json_add_string other_upload "$ou"
+		json_add_string other_download "$od"
+		json_add_string unknown_upload "$uu"
+		json_add_string unknown_download "$ud"
+		json_add_int last_seen "${seen:-0}"
+		json_close_object
+	done < "$rows"
+	rm -f "$rows"
+	json_close_array
+	json_add_object totals
+	json_add_string fiveg_upload "$total_fu"
+	json_add_string fiveg_download "$total_fd"
+	json_add_string other_upload "$total_ou"
+	json_add_string other_download "$total_od"
+	json_add_string unknown_upload "$total_uu"
+	json_add_string unknown_download "$total_ud"
+	json_close_object
+	json_dump
+}
+
+reset_totals()
+{
+	ensure_runtime || return 1
+	exec 9> "$LOCK_FILE" || return 1
+	flock -x 9 || return 1
+	: > "$TOTALS_FILE" || return 1
+	: > "$SNAPSHOT_FILE" || return 1
+	: > "$PERSIST_FILE" || return 1
+	date +%s > "$UPDATED_FILE"
+	date +%s > "$FLUSHED_FILE"
+	printf '{"success":true}\n'
+}
+
+daemon_loop()
+{
+	local interval
+
+	ensure_runtime || exit 1
+	printf '%s\n' "$$" > "$DAEMON_PID_FILE" || exit 1
+	trap 'flush_totals >/dev/null 2>&1; rm -f "$DAEMON_PID_FILE"; exit 0' HUP INT TERM
+	while :; do
+		sample_once || logger -t c2000max-traffic "traffic sample failed"
+		interval="$(uci -q get eqos.config.sample_interval)"
+		case "$interval" in ''|*[!0-9]*) interval=10 ;; esac
+		[ "$interval" -ge 5 ] 2>/dev/null || interval=5
+		[ "$interval" -le 300 ] 2>/dev/null || interval=300
+		sleep "$interval" &
+		wait $!
+	done
+}
+
+if [ "${C2000_TRAFFIC_LIB_ONLY:-0}" != 1 ]; then
+	case "$1" in
+		daemon) daemon_loop ;;
+		sample) sample_once ;;
+		mib-sync) sync_hardware_mib ;;
+		status) status_json ;;
+		flush) flush_totals ;;
+		reset) reset_totals ;;
+		*) echo "Usage: $0 {daemon|sample|mib-sync|status|flush|reset}" >&2; exit 1 ;;
+	esac
+fi

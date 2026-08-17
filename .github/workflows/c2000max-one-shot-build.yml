@@ -3,7 +3,7 @@ name: C2000MAX one-shot firmware build
 on:
   push:
     branches:
-      - c2000max-v35.35
+      - c2000max-v36.01
     paths:
       - ".github/workflows/c2000max-one-shot-build.yml"
   workflow_dispatch:
@@ -103,7 +103,7 @@ jobs:
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: C2000MAX-V35.35-mt5700-serialized-recovery
+          name: C2000MAX-V36.01-traffic-management
           path: |
             c2000max-artifacts/
           if-no-files-found: error

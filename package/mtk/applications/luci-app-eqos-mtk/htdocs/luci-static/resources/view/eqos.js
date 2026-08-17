@@ -1,8 +1,196 @@
 'use strict';
 'require form';
 'require network';
+'require poll';
+'require rpc';
 'require uci';
+'require ui';
 'require view';
+
+var callTrafficStatus = rpc.declare({
+	object: 'c2000max.traffic',
+	method: 'status',
+	expect: { '': {} }
+});
+
+var callTrafficReset = rpc.declare({
+	object: 'c2000max.traffic',
+	method: 'reset',
+	expect: { '': {} }
+});
+
+function bytes(value) {
+	var number = Number(value || 0);
+	var units = [ 'B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB' ];
+	var unit = 0;
+
+	if (!isFinite(number) || number < 0)
+		number = 0;
+	while (number >= 1024 && unit < units.length - 1) {
+		number /= 1024;
+		unit++;
+	}
+
+	return '%s %s'.format(number.toFixed(unit === 0 ? 0 : 2), units[unit]);
+}
+
+function accelerationName(value) {
+	var names = {
+		mediatek_hnat: 'MediaTek HNAT',
+		flow_offloading: 'Flow Offloading',
+		disabled: '普通转发'
+	};
+
+	return names[value] || value || '未知';
+}
+
+function backendName(value) {
+	var names = {
+		hnat: '硬件 HQoS',
+		software: '软件 tc/IFB',
+		inactive: '未启用'
+	};
+
+	return names[value] || value || '未启用';
+}
+
+function sourceName(value) {
+	var names = {
+		hardware_mib: 'HNAT 硬件 MIB → Conntrack',
+		flowtable_conntrack: 'Flowtable → Conntrack',
+		conntrack: 'Conntrack'
+	};
+
+	return names[value] || value || '未知';
+}
+
+function trafficPair(upload, download) {
+	return E('span', {}, [
+		E('span', { 'style': 'white-space:nowrap' }, [ '↑ ', bytes(upload) ]),
+		' / ',
+		E('span', { 'style': 'white-space:nowrap' }, [ '↓ ', bytes(download) ])
+	]);
+}
+
+function renderTraffic(status) {
+	var totals = status.totals || {};
+	var devices = Array.isArray(status.devices) ? status.devices : [];
+	var updated = Number(status.updated || 0);
+	var unknown = Number(totals.unknown_upload || 0) +
+		Number(totals.unknown_download || 0);
+	var rows = devices.map(function(device) {
+		var title = device.name || device.ip || device.mac || device.id || '未知设备';
+		var detail = [];
+
+		if (device.ip && device.ip !== title)
+			detail.push(device.ip);
+		if (device.mac && device.mac !== title)
+			detail.push(device.mac);
+
+		return E('div', { 'class': 'tr' }, [
+			E('div', { 'class': 'td' }, [
+				E('strong', {}, title),
+				detail.length ? E('div', {
+					'class': 'hide-sm',
+					'style': 'color:#777;font-size:90%'
+				}, detail.join(' · ')) : ''
+			]),
+			E('div', { 'class': 'td' }, trafficPair(
+				device.fiveg_upload, device.fiveg_download)),
+			E('div', { 'class': 'td' }, trafficPair(
+				device.other_upload, device.other_download)),
+			E('div', { 'class': 'td' }, trafficPair(
+				device.unknown_upload, device.unknown_download))
+		]);
+	});
+
+	if (!rows.length)
+		rows.push(E('div', { 'class': 'tr' }, [
+			E('div', { 'class': 'td', 'style': 'flex:1' },
+				'尚无设备流量；启用统计后，新流量会自动出现。')
+		]));
+
+	return [
+		E('div', { 'class': 'cbi-section' }, [
+			E('h3', {}, '实时运行状态'),
+			E('div', { 'class': 'table' }, [
+				E('div', { 'class': 'tr' }, [
+					E('div', { 'class': 'td left', 'style': 'width:25%' }, '加速模式'),
+					E('div', { 'class': 'td left' }, accelerationName(status.acceleration)),
+					E('div', { 'class': 'td left', 'style': 'width:25%' }, '限速后端'),
+					E('div', { 'class': 'td left' }, backendName(status.limiter_backend))
+				]),
+				E('div', { 'class': 'tr' }, [
+					E('div', { 'class': 'td left' }, '统计来源'),
+					E('div', { 'class': 'td left' }, sourceName(status.counter_source)),
+					E('div', { 'class': 'td left' }, '最后采样'),
+					E('div', { 'class': 'td left' }, updated ?
+						new Date(updated * 1000).toLocaleString() : '等待首次采样')
+				])
+			])
+		]),
+		E('div', { 'class': 'cbi-section' }, [
+			E('h3', {}, '累计流量'),
+			E('div', { 'class': 'table' }, [
+				E('div', { 'class': 'tr' }, [
+					E('div', { 'class': 'td left', 'style': 'width:25%' },
+						E('strong', {}, '5G 流量')),
+					E('div', { 'class': 'td left' }, trafficPair(
+						totals.fiveg_upload, totals.fiveg_download)),
+					E('div', { 'class': 'td left', 'style': 'width:25%' },
+						E('strong', {}, '其他/宽带流量')),
+					E('div', { 'class': 'td left' }, trafficPair(
+						totals.other_upload, totals.other_download))
+				])
+			]),
+			unknown ? E('p', { 'class': 'alert-message warning' }, [
+				'无法匹配出口的流量：', trafficPair(
+					totals.unknown_upload, totals.unknown_download),
+				'。这通常发生在 mwan3 路由表切换或接口尚未就绪时。'
+			]) : '',
+			E('div', { 'class': 'right' }, [
+				E('button', {
+					'class': 'btn cbi-button-negative',
+					'click': function() {
+						ui.showModal('清空累计流量', [
+							E('p', {}, '确定清空全部设备的 5G 和其他流量记录吗？此操作不可撤销。'),
+							E('div', { 'class': 'right' }, [
+								E('button', {
+									'class': 'btn',
+									'click': ui.hideModal
+								}, '取消'),
+								' ',
+								E('button', {
+									'class': 'btn cbi-button-negative important',
+									'click': function() {
+										return callTrafficReset().then(function() {
+											ui.hideModal();
+											return callTrafficStatus();
+										}).then(function(fresh) {
+											L.dom.content(document.getElementById('c2000-traffic-body'),
+												renderTraffic(fresh));
+										});
+									}
+								}, '确认清空')
+							])
+						]);
+					}
+				}, '清空统计')
+			])
+		]),
+		E('div', { 'class': 'cbi-section' }, [
+			E('h3', {}, '各设备流量'),
+			E('div', { 'class': 'table cbi-section-table' }, [
+				E('div', { 'class': 'tr table-titles' }, [
+					E('div', { 'class': 'th' }, '设备'),
+					E('div', { 'class': 'th' }, '5G（上传 / 下载）'),
+					E('div', { 'class': 'th' }, '其他/宽带（上传 / 下载）'),
+					E('div', { 'class': 'th' }, '未分类（上传 / 下载）')
+				])
+			].concat(rows))
+		])
+	];
+}
 
 function collectHostChoices(hosts) {
 	var choices = {
@@ -85,7 +273,8 @@ return view.extend({
 	load: function() {
 		return Promise.all([
 			uci.load('eqos'),
-			network.getHostHints()
+			network.getHostHints(),
+			L.resolveDefault(callTrafficStatus(), {})
 		]);
 	},
 
@@ -94,8 +283,8 @@ return view.extend({
 		var hostChoices = collectHostChoices(hosts);
 		var m, s, o;
 
-		m = new form.Map('eqos', _('EQoS'),
-			_('Network speed control service for MediaTek HNAT.'));
+		m = new form.Map('eqos', 'C2000MAX 流量管理',
+			'同一套设备规则自动适配硬件 HNAT/HQoS、Flow Offloading 和普通转发；切换加速方式后限速与累计统计会继续生效。');
 
 		s = m.section(form.NamedSection, 'config', 'eqos', _('Settings'));
 		s.anonymous = true;
@@ -109,6 +298,24 @@ return view.extend({
 		o.datatype = 'and(uinteger,min(1),max(1000))';
 		o.rmempty = false;
 		o.write = integerWrite;
+
+		o = s.option(form.Flag, 'statistics_enabled', '启用流量统计',
+			'按设备累计 5G 与其他/宽带流量。HNAT 模式自动读取硬件 MIB，其他模式读取 Conntrack。');
+		o.default = o.enabled;
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'sample_interval', '采样间隔（秒）');
+		o.datatype = 'and(uinteger,min(5),max(300))';
+		o.default = '10';
+		o.rmempty = false;
+		o.depends('statistics_enabled', '1');
+
+		o = s.option(form.Value, 'flush_interval', '持久化间隔（秒）',
+			'定期保存到闪存，重启后继续累计。建议不小于 3600 秒。');
+		o.datatype = 'and(uinteger,min(300),max(86400))';
+		o.default = '3600';
+		o.rmempty = false;
+		o.depends('statistics_enabled', '1');
 
 		o = s.option(form.Value, 'upload', '%s (Mbit/s)'.format(_('Upload')),
 			_('Total upload bandwidth.'));
@@ -141,8 +348,8 @@ return view.extend({
 		o.editable = true;
 
 		o = s.taboption('general', form.Value, 'queue', _('Queue ID'),
-			_('Values 1-31 use HNAT HQoS. Values 32 and above use software shaping.'));
-		o.datatype = 'and(uinteger,min(1),max(65535))';
+			'规则编号。HNAT 下 1–31 使用硬件 HQoS，32 及以上回退软件队列；其他加速模式全部自动使用软件队列。');
+		o.datatype = 'and(uinteger,min(1),max(4094))';
 		o.placeholder = '1';
 		o.rmempty = false;
 		o.cfgvalue = function(section_id) {
@@ -226,6 +433,19 @@ return view.extend({
 		o.validate = uniqueAddress;
 		addChoices(o, hostChoices.ip6);
 
-		return m.render();
+		var trafficNode = E('div', { 'id': 'c2000-traffic-body' },
+			renderTraffic(data[2] || {}));
+
+		poll.add(function() {
+			return L.resolveDefault(callTrafficStatus(), {}).then(function(status) {
+				var node = document.getElementById('c2000-traffic-body');
+				if (node)
+					L.dom.content(node, renderTraffic(status));
+			});
+		}, 5);
+
+		return m.render().then(function(formNode) {
+			return E('div', {}, [ trafficNode, formNode ]);
+		});
 	}
 });

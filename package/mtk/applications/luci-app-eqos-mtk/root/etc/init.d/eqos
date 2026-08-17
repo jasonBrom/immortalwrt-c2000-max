@@ -8,6 +8,9 @@ USE_PROCD=1
 
 QDMA_RATE_MAX=1000000
 TOTAL_RATE_MAX=1000
+QUEUE_SLOT_MAX=4094
+TOTAL_DOWNLOAD_KBIT=$QDMA_RATE_MAX
+TOTAL_UPLOAD_KBIT=$QDMA_RATE_MAX
 C2000_ROLE_LOCK="${C2000_ROLE_LOCK:-/var/lock/c2000max-port-role.lock}"
 C2000_HNAT_LOCK="${C2000_HNAT_LOCK:-/var/lock/c2000max-hnat.lock}"
 C2000_EQOS_ROLE_HELD=0
@@ -20,13 +23,10 @@ exec 5<>"$C2000_HNAT_LOCK" || exit 1
 
 c2000_eqos_signal_abort() {
 	trap '' HUP INT TERM
-	# Waiting for ROLE/HNAT does not authorize changing another owner's
-	# hardware state.  Fail closed only after this operation owns HNAT.
+	# A limiter failure must never silently change the user's acceleration
+	# choice. Clean up only EQoS-owned QDMA/tc/nft state before releasing locks.
 	if [ "$C2000_EQOS_HNAT_HELD" = 1 ]; then
 		eqos stop >/dev/null 2>&1 || true
-		if [ -w /sys/kernel/debug/hnat/hook_toggle ]; then
-			echo 0 > /sys/kernel/debug/hnat/hook_toggle 2>/dev/null || true
-		fi
 		flock -u 5 >/dev/null 2>&1 || true
 		C2000_EQOS_HNAT_HELD=0
 	fi
@@ -62,8 +62,8 @@ validate_device() {
 	config_get selector "$cfg" selector
 	[ -n "$queue" ] || config_get queue "$cfg" comment
 
-	if ! is_uinteger "$queue" || [ "$queue" -lt 1 ] || [ "$queue" -gt 65535 ]; then
-		echo "eqos: $cfg queue slot must be between 1 and 65535" >&2
+	if ! is_uinteger "$queue" || [ "$queue" -lt 1 ] || [ "$queue" -gt "$QUEUE_SLOT_MAX" ]; then
+		echo "eqos: $cfg queue slot must be between 1 and $QUEUE_SLOT_MAX" >&2
 		CONFIG_ERROR=1
 		return 0
 	fi
@@ -85,6 +85,12 @@ validate_device() {
 
 	if [ "$download" -gt "$QDMA_RATE_MAX" ] || [ "$upload" -gt "$QDMA_RATE_MAX" ]; then
 		echo "eqos: $cfg download and upload rates must not exceed $QDMA_RATE_MAX kbit/s" >&2
+		CONFIG_ERROR=1
+		return 0
+	fi
+	if [ "$download" -gt "$TOTAL_DOWNLOAD_KBIT" ] ||
+	   [ "$upload" -gt "$TOTAL_UPLOAD_KBIT" ]; then
+		echo "eqos: $cfg device rate must not exceed the configured total bandwidth" >&2
 		CONFIG_ERROR=1
 		return 0
 	fi
@@ -160,7 +166,7 @@ parse_device() {
 
 	address="$ip"
 	[ -n "$address" ] || address="$ip6"
-	if ! eqos add "$queue" "$download" "$upload" "$address" \
+	if ! eqos add "$EQOS_BACKEND" "$queue" "$download" "$upload" "$address" \
 		"$total_download" "$total_upload"; then
 		CONFIG_ERROR=1
 	fi
@@ -169,28 +175,21 @@ parse_device() {
 eqos_start_service_locked() {
 	config_load eqos
 
-	local enabled
+	local enabled effective hook
 	config_get_bool enabled config enabled 0
 	[ "$enabled" -eq 1 ] || return 0
-	if [ "$(board_name)" = "nradio,c2000-max" ]; then
-		local role_lib=/usr/lib/c2000max/port-role.sh role
 
-		if [ ! -r "$role_lib" ]; then
-			eqos stop >/dev/null 2>&1
-			return 1
-		fi
-		. "$role_lib"
-		role="$(c2000_actual_role)"
-		if [ "$(uci -q get turboacc.config.fastpath)" != mediatek_hnat ] ||
-		   [ "$role" != "lan" ] ||
-		   { [ "${C2000MAX_PORT_SWITCH:-0}" != "1" ] &&
-		     { [ -e "$C2000_SWITCHING" ] || [ -e "$C2000_DEGRADED" ]; }; }; then
-		# EQoS depends on the board's eth1 LAN/PPD HNAT topology.  Keep its UCI
-		# selection but pause runtime shaping unless the real topology is LAN.
-			eqos stop >/dev/null 2>&1
-			return $?
-		fi
+	# The saved rules are acceleration-independent. Select the fastest safe
+	# implementation from the effective runtime, not from the requested UCI
+	# value (WAN roles may intentionally fall back from HNAT to flow offload).
+	effective="$(cat /var/run/c2000max-hnat-effective 2>/dev/null)"
+	hook="$(cat /sys/kernel/debug/hnat/hook_toggle 2>/dev/null)"
+	if [ "$effective" = mediatek_hnat ] && [ "$hook" = enabled ]; then
+		EQOS_BACKEND=hnat
+	else
+		EQOS_BACKEND=software
 	fi
+	export EQOS_BACKEND
 
 	local download upload
 	config_get download config download
@@ -202,6 +201,8 @@ eqos_start_service_locked() {
 		echo "eqos: total download and upload rates must be between 1 and $TOTAL_RATE_MAX Mbit/s" >&2
 		return 1
 	fi
+	TOTAL_DOWNLOAD_KBIT=$((download * 1000))
+	TOTAL_UPLOAD_KBIT=$((upload * 1000))
 
 	CONFIG_ERROR=0
 	USED_QUEUES=" "
@@ -209,14 +210,14 @@ eqos_start_service_locked() {
 	config_foreach validate_device device
 	[ "$CONFIG_ERROR" -eq 0 ] || return 1
 
-	# Switch away from software flow offloading before EQoS can load or
-	# configure mtkhnat.  This avoids a transient dual-fastpath state.
-	if [ "$(board_name)" = "nradio,c2000-max" ] &&
-	   ! eqos enable; then
-		return 1
-	fi
+	# Take a final snapshot before either accelerator cache is invalidated.
+	# Sampling failures do not block rate limiting and are retried by procd.
+	[ ! -x /usr/sbin/c2000max-traffic ] ||
+		/usr/sbin/c2000max-traffic mib-sync >/dev/null 2>&1 || true
+	[ ! -x /usr/sbin/c2000max-traffic ] ||
+		/usr/sbin/c2000max-traffic sample >/dev/null 2>&1 || true
 
-	if ! eqos start "$download" "$upload"; then
+	if ! eqos start "$EQOS_BACKEND" "$download" "$upload"; then
 		eqos stop >/dev/null 2>&1
 		return 1
 	fi
@@ -228,10 +229,11 @@ eqos_start_service_locked() {
 		return 1
 	fi
 
-	if ! eqos enable; then
+	if ! eqos activate "$EQOS_BACKEND"; then
 		eqos stop >/dev/null 2>&1
 		return 1
 	fi
+
 }
 
 eqos_stop_service_locked() {

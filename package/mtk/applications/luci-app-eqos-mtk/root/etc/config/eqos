@@ -2,10 +2,15 @@ config eqos 'config'
 	option enabled      0
 	option download     100
 	option upload       20
+	option statistics_enabled 1
+	option sample_interval 10
+	option flush_interval 3600
 
 # Per-device bandwidth is kbit/s.
-# Slots 1~31 use NETSYS V2/V3 64-QDMA HQoS.
-# Slots 32 and above use tc software shaping with IPv4 or IPv6 selectors.
+# Under MediaTek HNAT, slots 1~31 use NETSYS V2/V3 64-QDMA HQoS and later
+# slots fall back to tc. Under software flow offload or no acceleration, every
+# slot is automatically implemented by tc/IFB. The UCI rules never change when
+# the acceleration method changes.
 # qid0 is the default queue and qid63 is reserved for PPD.
 # Configure exactly one of ip or ip6. LuCI may also save selector.
 #config device

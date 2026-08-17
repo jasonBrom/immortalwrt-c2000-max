@@ -719,7 +719,7 @@ reset_runtime_fixture lan
 apply_mode_locked ||
 	fail "healthy HNAT path did not initialize its settings readback"
 [[ "$(cat "$C2000_HNAT_SETTINGS_EFFECTIVE")" == \
-	"bind_rate=30 update_nfct=0" ]] ||
+	"bind_rate=30 update_nfct=1" ]] ||
 	fail "initial HNAT settings readback is wrong"
 DB[turboacc.config.fastpath_mh_bind_rate]=5
 DB[turboacc.config.fastpath_mh_update_nfct]=1
@@ -1794,8 +1794,15 @@ grep -q '^apply_mode_locked$' "$HNAT_LOCKED_HELPER_FILE" ||
 	fail "internal HNAT worker does not call the non-rc controller worker"
 grep -q 'HNAT_LOCKED_HELPER' "$SCRIPT" ||
 	fail "port transaction does not use the locked HNAT worker"
-grep -q 'HNAT_LOCKED_HELPER' "$EQOS_CLI" ||
-	fail "EQoS HNAT convergence does not use the locked HNAT worker"
+if grep -q 'HNAT_LOCKED_HELPER\|fastpath=mediatek_hnat' "$EQOS_CLI"; then
+	fail "EQoS still changes the user's selected acceleration mode"
+fi
+grep -q 'activate_backend' "$EQOS_CLI" ||
+	fail "EQoS does not invalidate stale accelerator cache entries"
+grep -q 'flush flowtable inet fw4 ft' "$EQOS_CLI" ||
+	fail "software EQoS does not flush stale flowtable entries"
+grep -q 'hnat_entry' "$EQOS_CLI" ||
+	fail "HNAT EQoS does not invalidate stale FOE entries"
 if grep -Fq '/etc/init.d/c2000max-hnat reload' "$SCRIPT" "$EQOS_CLI"; then
 	fail "ROLE/HNAT-owned call chain still enters the HNAT rc.common lock"
 fi

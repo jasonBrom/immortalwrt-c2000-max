@@ -3,7 +3,20 @@
 uci -q batch <<-EOF >/dev/null
 	delete ucitrack.@eqos[-1]
 	add ucitrack eqos
+	set ucitrack.@eqos[-1].init=eqos
 EOF
 
+[ -n "$(uci -q get eqos.config.statistics_enabled)" ] ||
+	uci -q set eqos.config.statistics_enabled='1'
+[ -n "$(uci -q get eqos.config.sample_interval)" ] ||
+	uci -q set eqos.config.sample_interval='10'
+[ -n "$(uci -q get eqos.config.flush_interval)" ] ||
+	uci -q set eqos.config.flush_interval='3600'
+uci -q commit eqos
+
 rm -f /tmp/luci-indexcache
+[ -n "$IPKG_INSTROOT" ] || {
+	/etc/init.d/c2000max-traffic enable >/dev/null 2>&1
+	/etc/init.d/c2000max-traffic restart >/dev/null 2>&1
+}
 exit 0

@@ -7,15 +7,14 @@ DEV_DEFAULT="br-lan"
 IFB_DEV="ifb-eqos"
 HNAT_DIR="/sys/kernel/debug/hnat"
 NFT="/usr/sbin/nft"
-HNAT_LOCKED_HELPER="${C2000_HNAT_LOCKED_HELPER:-/usr/sbin/c2000max-hnat-locked}"
+RUNTIME_DIR="/var/run/eqos"
+BACKEND_FILE="$RUNTIME_DIR/backend"
 
 TABLE_FAMILY="inet"
 TABLE_NAME="eqos"
 CHAIN_NAME="forward"
 MARK_CLEAR_MASK="0xffff0000"
 HNAT_EXCEPTION_MARK="0x99"
-HNAT_BIND_THRESHOLD=5
-HNAT_RESTART_DELAY=3
 
 QDMA_QUEUE_COUNT=64
 QDMA_RATE_MAX=1000000
@@ -25,7 +24,7 @@ DL_SCH=3
 UP_QID_BASE=1
 DL_QID_BASE=32
 QUEUE_SLOTS=31
-TC_SLOT_MAX=65535
+TC_SLOT_MAX=4094
 PPD_QID=63
 MANAGED_QID_LAST=62
 DEFAULT_QUEUE_CFG="0 0 0 0 0 0 4"
@@ -162,6 +161,7 @@ nft_stop() {
 
 nft_start() {
 	local dev="$1"
+	local backend="$2"
 
 	need_nft
 	nft_stop
@@ -174,12 +174,14 @@ table $TABLE_FAMILY $TABLE_NAME {
 }
 EOF
 
-	"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
-		iifname "$dev" meta mark != "$HNAT_EXCEPTION_MARK" \
-		meta mark set meta mark '&' "$MARK_CLEAR_MASK" || return 1
-	"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
-		oifname "$dev" meta mark != "$HNAT_EXCEPTION_MARK" \
-		meta mark set meta mark '&' "$MARK_CLEAR_MASK" || return 1
+	if [ "$backend" = hnat ]; then
+		"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
+			iifname "$dev" meta mark != "$HNAT_EXCEPTION_MARK" \
+			meta mark set meta mark '&' "$MARK_CLEAR_MASK" || return 1
+		"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
+			oifname "$dev" meta mark != "$HNAT_EXCEPTION_MARK" \
+			meta mark set meta mark '&' "$MARK_CLEAR_MASK" || return 1
+	fi
 }
 
 reset_hnat_qdma() {
@@ -209,82 +211,11 @@ start_hnat_qos() {
 
 stop_hnat_qos() {
 	[ -d "$HNAT_DIR" ] || return 0
+	[ -e "$HNAT_DIR/qos_toggle" ] || return 0
 
 	need_qdma_layout
 	write_hnat "qos_toggle" "0"
 	reset_hnat_qdma
-}
-
-enable_hnat() {
-	local fastpath bind_rate hook_state
-
-	# C2000-MAX has a board-specific state machine that first turns software
-	# flow offloading off, then configures interfaces and enables HNAT.  Keep
-	# EQoS on that path instead of briefly running both acceleration engines.
-	if [ "$(board_name)" = "nradio,c2000-max" ] &&
-	   [ -x /etc/init.d/c2000max-hnat ]; then
-		local role_lib=/usr/lib/c2000max/port-role.sh
-
-		[ -r "$role_lib" ] ||
-			die "C2000-MAX port role helper is unavailable"
-		. "$role_lib"
-		if [ "${C2000MAX_PORT_SWITCH:-0}" != "1" ]; then
-			[ ! -e "$C2000_SWITCHING" ] ||
-				die "port role switch is in progress"
-			[ ! -e "$C2000_DEGRADED" ] ||
-				die "port role state is degraded"
-		fi
-		[ "$(c2000_actual_role)" = "lan" ] ||
-			die "EQoS is paused unless eth1 is actually configured as LAN"
-		[ -x "$HNAT_LOCKED_HELPER" ] ||
-			die "C2000-MAX locked HNAT worker is unavailable"
-		[ "$(uci -q get turboacc.config.fastpath)" = mediatek_hnat ] ||
-			die "EQoS is paused while fast-path acceleration is disabled"
-		if ! uci -q set "turboacc.config.fastpath_mh_bind_rate=$HNAT_BIND_THRESHOLD" ||
-		   ! uci -q commit turboacc ||
-		   ! C2000MAX_ACCEL_LOCKS_HELD="${C2000MAX_ACCEL_LOCKS_HELD:-0}" \
-		     C2000MAX_PORT_SWITCH=1 "$HNAT_LOCKED_HELPER"; then
-			die "failed to enable HNAT through the C2000-MAX acceleration controller"
-		fi
-
-		[ "$(c2000_actual_role)" = "lan" ] ||
-			die "C2000-MAX port left LAN topology while enabling HNAT"
-		[ "$(cat "$HNAT_DIR/hook_toggle")" = "enabled" ] ||
-			die "C2000-MAX acceleration controller did not enable HNAT"
-		return 0
-	fi
-
-	need_hnat
-	hook_state="$(cat "$HNAT_DIR/hook_toggle")"
-	case "$hook_state" in
-		enabled)
-			write_hnat "hook_toggle" "0"
-			[ "$(cat "$HNAT_DIR/hook_toggle")" = "disabled" ] ||
-				die "failed to disable HNAT hooks"
-			# hnat_disable_hook() restores PPE build mode on a three-second timer.
-			sleep "$HNAT_RESTART_DELAY"
-			;;
-		disabled) ;;
-		*) die "invalid HNAT hook state: $hook_state" ;;
-	esac
-
-	write_hnat "hook_toggle" "1"
-	[ "$(cat "$HNAT_DIR/hook_toggle")" = "enabled" ] ||
-		die "failed to enable HNAT hooks"
-	write_hnat "hnat_setting" "1 $HNAT_BIND_THRESHOLD"
-
-	[ -f /etc/config/turboacc ] || return 0
-
-	fastpath="$(uci -q get turboacc.config.fastpath)"
-	bind_rate="$(uci -q get turboacc.config.fastpath_mh_bind_rate)"
-	[ "$fastpath" = "mediatek_hnat" ] &&
-		[ "$bind_rate" = "$HNAT_BIND_THRESHOLD" ] && return 0
-
-	if ! uci -q set "turboacc.config.fastpath=mediatek_hnat" ||
-	   ! uci -q set "turboacc.config.fastpath_mh_bind_rate=$HNAT_BIND_THRESHOLD" ||
-	   ! uci -q commit turboacc; then
-		die "failed to synchronize turboacc HNAT settings"
-	fi
 }
 
 queue_from_slot() {
@@ -298,7 +229,9 @@ queue_from_slot() {
 }
 
 tc_classid_from_slot() {
-	printf '%x\n' "$1"
+	# classid 1:1 belongs to the aggregate parent. Keep every device in a
+	# distinct child class even when its persistent queue slot starts at one.
+	printf '%x\n' "$((1 + $1))"
 }
 
 ensure_tc_qos() {
@@ -469,13 +402,14 @@ nft_exception_rule() {
 }
 
 add_rule() {
-	local slot="$1"
-	local dl="$2"
-	local up="$3"
-	local ip4="$4"
-	local ip6="$5"
-	local total_dl="$6"
-	local total_up="$7"
+	local backend="$1"
+	local slot="$2"
+	local dl="$3"
+	local up="$4"
+	local ip4="$5"
+	local ip6="$6"
+	local total_dl="$7"
+	local total_up="$8"
 	local dev="$DEV_DEFAULT"
 	local up_qid dl_qid selector_count
 
@@ -500,6 +434,25 @@ add_rule() {
 
 	[ "$dl" -ne 0 ] || [ "$up" -ne 0 ] || return 0
 
+	case "$backend" in
+		hnat|software) ;;
+		*) die "invalid EQoS backend: $backend" ;;
+	esac
+
+	if [ "$backend" = software ]; then
+		ensure_tc_qos "$dev" "$total_dl" "$total_up" || return 1
+		program_tc_queue up "$slot" "$up" "$ip4" "$ip6" "$dev" || return 1
+		program_tc_queue dl "$slot" "$dl" "$ip4" "$ip6" "$dev" || return 1
+		# Flowtable forwarding bypasses tc. Tag both directions of every
+		# limited connection so firewall4 keeps only those flows on the regular
+		# forwarding path; mwan3's conntrack mark remains untouched.
+		nft_exception_rule up ip "$ip4" || return 1
+		nft_exception_rule up ip6 "$ip6" || return 1
+		nft_exception_rule dl ip "$ip4" || return 1
+		nft_exception_rule dl ip6 "$ip6" || return 1
+		return 0
+	fi
+
 	need_nft
 	need_qdma_layout
 
@@ -508,15 +461,10 @@ add_rule() {
 		program_tc_queue up "$slot" "$up" "$ip4" "$ip6" "$dev" || return 1
 		program_tc_queue dl "$slot" "$dl" "$ip4" "$ip6" "$dev" || return 1
 
-		if [ "$up" -ne 0 ]; then
-			nft_exception_rule up ip "$ip4" || return 1
-			nft_exception_rule up ip6 "$ip6" || return 1
-		fi
-
-		if [ "$dl" -ne 0 ]; then
-			nft_exception_rule dl ip "$ip4" || return 1
-			nft_exception_rule dl ip6 "$ip6" || return 1
-		fi
+		nft_exception_rule up ip "$ip4" || return 1
+		nft_exception_rule up ip6 "$ip6" || return 1
+		nft_exception_rule dl ip "$ip4" || return 1
+		nft_exception_rule dl ip6 "$ip6" || return 1
 
 		return 0
 	fi
@@ -540,12 +488,13 @@ add_rule() {
 }
 
 add_inferred_rule() {
-	local slot="$1"
-	local dl="$2"
-	local up="$3"
-	local selector="$4"
-	local total_dl="$5"
-	local total_up="$6"
+	local backend="$1"
+	local slot="$2"
+	local dl="$3"
+	local up="$4"
+	local selector="$5"
+	local total_dl="$6"
+	local total_up="$7"
 	local ip4 ip6
 
 	[ -n "$selector" ] || die "selector is required"
@@ -558,13 +507,43 @@ add_inferred_rule() {
 		die "selector must be an IPv4 or IPv6 address"
 	fi
 
-	add_rule "$slot" "$dl" "$up" "$ip4" "$ip6" "$total_dl" "$total_up"
+	add_rule "$backend" "$slot" "$dl" "$up" "$ip4" "$ip6" "$total_dl" "$total_up"
+}
+
+activate_backend() {
+	local backend="$1" command
+
+	case "$backend" in
+		hnat)
+			# Existing FOE entries were bound before the new per-device marks
+			# existed. Invalidate every PPE cache without toggling or changing
+			# the user's selected acceleration mode; the next packets rebind with
+			# the HQoS queue or 0x99 software-fallback mark.
+			[ -w "$HNAT_DIR/hnat_entry" ] || return 1
+			for command in 3 5 7; do
+				printf '%s -1\n' "$command" > "$HNAT_DIR/hnat_entry" || return 1
+			done
+			;;
+		software)
+			# Drop only cached flowtable entries. Conntrack/NAT state remains and
+			# unmarked traffic becomes offload-eligible again immediately.
+			"$NFT" flush flowtable inet fw4 ft 2>/dev/null || true
+			;;
+		*) die "invalid EQoS backend: $backend" ;;
+	esac
 }
 
 start_all() {
-	local dl="$1"
-	local up="$2"
+	local backend="$1"
+	local dl="$2"
+	local up="$3"
 	local dev="$DEV_DEFAULT"
+	local tmp
+
+	case "$backend" in
+		hnat|software) ;;
+		*) die "backend must be hnat or software" ;;
+	esac
 
 	is_uinteger "$dl" || die "download rate must be an integer"
 	is_uinteger "$up" || die "upload rate must be an integer"
@@ -573,11 +552,27 @@ start_all() {
 	[ "$dl" -le "$TOTAL_RATE_MAX" ] && [ "$up" -le "$TOTAL_RATE_MAX" ] ||
 		die "total rate must not exceed $TOTAL_RATE_MAX Mbit/s"
 
-	need_qdma_layout
 	stop_qos "$dev"
 	nft_stop
-	start_hnat_qos "$dl" "$up"
-	nft_start "$dev" || die "failed to configure nftables"
+
+	case "$backend" in
+		hnat)
+			need_qdma_layout
+			start_hnat_qos "$dl" "$up"
+			nft_start "$dev" hnat || die "failed to configure nftables"
+			;;
+		software)
+			stop_hnat_qos
+			nft_start "$dev" software || die "failed to configure nftables"
+			start_qos "$dev" "$dl" "$up" ||
+				die "failed to configure tc/IFB shaping"
+			;;
+	esac
+
+	mkdir -p "$RUNTIME_DIR" || die "failed to create EQoS runtime directory"
+	tmp="${BACKEND_FILE}.$$"
+	printf '%s\n' "$backend" > "$tmp" && mv "$tmp" "$BACKEND_FILE" ||
+		die "failed to publish EQoS backend"
 }
 
 stop_all() {
@@ -586,6 +581,7 @@ stop_all() {
 	stop_qos "$dev"
 	nft_stop
 	stop_hnat_qos
+	rm -f "$BACKEND_FILE"
 }
 
 usage() {
@@ -593,17 +589,17 @@ usage() {
 Usage: $0 <command> [options]
 
 Commands:
-  start <download_mbit> <upload_mbit>
-  add <slot> <download_kbit> <upload_kbit> <ipv4|ipv6> [total_down_mbit] [total_up_mbit]
-  enable
+  start <hnat|software> <download_mbit> <upload_mbit>
+  add <hnat|software> <slot> <download_kbit> <upload_kbit> <ipv4|ipv6> [total_down_mbit] [total_up_mbit]
+  activate <hnat|software>
   stop
 
-Run enable once after all add commands.
-
-Queue slots 1-31 use the common NETSYS V2/V3 64-QDMA layout. EQoS keeps
+In the HNAT backend, queue slots 1-31 use the common NETSYS V2/V3
+64-QDMA layout. EQoS keeps
 qid0 as the default unclassified queue, uses qid1-31 for upload and
 qid32-62 for download, and keeps qid63 free for the PPD path. Slots 32
-and above use tc software shaping with an IPv4 or IPv6 selector.
+and above use tc software shaping. The software backend uses tc for all
+slots and excludes only limited connections from firewall4 flow offload.
 EOF
 }
 
@@ -623,10 +619,10 @@ case "$1" in
 		shift
 		add_inferred_rule "$@"
 		;;
-	enable)
+	activate)
 		require_c2000_accel_locks
 		shift
-		enable_hnat "$@"
+		activate_backend "$@"
 		;;
 	*)
 		usage

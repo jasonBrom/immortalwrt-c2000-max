@@ -87,8 +87,8 @@ grep -Fq 'procd_set_param respawn 3600 5 5' "$NB_INIT" ||
 		fail "NetBird timeout helper took ${elapsed}s for a one-second limit"
 )
 
-grep -Fq 'PKG_VERSION:=2.35.35' "$BOARD_ROOT/Makefile" ||
-	fail "board package version is not V35.35"
+grep -Fq 'PKG_VERSION:=2.36.01' "$BOARD_ROOT/Makefile" ||
+	fail "board package version is not V36.01"
 grep -Fq 'PKG_RELEASE:=14' "$NB_APP/Makefile" ||
 	fail "luci-app-netbird release was not bumped"
 grep -Fq 'PKG_RELEASE:=2' "$NB_PKG/Makefile" ||

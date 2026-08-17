@@ -9,7 +9,7 @@ function action_health()
 	protocol.reply({
 		code = core.local_enabled() and "0" or "3",
 		service = "c2000max-app",
-		build = "V35.35",
+		build = "V36.01",
 		local_enabled = core.local_enabled(),
 		signal_refresh = core.signal_refresh_policy()
 	}, { encrypted = false })
@@ -124,7 +124,7 @@ function process(action, body, request_context)
 		return {
 			code = core.local_enabled() and "0" or "3",
 			service = "c2000max-app",
-			build = "V35.35",
+			build = "V36.01",
 			local_enabled = core.local_enabled(),
 			signal_refresh = core.signal_refresh_policy()
 		}
