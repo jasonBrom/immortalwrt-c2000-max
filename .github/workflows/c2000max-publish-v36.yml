@@ -1,0 +1,146 @@
+name: Publish C2000MAX V36.01 firmware
+
+on:
+  push:
+    branches:
+      - c2000max-v36.01
+    paths:
+      - ".github/workflows/c2000max-publish-v36.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: c2000max-v36-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_RUN_ID: "32051864329"
+      SOURCE_ARTIFACT: C2000MAX-V36.01-traffic-management
+      RELEASE_NAME: C2000MAX-V36.01-traffic-management
+      RELEASE_TAG: c2000max-v36.01
+      REFERENCE_TAG: c2000max-v35.35-port-role-lock-r1
+
+    steps:
+      - name: Check out release tooling
+        uses: actions/checkout@v4
+        with:
+          ref: c2000max-v36.01
+          fetch-depth: 1
+
+      - name: Verify source build and download artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}")"
+          test "$(jq -r .status <<<"$run_json")" = completed
+          test "$(jq -r .conclusion <<<"$run_json")" = success
+          test "$(jq -r .head_branch <<<"$run_json")" = c2000max-v36.01
+          source_sha="$(jq -r .head_sha <<<"$run_json")"
+          test -n "$source_sha"
+          echo "SOURCE_SHA=$source_sha" >> "$GITHUB_ENV"
+
+          mkdir -p release-input
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "$SOURCE_ARTIFACT" --dir release-input
+          mapfile -d '' sysupgrades < <(
+            find release-input -type f \
+              -name '*nradio_c2000-max*-sysupgrade.bin' -print0
+          )
+          test "${#sysupgrades[@]}" -eq 1
+          mkdir -p release-files
+          install -m 0644 "${sysupgrades[0]}" \
+            "release-files/${RELEASE_NAME}-sysupgrade.bin"
+          mapfile -d '' manifests < <(
+            find release-input -type f \
+              -name '*nradio_c2000-max.manifest' -print0
+          )
+          test "${#manifests[@]}" -eq 1
+          install -m 0644 "${manifests[0]}" \
+            "release-files/${RELEASE_NAME}.manifest"
+
+      - name: Assemble and verify SD image
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p reference
+          gh release download "$REFERENCE_TAG" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern '*sdcard.img.gz' --dir reference
+          mapfile -d '' references < <(
+            find reference -maxdepth 1 -type f -name '*sdcard.img.gz' -print0
+          )
+          test "${#references[@]}" -eq 1
+          gzip -dc "${references[0]}" > reference/reference.img
+
+          python3 scripts/c2000max/assemble-c2000max-sdcard.py \
+            reference/reference.img \
+            "release-files/${RELEASE_NAME}-sysupgrade.bin" \
+            "release-files/${RELEASE_NAME}-sdcard.img" \
+            --overlay-mib 512 | tee release-files/sdcard-assembly.txt
+          gzip -n -9 "release-files/${RELEASE_NAME}-sdcard.img"
+          gzip -t "release-files/${RELEASE_NAME}-sdcard.img.gz"
+          tar -tf "release-files/${RELEASE_NAME}-sysupgrade.bin" >/dev/null
+          (
+            cd release-files
+            sha256sum \
+              "${RELEASE_NAME}-sysupgrade.bin" \
+              "${RELEASE_NAME}-sdcard.img.gz" > SHA256SUMS
+            md5sum \
+              "${RELEASE_NAME}-sysupgrade.bin" \
+              "${RELEASE_NAME}-sdcard.img.gz" > MD5SUMS
+            ls -lh
+          )
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > release-notes.md <<EOF
+          C2000MAX V36.01 正式固件。
+
+          核心更新：
+          - HNAT 模式使用硬件 HQoS 进行逐设备限速。
+          - Flow Offloading 与普通转发自动切换到 tc/IFB，切换加速方式不丢失规则。
+          - 统一统计 HNAT 硬件 MIB、Flowtable 与普通 Conntrack 流量。
+          - 按 mwan3 实际出口区分 5G 与其他/宽带，并显示逐设备明细。
+
+          构建来源：
+          - 分支：c2000max-v36.01
+          - 固件提交：${SOURCE_SHA}
+          - Actions：https://github.com/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}
+
+          Release 包含可保留配置升级的 sysupgrade.bin、完整写卡用的 sdcard.img.gz、软件包清单及校验文件。
+          EOF
+
+          assets=(
+            "release-files/${RELEASE_NAME}-sysupgrade.bin"
+            "release-files/${RELEASE_NAME}-sdcard.img.gz"
+            "release-files/${RELEASE_NAME}.manifest"
+            release-files/SHA256SUMS
+            release-files/MD5SUMS
+            release-files/sdcard-assembly.txt
+          )
+          if gh release view "$RELEASE_TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" --clobber
+            gh release edit "$RELEASE_TAG" --repo "${GITHUB_REPOSITORY}" \
+              --title 'C2000MAX V36.01 - 流量管理' \
+              --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "$SOURCE_SHA" \
+              --title 'C2000MAX V36.01 - 流量管理' \
+              --notes-file release-notes.md
+          fi

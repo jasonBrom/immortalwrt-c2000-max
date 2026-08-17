@@ -9,7 +9,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  actions: read
+  contents: write
 
 concurrency:
   group: c2000max-one-shot-build
@@ -17,6 +18,7 @@ concurrency:
 
 jobs:
   build:
+    if: ${{ !contains(github.event.head_commit.message, '[skip firmware build]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
@@ -92,11 +94,55 @@ jobs:
           find bin/targets/mediatek/filogic -maxdepth 1 -type f \
             -exec cp -a {} c2000max-artifacts/ \;
           test -n "$(find c2000max-artifacts -maxdepth 1 -type f -name '*nradio_c2000-max*' -print -quit)"
+
+      - name: Assemble validated SD image
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_name='C2000MAX-V36.01-traffic-management'
+          mapfile -d '' sysupgrades < <(
+            find c2000max-artifacts -maxdepth 1 -type f \
+              -name '*nradio_c2000-max*-sysupgrade.bin' -print0
+          )
+          test "${#sysupgrades[@]}" -eq 1
+          mv "${sysupgrades[0]}" \
+            "c2000max-artifacts/${release_name}-sysupgrade.bin"
+
+          mkdir -p c2000max-reference
+          gh release download c2000max-v35.35-port-role-lock-r1 \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern '*sdcard.img.gz' --dir c2000max-reference
+          mapfile -d '' references < <(
+            find c2000max-reference -maxdepth 1 -type f \
+              -name '*sdcard.img.gz' -print0
+          )
+          test "${#references[@]}" -eq 1
+          gzip -dc "${references[0]}" > c2000max-reference/reference.img
+
+          python3 scripts/c2000max/assemble-c2000max-sdcard.py \
+            c2000max-reference/reference.img \
+            "c2000max-artifacts/${release_name}-sysupgrade.bin" \
+            "c2000max-artifacts/${release_name}-sdcard.img" \
+            --overlay-mib 512 | tee c2000max-artifacts/sdcard-assembly.txt
+          gzip -n -9 "c2000max-artifacts/${release_name}-sdcard.img"
+          gzip -t "c2000max-artifacts/${release_name}-sdcard.img.gz"
+
+      - name: Finalize release checksums
+        shell: bash
+        run: |
+          release_name='C2000MAX-V36.01-traffic-management'
           (
             cd c2000max-artifacts
             find . -maxdepth 1 -type f ! -name c2000max-build-sha256sums.txt \
               -printf '%f\0' | sort -z | xargs -0 sha256sum \
               > c2000max-build-sha256sums.txt
+            sha256sum \
+              "${release_name}-sysupgrade.bin" \
+              "${release_name}-sdcard.img.gz" > SHA256SUMS
+            md5sum \
+              "${release_name}-sysupgrade.bin" \
+              "${release_name}-sdcard.img.gz" > MD5SUMS
             ls -lh
           )
 
@@ -109,3 +155,48 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_name='C2000MAX-V36.01-traffic-management'
+          release_tag='c2000max-v36.01'
+          cat > release-notes.md <<EOF
+          C2000MAX V36.01 正式固件。
+
+          核心更新：
+          - HNAT 模式使用硬件 HQoS 进行逐设备限速。
+          - Flow Offloading 与普通转发自动切换到 tc/IFB，切换加速方式不丢失规则。
+          - 统一统计 HNAT 硬件 MIB、Flowtable 与普通 Conntrack 流量。
+          - 按 mwan3 实际出口区分 5G 与其他/宽带，并显示逐设备明细。
+
+          构建来源：
+          - 分支：c2000max-v36.01
+          - 提交：${GITHUB_SHA}
+          - Actions：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Release 至少包含可保留配置升级的 sysupgrade.bin 和完整写卡用的 sdcard.img.gz；校验值见 SHA256SUMS 与 MD5SUMS。
+          EOF
+
+          assets=(
+            "c2000max-artifacts/${release_name}-sysupgrade.bin"
+            "c2000max-artifacts/${release_name}-sdcard.img.gz"
+            c2000max-artifacts/SHA256SUMS
+            c2000max-artifacts/MD5SUMS
+            c2000max-artifacts/sdcard-assembly.txt
+          )
+          if gh release view "$release_tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "$release_tag" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" --clobber
+            gh release edit "$release_tag" --repo "${GITHUB_REPOSITORY}" \
+              --title 'C2000MAX V36.01 - 流量管理' \
+              --notes-file release-notes.md
+          else
+            gh release create "$release_tag" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "$GITHUB_SHA" \
+              --title 'C2000MAX V36.01 - 流量管理' \
+              --notes-file release-notes.md
+          fi
