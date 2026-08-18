@@ -4131,7 +4131,7 @@ int hnat_init_debugfs(struct mtk_hnat *h)
 			    &hnat_mcast_member_fops);
 	debugfs_create_file("mape_toggle", 0444, root, h,
 			    &hnat_mape_toggle_fops);
-	debugfs_create_file("qos_toggle", 0600, root, h,
+	debugfs_create_file("qos_toggle", 0444, root, h,
 			    &hnat_qos_toggle_fops);
 	debugfs_create_file("hnat_version", 0444, root, h,
 			    &hnat_version_fops);
