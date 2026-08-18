@@ -63,9 +63,9 @@ jobs:
           path: |
             dl
             .ccache
-          key: ${{ runner.os }}-c2000max-v2-${{ hashFiles('feeds.conf.default', 'configs/c2000max.config') }}
+          key: ${{ runner.os }}-c2000max-v3-${{ hashFiles('feeds.conf.default', 'configs/c2000max.config') }}
           restore-keys: |
-            ${{ runner.os }}-c2000max-v2-
+            ${{ runner.os }}-c2000max-v3-
 
       - name: Install build dependencies
         shell: bash
@@ -94,7 +94,10 @@ jobs:
         shell: bash
         run: |
           make -j"$(nproc)" download
-          find dl -type f -size -1024c -print -delete
+          # Only remove failed top-level downloads.  Go keeps an expanded
+          # module cache below dl/go-mod-cache where valid source files can be
+          # smaller than 1 KiB; deleting those files corrupts whole modules.
+          find dl -maxdepth 1 -type f -size -1024c -print -delete
 
       - name: Build firmware
         shell: bash
