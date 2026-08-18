@@ -4,3 +4,8 @@ config traffic 'config'
 	option flush_interval '3600'
 	option history_interval '60'
 	option history_points '1440'
+
+config audit 'audit'
+	option enabled '0'
+	option recognition_mode 'seamless'
+	option retention_days '30'

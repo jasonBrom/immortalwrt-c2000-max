@@ -29,8 +29,9 @@ C2000-MAX 修改仅保存在独立分支中，不需要也不建议向上游提�
 - 中文 LuCI、默认管理地址 `192.168.66.1`、Argon 与 Bing 壁纸；
 - QModem，适配 MT5700M-CN、FM350-GL 和三卡槽 SIM 切换；
 - MediaTek HNAT/PPE、LAN/WAN 网口角色切换；
-- 加速方式无关的逐设备限速：HNAT 使用硬件 HQoS，Flow Offloading/普通转发
-  自动使用 tc/IFB，切换加速方式无需重建规则；
+- 加速方式无关的按设备地址限速：HNAT 使用硬件 HQoS，同方向、同速率规则
+  自动复用硬件档位并共享档位总带宽；Flow Offloading/普通转发自动使用
+  tc/IFB，切换加速方式无需重建规则；
 - HNAT 硬件 MIB、Flowtable 与普通 Conntrack 统一流量统计，按 mwan3 实际出口
   区分 5G 和其他/宽带，并提供逐设备明细；
 - 官方 APP 本地/远程 SIM、短信、接入设备、重启和蜂窝设置适配；

@@ -1,0 +1,36 @@
+From: C2000MAX maintainers <noreply@example.com>
+Date: Tue, 18 Aug 2026 20:45:00 +0800
+Subject: [PATCH] net: mediatek: apply HQoS to external uplinks
+
+C2000MAX uses an HNAT external device such as eth2 for its cellular
+uplink while the ordinary HNAT WAN endpoint is intentionally empty in LAN
+role.  HQOS_FLAG only recognized an Ethernet WAN output, so LAN-to-cellular
+FOE entries kept their QID but were committed with fqos and QDMA tport
+disabled.  The configured upload queue consequently never shaped the
+hardware fast path.
+
+Treat an external output as an HQoS uplink only when the packet originated
+from a LAN, WED, or virtual ingress.  This covers wired and Wi-Fi clients
+without changing external-to-LAN downlink handling or external-to-external
+flows.
+---
+ drivers/net/ethernet/mediatek/mtk_hnat/hnat.h | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
+@@ -1476,8 +1476,13 @@ enum FoeIpAct {
+ #define PINGPONG_EXT_ID GENMASK(5, 0)
+ #define PINGPONG_MAPE_TOKEN 0x01
+ 
++#define IS_HQOS_EXT_UL_PATH(dev, skb)\
++	(IS_EXT(dev) && (FROM_GE_LAN_GRP(skb) || FROM_WED(skb) ||\
++			 FROM_GE_VIRTUAL(skb)))
++
+ #define HQOS_FLAG(dev, skb, qid)				\
+-	((IS_HQOS_UL_MODE && IS_WAN(dev)) ||			\
++	((IS_HQOS_UL_MODE && (IS_WAN(dev) ||			\
++			      IS_HQOS_EXT_UL_PATH(dev, skb))) ||	\
+ 	 (IS_HQOS_DL_MODE && IS_LAN_GRP(dev)) ||		\
+ 	 (IS_PPPQ_MODE && (IS_PPPQ_PATH(dev, skb) ||		\
+ 			   qid >= MAX_PPPQ_QUEUE_NUM)))

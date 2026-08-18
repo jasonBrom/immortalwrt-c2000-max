@@ -8,6 +8,7 @@ on:
       - ".github/workflows/c2000max-one-shot-build.yml"
       - "configs/c2000max.config"
       - "package/custom/c2000max-board/**"
+      - "package/mtk/applications/c2000max-appfilter/**"
       - "package/mtk/applications/luci-app-eqos-mtk/**"
       - "package/mtk/applications/luci-app-c2000max-traffic/**"
       - "package/network/config/firewall4/patches/002-c2000max-preserve-eqos-flow-path.patch"
@@ -265,12 +266,15 @@ jobs:
           C2000MAX V36.01 正式固件。
 
           核心更新：
-          - HNAT 模式使用硬件 HQoS 进行逐设备限速。
+          - HNAT 模式使用硬件 HQoS；规则 ID 与 QID 解耦，同速率规则复用硬件档位并共享档位总带宽。
           - Flow Offloading 与普通转发自动切换到 tc/IFB，切换加速方式不丢失规则。
           - 网络限速与流量统计已拆分为两个独立 LuCI 插件。
           - 限速支持 IPv4、IPv6 与 MAC，保存后立即应用并校验真实运行态。
           - 统一统计 HNAT 硬件 MIB、Flowtable 与普通 Conntrack 流量。
           - 按 mwan3 实际出口区分 5G 与其他/宽带，显示逐设备明细和总流量趋势图。
+          - 应用审计默认关闭；启用后按设备和时间段统计应用/分类流量，未审计历史归入未知/其他。
+          - 应用识别提供无感、均衡、精确三档；默认无感档不暂缓 HNAT，识别率可按需调高。
+          - 支持 OAF v3 ZIP 特征库更新、按特征库分类选择应用，以及全设备白名单或指定设备的定时应用阻断。
 
           构建来源：
           - 分支：c2000max-v36.01

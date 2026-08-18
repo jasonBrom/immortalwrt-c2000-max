@@ -34,7 +34,7 @@ msgstr ""
 msgid "Network speed control service for MediaTek HNAT."
 msgstr ""
 
-msgid "Queue ID"
+msgid "Rule ID"
 msgstr ""
 
 msgid "Settings"
@@ -55,7 +55,7 @@ msgstr ""
 msgid "Upload"
 msgstr ""
 
-msgid "Values 1-31 use HNAT HQoS. Values 32 and above use software shaping."
+msgid "Rule IDs do not map to HQoS queues. Rules with the same directional rate share a hardware profile and its aggregate bandwidth."
 msgstr ""
 
 msgid "unlimited"

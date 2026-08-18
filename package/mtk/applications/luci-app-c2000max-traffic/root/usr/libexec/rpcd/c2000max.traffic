@@ -6,7 +6,15 @@ case "$1" in
 {
 	"status": {},
 	"sample": {},
-	"reset": {}
+	"reset": {},
+	"catalog": {},
+	"audit": {
+		"device": "String",
+		"from": "Integer",
+		"to": "Integer"
+	},
+	"feature_install": {},
+	"policy_reload": {}
 }
 EOF
 		;;
@@ -25,6 +33,22 @@ EOF
 				;;
 			reset)
 				exec /usr/sbin/c2000max-traffic reset
+				;;
+			catalog)
+				exec /usr/sbin/c2000max-traffic catalog
+				;;
+			audit)
+				device="$(printf '%s' "$input" | jsonfilter -e '@.device' 2>/dev/null)"
+				from="$(printf '%s' "$input" | jsonfilter -e '@.from' 2>/dev/null)"
+				to="$(printf '%s' "$input" | jsonfilter -e '@.to' 2>/dev/null)"
+				exec /usr/sbin/c2000max-traffic audit "$device" "$from" "$to"
+				;;
+			feature_install)
+				exec /usr/sbin/c2000max-feature-install /tmp/c2000max-feature-upload
+				;;
+			policy_reload)
+				/usr/sbin/c2000max-traffic audit-policy >/dev/null 2>&1 || true
+				exec /usr/sbin/c2000max-traffic status
 				;;
 		esac
 		;;

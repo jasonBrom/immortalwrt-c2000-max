@@ -14,6 +14,14 @@ if [ "$(uci -q get c2000max_traffic.config.migrated_eqos)" != 1 ]; then
 	uci -q delete eqos.config.flush_interval
 	uci -q commit eqos
 fi
+[ "$(uci -q get c2000max_traffic.audit)" = audit ] || {
+	uci -q set c2000max_traffic.audit='audit'
+	uci -q set c2000max_traffic.audit.enabled='0'
+	uci -q set c2000max_traffic.audit.recognition_mode='seamless'
+	uci -q set c2000max_traffic.audit.retention_days='30'
+}
+[ -n "$(uci -q get c2000max_traffic.audit.recognition_mode)" ] || \
+	uci -q set c2000max_traffic.audit.recognition_mode='seamless'
 uci -q commit c2000max_traffic
 
 uci -q batch <<-EOF >/dev/null
@@ -25,7 +33,9 @@ EOF
 
 rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*
 [ -n "$IPKG_INSTROOT" ] || {
+	/etc/init.d/c2000max-appfilter enable >/dev/null 2>&1
 	/etc/init.d/c2000max-traffic enable >/dev/null 2>&1
+	/etc/init.d/c2000max-appfilter restart >/dev/null 2>&1
 	/etc/init.d/c2000max-traffic restart >/dev/null 2>&1
 }
 exit 0

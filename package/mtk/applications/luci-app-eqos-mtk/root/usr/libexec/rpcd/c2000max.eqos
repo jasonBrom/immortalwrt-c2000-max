@@ -6,12 +6,17 @@ ERROR_FILE="$RUNTIME_DIR/last_error"
 status_json()
 {
 	local enabled backend effective active=0 reason error qos_state diagnostic
+	local upload_profiles=0 download_profiles=0
 
 	enabled="$(uci -q get eqos.config.enabled)"
 	[ "$enabled" = 1 ] || enabled=0
 	backend="$(cat "$RUNTIME_DIR/backend" 2>/dev/null)"
 	effective="$(cat /var/run/c2000max-hnat-effective 2>/dev/null)"
 	error="$(cat "$ERROR_FILE" 2>/dev/null)"
+	upload_profiles="$(sed -n 's/^upload=//p' "$RUNTIME_DIR/profiles" 2>/dev/null)"
+	download_profiles="$(sed -n 's/^download=//p' "$RUNTIME_DIR/profiles" 2>/dev/null)"
+	case "$upload_profiles" in ''|*[!0-9]*) upload_profiles=0 ;; esac
+	case "$download_profiles" in ''|*[!0-9]*) download_profiles=0 ;; esac
 
 	if [ "$enabled" = 1 ]; then
 		case "$backend" in
@@ -49,6 +54,8 @@ status_json()
 	json_add_boolean active "$active"
 	json_add_string acceleration "${effective:-unknown}"
 	json_add_string backend "${backend:-inactive}"
+	json_add_int upload_profiles "$upload_profiles"
+	json_add_int download_profiles "$download_profiles"
 	json_add_string error "$error"
 	json_dump
 }

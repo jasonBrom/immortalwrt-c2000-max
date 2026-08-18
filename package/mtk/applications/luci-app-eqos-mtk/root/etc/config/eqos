@@ -4,10 +4,12 @@ config eqos 'config'
 	option upload       20
 
 # Per-device bandwidth is kbit/s.
-# Under MediaTek HNAT, slots 1~31 use NETSYS V2/V3 64-QDMA HQoS and later
-# slots fall back to tc. Under software flow offload or no acceleration, every
-# slot is automatically implemented by tc/IFB. The UCI rules never change when
-# the acceleration method changes.
+# The queue option is a stable rule ID, not a hardware QID. Under MediaTek
+# HNAT, rules with the same rate share one of 31 upload and 31 download QDMA
+# profiles. A shared profile caps the aggregate traffic of all rules using it.
+# A rule that needs a 32nd distinct active rate falls back to tc. Under software
+# flow offload or no acceleration, every rule is implemented by tc/IFB. The UCI
+# rules never change when the acceleration method changes.
 # qid0 is the default queue and qid63 is reserved for PPD.
 # Configure exactly one of ip, ip6 or mac. LuCI may also save selector.
 #config device

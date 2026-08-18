@@ -24,8 +24,8 @@ UP_SCH=2
 DL_SCH=3
 UP_QID_BASE=1
 DL_QID_BASE=32
-QUEUE_SLOTS=31
-TC_SLOT_MAX=4094
+HNAT_PROFILE_MAX=31
+RULE_ID_MAX=4094
 PPD_QID=63
 MANAGED_QID_LAST=62
 DEFAULT_QUEUE_CFG="0 0 0 0 0 0 4"
@@ -61,6 +61,9 @@ valid_ipv4() {
 
 valid_ipv6() {
 	[ -n "$1" ] || return 1
+	# A MAC address also consists only of hexadecimal digits and colons.  Keep
+	# it out of the IPv6 path even when this validator is called directly.
+	valid_mac "$1" && return 1
 
 	case "$1" in
 		*[!0-9A-Fa-f:./]*) return 1 ;;
@@ -264,19 +267,19 @@ stop_hnat_qos() {
 	reset_hnat_qdma
 }
 
-queue_from_slot() {
-	local slot="$1"
+queue_from_profile() {
+	local profile="$1"
 	local dir="$2"
 
 	case "$dir" in
-		up) echo $((UP_QID_BASE + slot - 1)) ;;
-		dl) echo $((DL_QID_BASE + slot - 1)) ;;
+		up) echo $((UP_QID_BASE + profile - 1)) ;;
+		dl) echo $((DL_QID_BASE + profile - 1)) ;;
 	esac
 }
 
-tc_classid_from_slot() {
+tc_classid_from_rule() {
 	# classid 1:1 belongs to the aggregate parent. Keep every device in a
-	# distinct child class even when its persistent queue slot starts at one.
+	# distinct child class even when its persistent rule ID starts at one.
 	printf '%x\n' "$((1 + $1))"
 }
 
@@ -358,7 +361,7 @@ tc_filter_rule() {
 
 program_tc_queue() {
 	local dir="$1"
-	local slot="$2"
+	local rule_id="$2"
 	local rate="$3"
 	local ip4="$4"
 	local ip6="$5"
@@ -376,12 +379,12 @@ program_tc_queue() {
 		*) return 1 ;;
 	esac
 
-	classid="$(tc_classid_from_slot "$slot")"
+	classid="$(tc_classid_from_rule "$rule_id")"
 	tc class replace dev "$tcdev" parent 1:1 classid "1:$classid" \
 		htb rate "${rate}kbit" ceil "${rate}kbit" || return 1
-	tc_filter_rule "$dir" ip "$ip4" "$slot" "$classid" "$dev" || return 1
-	tc_filter_rule "$dir" ip6 "$ip6" "$slot" "$classid" "$dev" || return 1
-	tc_filter_rule "$dir" mac "$mac" "$slot" "$classid" "$dev" || return 1
+	tc_filter_rule "$dir" ip "$ip4" "$rule_id" "$classid" "$dev" || return 1
+	tc_filter_rule "$dir" ip6 "$ip6" "$rule_id" "$classid" "$dev" || return 1
+	tc_filter_rule "$dir" mac "$mac" "$rule_id" "$classid" "$dev" || return 1
 }
 
 nft_mark_rule() {
@@ -406,18 +409,21 @@ nft_mark_rule() {
 			"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
 				ip "$addr" "$value" \
 				meta mark '&' "$FLOW_BYPASS_MARK" '==' 0 \
+				counter \
 				meta mark set meta mark '|' "$qid"
 			;;
 		ip6)
 			"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
 				ip6 "$addr" "$value" \
 				meta mark '&' "$FLOW_BYPASS_MARK" '==' 0 \
+				counter \
 				meta mark set meta mark '|' "$qid"
 			;;
 		mac)
 			"$NFT" add rule "$TABLE_FAMILY" "$TABLE_NAME" "$CHAIN_NAME" \
 				ether "$addr" "$value" \
 				meta mark '&' "$FLOW_BYPASS_MARK" '==' 0 \
+				counter \
 				meta mark set meta mark '|' "$qid"
 			;;
 		*)
@@ -466,7 +472,7 @@ nft_exception_rule() {
 
 add_rule() {
 	local backend="$1"
-	local slot="$2"
+	local rule_id="$2"
 	local dl="$3"
 	local up="$4"
 	local ip4="$5"
@@ -474,15 +480,34 @@ add_rule() {
 	local mac="$7"
 	local total_dl="$8"
 	local total_up="$9"
+	local up_profile="${10:-}"
+	local dl_profile="${11:-}"
 	local dev="$DEV_DEFAULT"
 	local up_qid dl_qid selector_count
 
-	is_uinteger "$slot" || die "queue slot must be an integer"
+	is_uinteger "$rule_id" || die "rule ID must be an integer"
 	is_uinteger "$dl" || die "download rate must be an integer"
 	is_uinteger "$up" || die "upload rate must be an integer"
 
-	[ "$slot" -ge 1 ] && [ "$slot" -le "$TC_SLOT_MAX" ] ||
-		die "queue slot must be between 1 and $TC_SLOT_MAX"
+	[ "$rule_id" -ge 1 ] && [ "$rule_id" -le "$RULE_ID_MAX" ] ||
+		die "rule ID must be between 1 and $RULE_ID_MAX"
+	# The persistent rule ID is only a tc class/filter identifier. HNAT
+	# profiles are allocated independently by the service and may be shared by
+	# every rule with the same rate.  Keep the old direct CLI form compatible.
+	if [ -z "$up_profile$dl_profile" ]; then
+		if [ "$rule_id" -le "$HNAT_PROFILE_MAX" ]; then
+			up_profile="$rule_id"
+			dl_profile="$rule_id"
+		else
+			up_profile=0
+			dl_profile=0
+		fi
+	fi
+	is_uinteger "$up_profile" && is_uinteger "$dl_profile" ||
+		die "HNAT rate profiles must be integers"
+	[ "$up_profile" -ge 0 ] && [ "$up_profile" -le "$HNAT_PROFILE_MAX" ] &&
+		[ "$dl_profile" -ge 0 ] && [ "$dl_profile" -le "$HNAT_PROFILE_MAX" ] ||
+		die "HNAT rate profiles must be between 0 and $HNAT_PROFILE_MAX"
 	[ "$dl" -le "$QDMA_RATE_MAX" ] && [ "$up" -le "$QDMA_RATE_MAX" ] ||
 		die "device rate must not exceed $QDMA_RATE_MAX kbit/s"
 	[ -n "$ip4" ] && valid_ipv4 "$ip4" || [ -z "$ip4" ] ||
@@ -508,8 +533,8 @@ add_rule() {
 
 	if [ "$backend" = software ]; then
 		ensure_tc_qos "$dev" "$total_dl" "$total_up" || return 1
-		program_tc_queue up "$slot" "$up" "$ip4" "$ip6" "$mac" "$dev" || return 1
-		program_tc_queue dl "$slot" "$dl" "$ip4" "$ip6" "$mac" "$dev" || return 1
+		program_tc_queue up "$rule_id" "$up" "$ip4" "$ip6" "$mac" "$dev" || return 1
+		program_tc_queue dl "$rule_id" "$dl" "$ip4" "$ip6" "$mac" "$dev" || return 1
 		# Flowtable forwarding bypasses tc. Tag both directions of every
 		# limited connection so firewall4 keeps only those flows on the regular
 		# forwarding path; mwan3's conntrack mark remains untouched.
@@ -525,10 +550,15 @@ add_rule() {
 	need_nft
 	need_qdma_layout
 
-	if [ "$slot" -gt "$QUEUE_SLOTS" ]; then
+	# Profile 0 means that this rule could not be represented by the 31
+	# hardware rate profiles in at least one active direction.  Keep the whole
+	# bidirectional flow on tc so the other direction cannot bind an HNAT entry
+	# first and accidentally bypass the software half of the rule.
+	if { [ "$up" -ne 0 ] && [ "$up_profile" -eq 0 ]; } ||
+	   { [ "$dl" -ne 0 ] && [ "$dl_profile" -eq 0 ]; }; then
 		ensure_tc_qos "$dev" "$total_dl" "$total_up" || return 1
-		program_tc_queue up "$slot" "$up" "$ip4" "$ip6" "$mac" "$dev" || return 1
-		program_tc_queue dl "$slot" "$dl" "$ip4" "$ip6" "$mac" "$dev" || return 1
+		program_tc_queue up "$rule_id" "$up" "$ip4" "$ip6" "$mac" "$dev" || return 1
+		program_tc_queue dl "$rule_id" "$dl" "$ip4" "$ip6" "$mac" "$dev" || return 1
 
 		nft_exception_rule up ip "$ip4" || return 1
 		nft_exception_rule up ip6 "$ip6" || return 1
@@ -540,8 +570,8 @@ add_rule() {
 		return 0
 	fi
 
-	up_qid="$(queue_from_slot "$slot" up)"
-	dl_qid="$(queue_from_slot "$slot" dl)"
+	up_qid="$(queue_from_profile "$up_profile" up)"
+	dl_qid="$(queue_from_profile "$dl_profile" dl)"
 
 	program_queue "$up_qid" "$UP_SCH" "$up" || return 1
 	program_queue "$dl_qid" "$DL_SCH" "$dl" || return 1
@@ -562,27 +592,33 @@ add_rule() {
 
 add_inferred_rule() {
 	local backend="$1"
-	local slot="$2"
+	local rule_id="$2"
 	local dl="$3"
 	local up="$4"
 	local selector="$5"
 	local total_dl="$6"
 	local total_up="$7"
-	local ip4 ip6 mac
+	local up_profile="${8:-}"
+	local dl_profile="${9:-}"
+	local ip4="" ip6="" mac=""
 
 	[ -n "$selector" ] || die "selector is required"
 
-	if valid_ipv4 "$selector"; then
+	# Test the fixed-width MAC form first.  The old order let addresses such as
+	# 1a:3d:8c:86:20:56 pass the permissive IPv6 character check, causing nft
+	# to parse the MAC as an IPv6 hostname and abort the whole EQoS transaction.
+	if valid_mac "$selector"; then
+		mac="$(printf '%s' "$selector" | tr 'A-F' 'a-f')"
+	elif valid_ipv4 "$selector"; then
 		ip4="$selector"
 	elif valid_ipv6 "$selector"; then
 		ip6="$selector"
-	elif valid_mac "$selector"; then
-		mac="$(printf '%s' "$selector" | tr 'A-F' 'a-f')"
 	else
 		die "selector must be an IPv4, IPv6 or MAC address"
 	fi
 
-	add_rule "$backend" "$slot" "$dl" "$up" "$ip4" "$ip6" "$mac" "$total_dl" "$total_up"
+	add_rule "$backend" "$rule_id" "$dl" "$up" "$ip4" "$ip6" "$mac" \
+		"$total_dl" "$total_up" "$up_profile" "$dl_profile"
 }
 
 activate_backend() {
@@ -717,17 +753,18 @@ Usage: $0 <command> [options]
 
 Commands:
   start <hnat|software> <download_mbit> <upload_mbit>
-  add <hnat|software> <slot> <download_kbit> <upload_kbit> <ipv4|ipv6|mac> [total_down_mbit] [total_up_mbit]
+  add <hnat|software> <rule_id> <download_kbit> <upload_kbit> <ipv4|ipv6|mac> [total_down_mbit] [total_up_mbit] [up_profile] [down_profile]
   activate <hnat|software>
   diagnose <mediatek_hnat|flow_offloading|disabled>
   stop
 
-In the HNAT backend, queue slots 1-31 use the common NETSYS V2/V3
-64-QDMA layout. EQoS keeps
-qid0 as the default unclassified queue, uses qid1-31 for upload and
-qid32-62 for download, and keeps qid63 free for the PPD path. Slots 32
-and above use tc software shaping. The software backend uses tc for all
-slots and excludes only limited connections from firewall4 flow offload.
+In the HNAT backend, the persistent rule ID is independent of QDMA. Rules
+with the same rate share one of 31 upload profiles (qid1-31) and one of 31
+download profiles (qid32-62). qid0 remains the default queue and qid63 is
+reserved for PPD. If an active direction needs a 32nd distinct rate, that
+rule uses tc software shaping. A shared QDMA profile is an aggregate cap for
+all rules assigned to it. The software backend uses tc for every rule and
+excludes only limited connections from firewall4 flow offload.
 EOF
 }
 

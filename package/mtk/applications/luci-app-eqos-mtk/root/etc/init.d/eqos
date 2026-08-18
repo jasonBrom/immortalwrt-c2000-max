@@ -8,7 +8,8 @@ USE_PROCD=1
 
 QDMA_RATE_MAX=1000000
 TOTAL_RATE_MAX=1000
-QUEUE_SLOT_MAX=4094
+RULE_ID_MAX=4094
+HNAT_PROFILE_MAX=31
 TOTAL_DOWNLOAD_KBIT=$QDMA_RATE_MAX
 TOTAL_UPLOAD_KBIT=$QDMA_RATE_MAX
 C2000_ROLE_LOCK="${C2000_ROLE_LOCK:-/var/lock/c2000max-port-role.lock}"
@@ -17,6 +18,12 @@ C2000_EQOS_ROLE_HELD=0
 C2000_EQOS_HNAT_HELD=0
 EQOS_RUNTIME_DIR="${EQOS_RUNTIME_DIR:-/var/run/eqos}"
 EQOS_ERROR_FILE="$EQOS_RUNTIME_DIR/last_error"
+EQOS_PROFILE_FILE="$EQOS_RUNTIME_DIR/profiles"
+HNAT_UP_PROFILES=""
+HNAT_DL_PROFILES=""
+HNAT_UP_PROFILE_COUNT=0
+HNAT_DL_PROFILE_COUNT=0
+HNAT_PROFILE_ID=0
 
 : >>"$C2000_ROLE_LOCK" || exit 1
 : >>"$C2000_HNAT_LOCK" || exit 1
@@ -67,6 +74,54 @@ addresses_for_mac() {
 	} | sort -u
 }
 
+allocate_hnat_profile() {
+	local dir="$1"
+	local rate="$2"
+	local profiles count item item_rate item_id
+
+	HNAT_PROFILE_ID=0
+	[ "$EQOS_BACKEND" = hnat ] || return 0
+	[ "$rate" -ne 0 ] || return 0
+
+	case "$dir" in
+		up)
+			profiles="$HNAT_UP_PROFILES"
+			count="$HNAT_UP_PROFILE_COUNT"
+			;;
+		dl)
+			profiles="$HNAT_DL_PROFILES"
+			count="$HNAT_DL_PROFILE_COUNT"
+			;;
+		*) return 1 ;;
+	esac
+
+	# A QDMA queue is a rate profile, not a device/rule ID. Reuse it for
+	# every rule with the same rate. The resulting hardware cap is shared by
+	# all devices assigned to that profile.
+	for item in $profiles; do
+		item_rate="${item%%:*}"
+		item_id="${item#*:}"
+		if [ "$item_rate" = "$rate" ]; then
+			HNAT_PROFILE_ID="$item_id"
+			return 0
+		fi
+	done
+
+	[ "$count" -lt "$HNAT_PROFILE_MAX" ] || return 0
+	count=$((count + 1))
+	HNAT_PROFILE_ID="$count"
+	case "$dir" in
+		up)
+			HNAT_UP_PROFILE_COUNT="$count"
+			HNAT_UP_PROFILES="${profiles}${rate}:${count} "
+			;;
+		dl)
+			HNAT_DL_PROFILE_COUNT="$count"
+			HNAT_DL_PROFILES="${profiles}${rate}:${count} "
+			;;
+	esac
+}
+
 validate_device() {
 	local cfg="$1"
 	local enabled
@@ -74,31 +129,31 @@ validate_device() {
 	config_get_bool enabled "$cfg" enabled 1
 	[ "$enabled" -eq 1 ] || return 0
 
-	local ip ip6 mac queue selector selector_count selector_key
+	local ip ip6 mac rule_id selector selector_count selector_key
 	local download upload
 	config_get ip "$cfg" ip
 	config_get ip6 "$cfg" ip6
 	config_get mac "$cfg" mac
 	config_get download "$cfg" download 0
 	config_get upload "$cfg" upload 0
-	config_get queue "$cfg" queue
+	config_get rule_id "$cfg" queue
 	config_get selector "$cfg" selector
-	[ -n "$queue" ] || config_get queue "$cfg" comment
+	[ -n "$rule_id" ] || config_get rule_id "$cfg" comment
 
-	if ! is_uinteger "$queue" || [ "$queue" -lt 1 ] || [ "$queue" -gt "$QUEUE_SLOT_MAX" ]; then
-		echo "eqos: $cfg queue slot must be between 1 and $QUEUE_SLOT_MAX" >&2
+	if ! is_uinteger "$rule_id" || [ "$rule_id" -lt 1 ] || [ "$rule_id" -gt "$RULE_ID_MAX" ]; then
+		echo "eqos: $cfg rule ID must be between 1 and $RULE_ID_MAX" >&2
 		CONFIG_ERROR=1
 		return 0
 	fi
 
-	case " $USED_QUEUES " in
-		*" $queue "*)
-			echo "eqos: queue slot $queue is used by more than one rule" >&2
+	case " $USED_RULE_IDS " in
+		*" $rule_id "*)
+			echo "eqos: rule ID $rule_id is used by more than one rule" >&2
 			CONFIG_ERROR=1
 			return 0
 			;;
 	esac
-	USED_QUEUES="${USED_QUEUES}${queue} "
+	USED_RULE_IDS="${USED_RULE_IDS}${rule_id} "
 
 	if ! is_uinteger "$download" || ! is_uinteger "$upload"; then
 		echo "eqos: $cfg download and upload rates must be integers" >&2
@@ -193,22 +248,34 @@ parse_device() {
 	config_get_bool enabled "$cfg" enabled 1
 	[ "$enabled" -eq 1 ] || return 0
 
-	local ip ip6 mac address resolved download upload queue total_download total_upload
+	local ip ip6 mac address resolved download upload rule_id total_download total_upload
+	local up_profile dl_profile
 	config_get ip "$cfg" ip
 	config_get ip6 "$cfg" ip6
 	config_get mac "$cfg" mac
 	config_get download "$cfg" download 0
 	config_get upload "$cfg" upload 0
-	config_get queue "$cfg" queue
+	config_get rule_id "$cfg" queue
 	config_get total_download config download
 	config_get total_upload config upload
-	[ -n "$queue" ] || config_get queue "$cfg" comment
+	[ -n "$rule_id" ] || config_get rule_id "$cfg" comment
+
+	allocate_hnat_profile up "$upload" || {
+		CONFIG_ERROR=1
+		return 0
+	}
+	up_profile="$HNAT_PROFILE_ID"
+	allocate_hnat_profile dl "$download" || {
+		CONFIG_ERROR=1
+		return 0
+	}
+	dl_profile="$HNAT_PROFILE_ID"
 
 	address="$ip"
 	[ -n "$address" ] || address="$ip6"
 	[ -n "$address" ] || address="$mac"
-	if ! eqos add "$EQOS_BACKEND" "$queue" "$download" "$upload" "$address" \
-		"$total_download" "$total_upload"; then
+	if ! eqos add "$EQOS_BACKEND" "$rule_id" "$download" "$upload" "$address" \
+		"$total_download" "$total_upload" "$up_profile" "$dl_profile"; then
 		CONFIG_ERROR=1
 		return 0
 	fi
@@ -217,8 +284,8 @@ parse_device() {
 	# address too, so routed downloads are marked before br-lan rewrites L2.
 	[ -n "$mac" ] || return 0
 	for resolved in $(addresses_for_mac "$mac"); do
-		if ! eqos add "$EQOS_BACKEND" "$queue" "$download" "$upload" "$resolved" \
-			"$total_download" "$total_upload"; then
+		if ! eqos add "$EQOS_BACKEND" "$rule_id" "$download" "$upload" "$resolved" \
+			"$total_download" "$total_upload" "$up_profile" "$dl_profile"; then
 			CONFIG_ERROR=1
 			return 0
 		fi
@@ -258,8 +325,13 @@ eqos_start_service_locked() {
 	TOTAL_UPLOAD_KBIT=$((upload * 1000))
 
 	CONFIG_ERROR=0
-	USED_QUEUES=" "
+	USED_RULE_IDS=" "
 	USED_SELECTORS=" "
+	HNAT_UP_PROFILES=""
+	HNAT_DL_PROFILES=""
+	HNAT_UP_PROFILE_COUNT=0
+	HNAT_DL_PROFILE_COUNT=0
+	rm -f "$EQOS_PROFILE_FILE"
 	config_foreach validate_device device
 	[ "$CONFIG_ERROR" -eq 0 ] || return 1
 
@@ -287,10 +359,18 @@ eqos_start_service_locked() {
 		return 1
 	fi
 
+	# Publish only compact numeric state for LuCI/runtime diagnostics.
+	{
+		printf 'upload=%s\n' "$HNAT_UP_PROFILE_COUNT"
+		printf 'download=%s\n' "$HNAT_DL_PROFILE_COUNT"
+	} >"$EQOS_PROFILE_FILE.tmp" &&
+		mv "$EQOS_PROFILE_FILE.tmp" "$EQOS_PROFILE_FILE"
+
 }
 
 eqos_stop_service_locked() {
 	eqos stop
+	rm -f "$EQOS_PROFILE_FILE" "$EQOS_PROFILE_FILE.tmp"
 }
 
 eqos_reload_service_locked() {

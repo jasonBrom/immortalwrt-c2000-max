@@ -23,8 +23,8 @@ msgstr "最大速率，单位为 Mbit/s；填 0 表示不限制该方向。"
 msgid "Network speed control service for MediaTek HNAT."
 msgstr "面向 MediaTek HNAT 的网速控制服务。"
 
-msgid "Queue ID"
-msgstr "队列编号"
+msgid "Rule ID"
+msgstr "规则 ID"
 
 msgid "This value is already in use."
 msgstr "该值已被使用。"
@@ -35,5 +35,5 @@ msgstr "总下载带宽。"
 msgid "Total upload bandwidth."
 msgstr "总上传带宽。"
 
-msgid "Values 1-31 use HNAT HQoS. Values 32 and above use software shaping."
-msgstr "编号 1-31 使用 HNAT HQoS；编号 32 及以上使用软件限速。"
+msgid "Rule IDs do not map to HQoS queues. Rules with the same directional rate share a hardware profile and its aggregate bandwidth."
+msgstr "规则 ID 不映射到 HQoS 队列；同方向、同速率规则共享一个硬件档位及其总带宽。"

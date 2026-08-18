@@ -36,6 +36,8 @@ function renderStatus(status) {
 	var active = status.active === true || status.active === 1;
 	var state = active ? '已启用并生效' : (enabled ? '已启用，但应用失败' : '未启用');
 	var color = active ? '#22a06b' : (enabled ? '#c9372c' : '#777');
+	var profiles = '%s / 31 上传，%s / 31 下载'.format(
+		Number(status.upload_profiles || 0), Number(status.download_profiles || 0));
 
 	return E('div', { 'class': 'cbi-section' }, [
 		E('h3', {}, '实时运行状态'),
@@ -49,8 +51,14 @@ function renderStatus(status) {
 			E('div', { 'class': 'tr' }, [
 				E('div', { 'class': 'td left' }, '限速后端'),
 				E('div', { 'class': 'td left' }, backendName(status.backend)),
+				E('div', { 'class': 'td left' }, '硬件速率档位'),
+				E('div', { 'class': 'td left' }, status.backend === 'hnat' ? profiles : '不适用')
+			]),
+			E('div', { 'class': 'tr' }, [
 				E('div', { 'class': 'td left' }, '规则类型'),
-				E('div', { 'class': 'td left' }, 'IPv4 / IPv6 / MAC')
+				E('div', { 'class': 'td left' }, 'IPv4 / IPv6 / MAC'),
+				E('div', { 'class': 'td left' }, '档位共享方式'),
+				E('div', { 'class': 'td left' }, '同方向、同速率共享总带宽')
 			])
 		]),
 		status.error ? E('p', { 'class': 'alert-message error' }, [
@@ -163,15 +171,16 @@ return view.extend({
 		s.tab('general', '常规设置');
 
 		o = s.taboption('general', form.Flag, 'enabled', '启用'); o.default = o.enabled; o.rmempty = false; o.editable = true;
-		o = s.taboption('general', form.Value, 'queue', '规则编号', '1–31 在 HNAT 下使用硬件 HQoS，32 以上自动回退到 tc。');
+		o = s.taboption('general', form.Value, 'queue', '规则 ID', '仅用于标识规则和软件 tc，不对应 HQoS 队列；同方向、同速率的规则自动复用硬件档位并共享该档位总带宽。');
 		o.datatype = 'and(uinteger,min(1),max(4094))'; o.rmempty = false; o.placeholder = '1';
+		o.readonly = true;
 		o.cfgvalue = function(sectionId) { return uci.get('eqos', sectionId, 'queue') || uci.get('eqos', sectionId, 'comment'); };
 		o.write = function(sectionId, value) { uci.set('eqos', sectionId, 'queue', String(Number(value))); uci.unset('eqos', sectionId, 'comment'); };
 		o.validate = function(sectionId, value) {
 			var sections = uci.sections('eqos', 'device');
 			for (var i = 0; i < sections.length; i++)
 				if (sections[i]['.name'] !== sectionId && sections[i].enabled !== '0' && Number(sections[i].queue || sections[i].comment) === Number(value))
-					return '该规则编号已被使用。';
+					return '该规则 ID 已被使用。';
 			return true;
 		};
 
