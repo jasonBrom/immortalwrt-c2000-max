@@ -545,5 +545,9 @@ service_triggers()
 	# The collector toggle changes whether type-7 HNAT MIB deltas are copied
 	# into conntrack. Reapply the driver setting immediately when traffic
 	# accounting is toggled, without waiting for the next acceleration switch.
-	procd_add_reload_trigger turboacc eqos c2000max_traffic
+	# EQoS consumes the effective acceleration state but no longer changes the
+	# HNAT topology. Watching its UCI file caused a parallel HNAT rebuild and
+	# EQoS apply on every Save, which could turn qos_toggle back off after the
+	# limiter had just enabled it.
+	procd_add_reload_trigger turboacc c2000max_traffic
 }

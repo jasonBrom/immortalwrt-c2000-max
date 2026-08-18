@@ -1,12 +1,12 @@
 name: Publish C2000MAX V36.01 firmware
 
 on:
-  push:
-    branches:
-      - c2000max-v36.01
-    paths:
-      - ".github/workflows/c2000max-publish-v36.yml"
   workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Successful one-shot build run ID to publish"
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      SOURCE_RUN_ID: "32051864329"
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
       SOURCE_ARTIFACT: C2000MAX-V36.01-traffic-management
       RELEASE_NAME: C2000MAX-V36.01-traffic-management
       RELEASE_TAG: c2000max-v36.01

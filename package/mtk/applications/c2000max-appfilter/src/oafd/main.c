@@ -683,23 +683,26 @@ int af_nl_clean_feature(void){
     }
     msg.action = AF_MSG_CLEAN_FEATURE;
 
-    send_msg_to_kernel(appfilter_nl_fd.fd,(void *)&msg, sizeof(msg));
-    return 0;
+	return send_msg_to_kernel(appfilter_nl_fd.fd, (void *)&msg, sizeof(msg));
 }
 
 int af_nl_add_feature(char *feature){
-    char msg_buf[1024] = {0};
+	char msg_buf[1024] = {0};
+	size_t feature_len;
     if (appfilter_nl_fd.fd < 0){
         return -1;
     }
-    char *p_data = msg_buf + sizeof(af_msg_t);
-    memset(msg_buf, 0, sizeof(msg_buf));
+	char *p_data = msg_buf + sizeof(af_msg_t);
+	memset(msg_buf, 0, sizeof(msg_buf));
+	feature_len = strlen(feature) + 1;
+	if (feature_len > sizeof(msg_buf) - sizeof(af_msg_t))
+		return -1;
 
-    af_msg_t *hdr = (af_msg_t *)msg_buf;
-    hdr->action = AF_MSG_ADD_FEATURE;
-    strncpy(p_data, feature, strlen(feature));
-    send_msg_to_kernel(appfilter_nl_fd.fd,(void *)msg_buf, sizeof(af_msg_t) + strlen(feature) + 1);
-    return 0;
+	af_msg_t *hdr = (af_msg_t *)msg_buf;
+	hdr->action = AF_MSG_ADD_FEATURE;
+	memcpy(p_data, feature, feature_len);
+	return send_msg_to_kernel(appfilter_nl_fd.fd, (void *)msg_buf,
+				  sizeof(af_msg_t) + feature_len);
 }
 
 
@@ -713,6 +716,7 @@ int af_load_feature_to_kernel(void){
 		return -1;
 	}
 	if (af_nl_clean_feature() < 0){
+		fclose(fp);
         return -1;
     }
 	while (fgets(line_buf, sizeof(line_buf), fp))
@@ -726,7 +730,10 @@ int af_load_feature_to_kernel(void){
 		if (strlen(line_buf) >= MAX_FEATURE_LINE_LEN - 1){
 			continue;
 		}
-		af_nl_add_feature(line_buf);
+		if (af_nl_add_feature(line_buf) < 0) {
+			fclose(fp);
+			return -1;
+		}
 	}
 	fclose(fp);
     return 0;

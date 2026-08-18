@@ -821,6 +821,7 @@ status_json()
 	local rows="$RUNTIME_DIR/status.rows" daemon_pid audit_on=0 audit_active=0
 	local feature_version feature_format feature_apps policy_rules policy_error history_samples
 	local audit_mode audit_packets audit_hold=0
+	local audit_features=0 audit_record=0 audit_daemon=0 audit_runtime_error=""
 
 	ensure_runtime || return 1
 	daemon_pid="$(cat "$DAEMON_PID_FILE" 2>/dev/null)"
@@ -843,7 +844,23 @@ status_json()
 		*) source=conntrack ;;
 	esac
 	audit_enabled && audit_on=1
-	[ "$audit_on" -eq 0 ] || [ ! -r "$OAF_SYSCTL_DIR/version" ] || audit_active=1
+	if [ "$audit_on" -eq 1 ]; then
+		audit_features="$(cat "$OAF_SYSCTL_DIR/feature_init" 2>/dev/null)"
+		audit_record="$(cat "$OAF_SYSCTL_DIR/record_enable" 2>/dev/null)"
+		case "$audit_features" in ''|*[!0-9]*) audit_features=0 ;; esac
+		pidof c2000max-oafd >/dev/null 2>&1 && audit_daemon=1
+		if [ ! -r "$OAF_SYSCTL_DIR/version" ]; then
+			audit_runtime_error="OAF 内核引擎未运行"
+		elif [ "$audit_features" -le 0 ]; then
+			audit_runtime_error="OAF 特征库未装入内核（已识别流量会全部显示为未知/其他）"
+		elif [ "$audit_record" != 1 ]; then
+			audit_runtime_error="OAF 流量记录未启用"
+		elif [ "$audit_daemon" -ne 1 ]; then
+			audit_runtime_error="OAF 用户态服务未运行"
+		else
+			audit_active=1
+		fi
+	fi
 	audit_mode="$(uci -q get c2000max_traffic.audit.recognition_mode)"
 	case "$audit_mode" in balanced|precise) ;; *) audit_mode=seamless ;; esac
 	audit_packets="$(cat "$OAF_SYSCTL_DIR/max_dpi_packets" 2>/dev/null)"
@@ -859,6 +876,7 @@ status_json()
 		END {for (id in ids) n++; print n+0}' "$FEATURE_FILE" 2>/dev/null)"
 	policy_rules="$(cat "$POLICY_COUNT_FILE" 2>/dev/null)"
 	policy_error="$(cat "$POLICY_ERROR_FILE" 2>/dev/null)"
+	[ -n "$policy_error" ] || policy_error="$audit_runtime_error"
 	history_samples="$(awk -F '\t' 'NF>=7 && $1~/^[0-9]+$/ {n++} END {print n+0}' "$HISTORY_FILE")"
 	case "$feature_apps" in ''|*[!0-9]*) feature_apps=0 ;; esac
 	case "$policy_rules" in ''|*[!0-9]*) policy_rules=0 ;; esac
@@ -879,6 +897,7 @@ status_json()
 	json_add_string feature_version "${feature_version:-未知}"
 	json_add_string feature_format "${feature_format:-未知}"
 	json_add_int feature_apps "$feature_apps"
+	json_add_int audit_loaded_features "$audit_features"
 	json_add_int policy_rules "$policy_rules"
 	json_add_string audit_error "$policy_error"
 	json_add_array devices
@@ -972,6 +991,7 @@ if [ "${C2000_TRAFFIC_LIB_ONLY:-0}" != 1 ]; then
 		daemon) daemon_loop ;;
 		sample) sample_once ;;
 		mib-sync) sync_hardware_mib ;;
+		audit-refresh) invalidate_acceleration_cache ;;
 		status) status_json ;;
 		audit) audit_json "${2:-}" "${3:-}" "${4:-}" ;;
 		catalog) catalog_json ;;
@@ -979,6 +999,6 @@ if [ "${C2000_TRAFFIC_LIB_ONLY:-0}" != 1 ]; then
 		audit-policy-clear) clear_audit_policy ;;
 		flush) flush_totals ;;
 		reset) reset_totals ;;
-		*) echo "Usage: $0 {daemon|sample|mib-sync|status|audit|catalog|audit-policy|audit-policy-clear|flush|reset}" >&2; exit 1 ;;
+		*) echo "Usage: $0 {daemon|sample|mib-sync|audit-refresh|status|audit|catalog|audit-policy|audit-policy-clear|flush|reset}" >&2; exit 1 ;;
 	esac
 fi

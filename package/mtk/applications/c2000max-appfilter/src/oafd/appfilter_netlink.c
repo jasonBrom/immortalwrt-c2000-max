@@ -220,15 +220,23 @@ EXIT:
 #define MAX_NL_MSG_LEN 1024
 int send_msg_to_kernel(int fd, void *msg, int len)
 {
-    struct sockaddr_nl saddr, daddr;
+	struct sockaddr_nl daddr;
+	size_t payload_len;
     memset(&daddr, 0, sizeof(daddr));
     daddr.nl_family = AF_NETLINK;
     daddr.nl_pid = 0; // to kernel
     daddr.nl_groups = 0;
     int ret = 0;
     struct nlmsghdr *nlh = NULL;
-    nlh = (struct nlmsghdr *)malloc(NLMSG_SPACE(MAX_NL_MSG_LEN));
-    nlh->nlmsg_len = NLMSG_SPACE(MAX_NL_MSG_LEN);
+	if (!msg || len <= 0)
+		return -1;
+	payload_len = sizeof(struct af_msg_hdr) + (size_t)len;
+	if (payload_len > MAX_NL_MSG_LEN)
+		return -1;
+    nlh = (struct nlmsghdr *)calloc(1, NLMSG_SPACE(payload_len));
+	if (!nlh)
+		return -1;
+    nlh->nlmsg_len = NLMSG_LENGTH(payload_len);
     nlh->nlmsg_flags = 0;
     nlh->nlmsg_type = 0;
     nlh->nlmsg_seq = 0;
@@ -245,9 +253,9 @@ int send_msg_to_kernel(int fd, void *msg, int len)
 
     ret = sendto(fd, nlh, nlh->nlmsg_len, 0, (struct sockaddr *)&daddr, sizeof(struct sockaddr_nl));
 	free(nlh);
-    if (!ret)
+	if (ret < 0)
     {
-        perror("sendto error\n");
+		perror("sendto error");
         return -1;
     }
 
@@ -272,6 +280,7 @@ int appfilter_nl_init(void)
     if (bind(fd, (void *)&nls, sizeof(struct sockaddr_nl)))
     {
         LOG_DEBUG("Bind failed %s\n", strerror(errno));
+		close(fd);
         return -1;
     }
 

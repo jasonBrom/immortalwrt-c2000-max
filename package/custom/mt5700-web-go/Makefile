@@ -12,10 +12,23 @@ PKG_BUILD_FLAGS:=no-mips16
 
 GO_PKG:=mt5700web
 GO_PKG_BUILD_PKG:=mt5700web
+GO_PKG_INSTALL_ALL:=1
 GO_PKG_LDFLAGS:=-s -w
 
 include $(INCLUDE_DIR)/package.mk
 include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
+
+# Go 1.26 no longer falls back to GOPATH mode when golang-build.sh runs from
+# the workspace root. Build this self-contained module from its actual module
+# directory so go.mod and the embedded Web assets are both visible.
+define Build/Compile
+	$(INSTALL_DIR) $(GO_PKG_BUILD_BIN_DIR) $(GO_BUILD_CACHE_DIR) $(GO_MOD_CACHE_DIR)
+	cd $(PKG_BUILD_DIR) && \
+		$(GO_PKG_VARS) \
+		go build -v -buildvcs=false -trimpath \
+			-ldflags "$(GO_PKG_CUSTOM_LDFLAGS) $(GO_PKG_DEFAULT_LDFLAGS)" \
+			-o $(GO_PKG_BUILD_BIN_DIR)/mt5700web .
+endef
 
 define Package/mt5700-web-go
   SECTION:=net

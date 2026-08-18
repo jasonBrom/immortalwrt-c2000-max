@@ -15,7 +15,7 @@ on:
       - "target/linux/mediatek/files-6.12/drivers/net/ethernet/mediatek/mtk_hnat/**"
       - "target/linux/mediatek/patches-6.12/**"
       - "target/linux/mediatek/image/filogic.mk"
-      - "scripts/c2000max/assemble-c2000max-sdcard.py"
+      - "scripts/c2000max/**"
   workflow_dispatch:
 
 permissions:
@@ -54,8 +54,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash scripts/c2000max/verify-c2000max-firmware.sh
           package/mtk/applications/luci-app-c2000max-traffic/tests/test_traffic.sh
           bash package/custom/c2000max-board/tests/test_port_role.sh
+          bash package/custom/c2000max-board/tests/test_sim_switch.sh
           node --check package/mtk/applications/luci-app-eqos-mtk/htdocs/luci-static/resources/view/eqos.js
           node --check package/mtk/applications/luci-app-c2000max-traffic/htdocs/luci-static/resources/view/c2000max/traffic.js
 
@@ -82,6 +84,8 @@ jobs:
           for feed in packages luci routing telephony video; do
             ./scripts/feeds install -a -p "$feed"
           done
+          git -C feeds/packages apply \
+            "$GITHUB_WORKSPACE/scripts/c2000max/packages-go126-module-root.patch"
 
       - name: Generate C2000MAX configuration
         shell: bash
@@ -112,6 +116,11 @@ jobs:
         shell: bash
         run: |
           test -d bin/targets/mediatek/filogic
+          manifest="$(find bin/targets/mediatek/filogic -maxdepth 1 -type f -name '*nradio_c2000-max.manifest' -print -quit)"
+          rootfs="$(find build_dir/target-* -maxdepth 1 -type d -name root-mediatek -print -quit)"
+          test -n "$manifest"
+          test -n "$rootfs"
+          bash scripts/c2000max/verify-c2000max-firmware.sh "$manifest" "$rootfs"
           mkdir -p c2000max-artifacts
           find bin/targets/mediatek/filogic -maxdepth 1 -type f \
             -exec cp -a {} c2000max-artifacts/ \;

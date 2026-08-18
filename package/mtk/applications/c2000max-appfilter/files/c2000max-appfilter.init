@@ -41,15 +41,16 @@ start_service()
 	# OAF uses conntrack packet counters to bound first-packet inspection.
 	# Enable accounting before new audited connections are created.
 	sysctl -qw net.netfilter.nf_conntrack_acct=1 2>/dev/null || true
+	mkdir -p /tmp
+	ln -sf /etc/appfilter/feature.cfg /tmp/feature.cfg
+	# The module performs an immediate feature load from this path. Create the
+	# link before modprobe rather than waiting for oafd's first timer.
 	modprobe oaf || return 1
 	apply_recognition_profile || {
 		logger -t c2000max-appfilter "cannot apply OAF recognition profile"
 		modprobe -r oaf >/dev/null 2>&1 || true
 		return 1
 	}
-	mkdir -p /tmp
-	ln -sf /etc/appfilter/feature.cfg /tmp/feature.cfg
-
 	# Classification and visit recording stay enabled, while blocking is
 	# enforced by the C2000MAX nft policy compiler after APP_ID is known.
 	uci -q set appfilter.global.enable='0'
@@ -67,6 +68,10 @@ start_service()
 	procd_set_param respawn 3600 5 5
 	procd_set_param stderr 1
 	procd_close_instance
+
+	# Existing PPE/flowtable entries predate the OAF hooks. Flush accelerator
+	# caches only; conntrack/NAT sessions remain and can be classified next.
+	/usr/sbin/c2000max-traffic audit-refresh >/dev/null 2>&1 || true
 }
 
 stop_service()

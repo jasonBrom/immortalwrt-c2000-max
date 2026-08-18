@@ -1,0 +1,40 @@
+diff --git a/lang/golang/golang-build.sh b/lang/golang/golang-build.sh
+index d145b34..7d80ec0 100644
+--- a/lang/golang/golang-build.sh
++++ b/lang/golang/golang-build.sh
+@@ -95,16 +95,20 @@ configure() {
+ build() {
+ 	local modargs pattern targets retval
+ 
+-	cd "$GO_BUILD_DIR" || return 1
+-
+ 	if [ -f "$BUILD_DIR/go.mod" ] ; then
++		# Go 1.26 no longer falls back to the GOPATH copy when commands are
++		# launched from the workspace root.  Run module-aware builds from the
++		# copied module root so go.mod and local sources are selected.
++		cd "$GO_BUILD_DIR/src/$GO_PKG" || return 1
+ 		mkdir -p "$GO_MOD_CACHE_DIR"
+ 		modargs="$GO_MOD_ARGS"
++	else
++		cd "$GO_BUILD_DIR" || return 1
+ 	fi
+ 
+ 	log "Finding targets"
+ 	# shellcheck disable=SC2086
+-	targets="$(go list $modargs $GO_BUILD_PKG)"
++	targets="$(go list -buildvcs=false $modargs $GO_BUILD_PKG)"
+ 	for pattern in $GO_EXCLUDES; do
+ 		targets="$(printf '%s\n' "$targets" | grep -v "$pattern")"
+ 	done
+diff --git a/net/xray-core/Makefile b/net/xray-core/Makefile
+index 810ba54..8957fc9 100644
+--- a/net/xray-core/Makefile
++++ b/net/xray-core/Makefile
+@@ -19,6 +19,7 @@ PKG_BUILD_FLAGS:=no-mips16
+ 
+ GO_PKG:=github.com/xtls/xray-core
+ GO_PKG_BUILD_PKG:=github.com/xtls/xray-core/main
++GO_PKG_INSTALL_EXTRA:=transport/internet/browser_dialer/dialer.html
+ GO_PKG_LDFLAGS_X:= \
+ 	$(GO_PKG)/core.build=OpenWrt \
+ 	$(GO_PKG)/core.version=$(PKG_VERSION)

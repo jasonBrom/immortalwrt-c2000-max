@@ -142,13 +142,27 @@ grep -q 'if (g_hold_acceleration)' "$OAF_SOURCE" &&
 	fail "OAF acceleration bypass is not controlled by the recognition profile"
 grep -q 'total_packets > g_max_dpi_packets' "$OAF_SOURCE" ||
 	fail "OAF DPI packet window is still compile-time only"
+grep -Fq 'kzalloc(sizeof(char) * (size + 1), GFP_KERNEL)' "$OAF_SOURCE" ||
+	fail "OAF boot feature parser still reads beyond its exact-size buffer"
+grep -Fq 'load_feature_config() < 0 || g_feature_init == 0' "$OAF_SOURCE" ||
+	fail "OAF does not synchronously load the boot feature database"
+grep -Fq 'g_feature_init++' "$OAF_SOURCE" ||
+	fail "OAF does not expose the number of loaded kernel signatures"
 APPFILTER_INIT="$ROOT/../c2000max-appfilter/files/c2000max-appfilter.init"
 acct_line="$(grep -n 'nf_conntrack_acct=1' "$APPFILTER_INIT" | cut -d: -f1)"
 module_line="$(grep -n '^[[:space:]]*modprobe oaf' "$APPFILTER_INIT" | cut -d: -f1)"
+[ "$(grep -n 'ln -sf /etc/appfilter/feature.cfg' "$APPFILTER_INIT" | cut -d: -f1)" -lt "$module_line" ] ||
+	fail "OAF feature path is still created after the module loads"
 [ -n "$acct_line" ] && [ -n "$module_line" ] && [ "$acct_line" -lt "$module_line" ] ||
 	fail "application audit does not enable conntrack accounting before OAF"
 grep -q "auto_load_engine='0'" "$APPFILTER_INIT" ||
 	fail "OAF daemon can still race the init script by loading the module twice"
+grep -q 'c2000max-traffic audit-refresh' "$APPFILTER_INIT" ||
+	fail "enabling audit does not invalidate pre-existing accelerator caches"
+grep -q '^#version v26\.4\.10$' "$ROOT/../c2000max-appfilter/files/feature.cfg" ||
+	fail "the supplied current OAF feature library is not bundled"
+grep -Fq 'if (ret < 0)' "$ROOT/../c2000max-appfilter/src/oafd/appfilter_netlink.c" ||
+	fail "OAF userspace still treats failed netlink sends as successful"
 awk '
 /^apply_recognition_profile\(\)/ { copy=1 }
 copy { print }
@@ -201,6 +215,23 @@ grep -q '^START=95$' "$EQOS_ROOT/root/etc/init.d/eqos" ||
 	fail "EQoS still starts before TurboACC converges"
 grep -q 'wait_qdma_layout' "$EQOS_ROOT/root/usr/sbin/eqos" ||
 	fail "EQoS does not wait for late HNAT/QDMA debugfs nodes"
+awk '
+/^start_hnat_qos\(\)/ { copy=1 }
+copy && /write_hnat "qdma_sch\$DL_SCH" "1 wrr/ { scheduler=NR }
+copy && /write_hnat "qos_toggle" "1"/ { toggle=NR }
+copy && /^}/ { exit !(scheduler && toggle && scheduler < toggle) }
+' "$EQOS_ROOT/root/usr/sbin/eqos" ||
+	fail "EQoS enables HQoS before its QDMA transaction is complete"
+if grep -Eq 'procd_add_reload_trigger.*\beqos\b' \
+	"$ROOT/../../../custom/c2000max-board/files/etc/init.d/c2000max-hnat"; then
+	fail "saving EQoS still races a parallel HNAT topology rebuild"
+fi
+grep -q 'failed to initialize the .* limiter backend' "$EQOS_ROOT/root/etc/init.d/eqos" ||
+	fail "EQoS does not preserve the failing transaction stage"
+if grep -A20 '^eqos_run_reported()' "$EQOS_ROOT/root/etc/init.d/eqos" |
+	grep -q '/usr/sbin/eqos diagnose'; then
+	fail "EQoS still replaces its failure with a post-cleanup HQoS diagnostic"
+fi
 if grep -Fq '[ -w "$HNAT_DIR/' "$EQOS_ROOT/root/usr/sbin/eqos"; then
 	fail "EQoS still trusts unreliable debugfs W_OK probes"
 fi

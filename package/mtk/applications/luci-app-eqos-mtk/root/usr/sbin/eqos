@@ -3,11 +3,11 @@
 . /lib/functions.sh
 . /lib/functions/system.sh
 
-DEV_DEFAULT="br-lan"
-IFB_DEV="ifb-eqos"
-HNAT_DIR="/sys/kernel/debug/hnat"
-NFT="/usr/sbin/nft"
-RUNTIME_DIR="/var/run/eqos"
+DEV_DEFAULT="${EQOS_LAN_DEV:-br-lan}"
+IFB_DEV="${EQOS_IFB_DEV:-ifb-eqos}"
+HNAT_DIR="${EQOS_HNAT_DIR:-/sys/kernel/debug/hnat}"
+NFT="${EQOS_NFT:-/usr/sbin/nft}"
+RUNTIME_DIR="${EQOS_RUNTIME_DIR:-/var/run/eqos}"
 BACKEND_FILE="$RUNTIME_DIR/backend"
 HNAT_READY_WAIT="${EQOS_HNAT_READY_WAIT:-5}"
 
@@ -242,13 +242,17 @@ start_hnat_qos() {
 	local qos_state up_state dl_state
 
 	wait_qdma_layout
-	write_hnat "qos_toggle" "1"
+	# Keep HQoS disabled until every scheduler and queue has a complete,
+	# internally consistent configuration. Enabling it last also repairs a
+	# stale disabled toggle left by an interrupted earlier transaction.
 	reset_hnat_qdma
 	write_hnat "qdma_sch$UP_SCH" "1 wrr $((up * 1000))"
 	write_hnat "qdma_sch$DL_SCH" "1 wrr $((dl * 1000))"
+	write_hnat "qos_toggle" "1"
 
 	qos_state="$(cat "$HNAT_DIR/qos_toggle" 2>/dev/null)"
-	printf '%s\n' "$qos_state" | grep -q 'mode=hqos' ||
+	printf '%s\n' "$qos_state" |
+		grep -q 'mode=hqos uplink=enabled downlink=enabled' ||
 		die "HNAT rejected HQoS mode: ${qos_state:-unreadable}"
 	up_state="$(cat "$HNAT_DIR/qdma_sch$UP_SCH" 2>/dev/null)"
 	dl_state="$(cat "$HNAT_DIR/qdma_sch$DL_SCH" 2>/dev/null)"

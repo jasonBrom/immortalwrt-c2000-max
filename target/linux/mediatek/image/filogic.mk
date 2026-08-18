@@ -2849,9 +2849,10 @@ define Device/nradio_c2000-max
 	kmod-usb-net-huawei-cdc-ncm kmod-usb-net-qmi-wwan \
 	kmod-usb-net-cdc-mbim kmod-usb-net-rndis \
 	kmod-usb-serial-option uqmi umbim usbutils \
-	f2fsck mkf2fs c2000max-board luci-ssl luci-i18n-base-zh-cn \
+	f2fsck mkf2fs xz-utils c2000max-board uboot-envtools luci-ssl luci-i18n-base-zh-cn \
 	mt5700-web-go luci-app-mt5700-web \
 	luci-app-eqos-mtk luci-i18n-eqos-mtk-zh-cn \
+	luci-app-c2000max-traffic c2000max-appfilter kmod-c2000max-oaf \
 	cpufreq luci-app-cpufreq luci-i18n-cpufreq-zh-cn \
 	luci-app-qmodem-next luci-i18n-qmodem-next-zh-cn \
 	luci-app-openclash luci-theme-argon luci-app-argon-config \

@@ -69,10 +69,7 @@ apply_config()
 	if /etc/init.d/eqos reload >"$tmp" 2>&1; then
 		rm -f "$ERROR_FILE" "$tmp"
 	else
-		[ -s "$tmp" ] ||
-			/usr/sbin/eqos diagnose "$(cat /var/run/c2000max-hnat-effective 2>/dev/null)" \
-				>"$tmp" 2>&1 || true
-		[ -s "$tmp" ] || echo "EQoS reload failed without a diagnostic" >"$tmp"
+		[ -s "$tmp" ] || echo "EQoS reload failed without command output; check logread -e eqos" >"$tmp"
 		mv "$tmp" "$ERROR_FILE"
 	fi
 	status_json

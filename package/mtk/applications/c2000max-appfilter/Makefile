@@ -3,7 +3,7 @@ include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=c2000max-appfilter
 PKG_VERSION:=6.1.8
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-only
 PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=C2000MAX maintainers
@@ -15,8 +15,10 @@ include $(INCLUDE_DIR)/package.mk
 define KernelPackage/c2000max-oaf
   SUBMENU:=Network Support
   TITLE:=C2000MAX OpenAppFilter DPI engine
-  DEPENDS:=+kmod-nf-conntrack
-  KCONFIG:=CONFIG_NETWORK_SECMARK=y CONFIG_NF_CONNTRACK_SECMARK=y
+  DEPENDS:=+kmod-nf-conntrack +kmod-nf-reject
+  KCONFIG:=CONFIG_NETWORK_SECMARK=y CONFIG_NF_CONNTRACK_SECMARK=y \
+	CONFIG_NETFILTER_XT_TARGET_CONNSECMARK=n \
+	CONFIG_NETFILTER_XT_TARGET_SECMARK=n
   FILES:=$(PKG_BUILD_DIR)/oaf/oaf.ko
 endef
 

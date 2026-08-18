@@ -148,6 +148,7 @@ static int __add_app_feature(char *feature, int appid, char *name, int proto, in
 
 		feature_list_write_lock();
 		list_add(&(node->head), &af_feature_head);
+		g_feature_init++;
 		feature_list_write_unlock();
 	}
 	return 0;
@@ -469,9 +470,13 @@ static void load_feature_buf_from_file(char **config_buf)
 	size = inode->i_size;
 	if (size == 0)
 	{
+		filp_close(fp, NULL);
 		return;
 	}
-	*config_buf = (char *)kzalloc(sizeof(char) * size, GFP_ATOMIC);
+	/* The parser walks until a NUL byte. The old exact-size allocation read
+	 * beyond EOF and could leave the feature list empty depending on adjacent
+	 * slab contents. */
+	*config_buf = (char *)kzalloc(sizeof(char) * (size + 1), GFP_KERNEL);
 	if (NULL == *config_buf)
 	{
 		AF_ERROR("alloc buf fail\n");
@@ -527,12 +532,11 @@ static __maybe_unused int load_feature_config(void)
 
 	if (p != begin)
 	{
-		if (p - begin < MIN_FEATURE_LINE_LEN || p - begin > MAX_FEATURE_LINE_LEN)
-			return 0;
-		memset(line, 0x0, sizeof(line));
-		strncpy(line, begin, p - begin);
-		af_init_feature(line);
-		begin = p + 1;
+		if (p - begin >= MIN_FEATURE_LINE_LEN && p - begin <= MAX_FEATURE_LINE_LEN) {
+			memset(line, 0x0, sizeof(line));
+			strncpy(line, begin, p - begin);
+			af_init_feature(line);
+		}
 	}
 	if (feature_buf)
 		kfree(feature_buf);
@@ -552,6 +556,7 @@ static void af_clean_feature_list(void)
 		kfree(node);
 		count++;
 	}
+	g_feature_init = 0;
 	feature_list_write_unlock();
 }
 
@@ -1928,6 +1933,10 @@ static int __init app_filter_init(void)
 	af_conn_init();
 	netlink_oaf_init();
 	af_log_init();
+	/* Load the boot database synchronously. Live updates still use netlink,
+	 * but initial classification must not depend on a later daemon timer. */
+	if (load_feature_config() < 0 || g_feature_init == 0)
+		pr_warn("oaf: no application features loaded at module start\n");
 	af_register_dev();
 	af_mac_list_init();
 	af_whitelist_mac_init();

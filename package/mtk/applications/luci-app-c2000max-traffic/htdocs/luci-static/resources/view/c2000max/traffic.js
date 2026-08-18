@@ -378,7 +378,9 @@ function renderTraffic(status) {
 				]),
 				E('div', { 'class': 'tr' }, [
 					E('div', { 'class': 'td left' }, '特征库'),
-					E('div', { 'class': 'td left' }, '%s / %s 个应用'.format(status.feature_version || '未知', Number(status.feature_apps || 0))),
+					E('div', { 'class': 'td left' }, '%s / %s 个应用 / %s 条内核特征'.format(
+						status.feature_version || '未知', Number(status.feature_apps || 0),
+						Number(status.audit_loaded_features || 0))),
 					E('div', { 'class': 'td left' }, '加速暂缓'),
 					E('div', { 'class': 'td left' }, status.audit_holds_acceleration ?
 						('未知连接最多 %d 包'.format(Number(status.audit_packets || 0))) : '不暂缓')
