@@ -6,6 +6,14 @@ on:
       - c2000max-v36.01
     paths:
       - ".github/workflows/c2000max-one-shot-build.yml"
+      - "configs/c2000max.config"
+      - "package/custom/c2000max-board/**"
+      - "package/mtk/applications/luci-app-eqos-mtk/**"
+      - "package/mtk/applications/luci-app-c2000max-traffic/**"
+      - "package/network/config/firewall4/patches/002-c2000max-preserve-eqos-flow-path.patch"
+      - "target/linux/mediatek/files-6.12/drivers/net/ethernet/mediatek/mtk_hnat/**"
+      - "target/linux/mediatek/image/filogic.mk"
+      - "scripts/c2000max/assemble-c2000max-sdcard.py"
   workflow_dispatch:
 
 permissions:
@@ -39,6 +47,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Run C2000MAX preflight tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          package/mtk/applications/luci-app-c2000max-traffic/tests/test_traffic.sh
+          bash package/custom/c2000max-board/tests/test_port_role.sh
+          node --check package/mtk/applications/luci-app-eqos-mtk/htdocs/luci-static/resources/view/eqos.js
+          node --check package/mtk/applications/luci-app-c2000max-traffic/htdocs/luci-static/resources/view/c2000max/traffic.js
 
       - name: Restore downloads and compiler cache
         uses: actions/cache@v4
@@ -246,8 +263,10 @@ jobs:
           核心更新：
           - HNAT 模式使用硬件 HQoS 进行逐设备限速。
           - Flow Offloading 与普通转发自动切换到 tc/IFB，切换加速方式不丢失规则。
+          - 网络限速与流量统计已拆分为两个独立 LuCI 插件。
+          - 限速支持 IPv4、IPv6 与 MAC，保存后立即应用并校验真实运行态。
           - 统一统计 HNAT 硬件 MIB、Flowtable 与普通 Conntrack 流量。
-          - 按 mwan3 实际出口区分 5G 与其他/宽带，并显示逐设备明细。
+          - 按 mwan3 实际出口区分 5G 与其他/宽带，显示逐设备明细和总流量趋势图。
 
           构建来源：
           - 分支：c2000max-v36.01
