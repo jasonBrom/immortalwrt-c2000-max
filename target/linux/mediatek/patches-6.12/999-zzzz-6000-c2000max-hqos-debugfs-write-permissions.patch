@@ -1,0 +1,24 @@
+From: C2000MAX maintainers <noreply@example.com>
+Date: Tue, 18 Aug 2026 05:00:00 +0900
+Subject: [PATCH] net: mediatek: expose HQoS debugfs controls as writable
+
+The vendor debugfs nodes implement write callbacks but several are created
+with read-only inode modes.  Besides being misleading, this makes userspace
+W_OK probes fail on restricted root environments and prevents EQoS from
+publishing an active backend.
+
+Keep the HNAT flow-table control root-only and mark it writable.  QDMA
+scheduler and queue nodes are made writable in the patch which introduces
+those debugfs files.
+---
+ drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
+@@ -5065,4 +5065,4 @@ int hnat_init_debugfs(struct mtk_hnat *h
+-	debugfs_create_file("hnat_entry", 0444, root, h,
++	debugfs_create_file("hnat_entry", 0600, root, h,
+ 			    &hnat_entry_fops);
+ 	debugfs_create_file("hnat_stats", 0444, root, h,
+ 			    &hnat_stats_fops);

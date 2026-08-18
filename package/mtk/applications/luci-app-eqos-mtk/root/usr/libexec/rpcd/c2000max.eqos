@@ -5,7 +5,7 @@ ERROR_FILE="$RUNTIME_DIR/last_error"
 
 status_json()
 {
-	local enabled backend effective active=0 reason error qos_state
+	local enabled backend effective active=0 reason error qos_state diagnostic
 
 	enabled="$(uci -q get eqos.config.enabled)"
 	[ "$enabled" = 1 ] || enabled=0
@@ -38,7 +38,10 @@ status_json()
 			*) reason="配置已启用，但没有已应用的限速后端" ;;
 		esac
 	fi
-	[ -n "$error" ] || error="$reason"
+	if [ -z "$error" ] && [ -n "$reason" ]; then
+		diagnostic="$(/usr/sbin/eqos diagnose "$effective" 2>&1)"
+		error="${diagnostic:-$reason}"
+	fi
 
 	. /usr/share/libubox/jshn.sh
 	json_init
@@ -59,6 +62,10 @@ apply_config()
 	if /etc/init.d/eqos reload >"$tmp" 2>&1; then
 		rm -f "$ERROR_FILE" "$tmp"
 	else
+		[ -s "$tmp" ] ||
+			/usr/sbin/eqos diagnose "$(cat /var/run/c2000max-hnat-effective 2>/dev/null)" \
+				>"$tmp" 2>&1 || true
+		[ -s "$tmp" ] || echo "EQoS reload failed without a diagnostic" >"$tmp"
 		mv "$tmp" "$ERROR_FILE"
 	fi
 	status_json

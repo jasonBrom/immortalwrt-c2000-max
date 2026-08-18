@@ -90,6 +90,19 @@ grep -q 'flower.*src_mac\|"${key}_mac"' "$EQOS_ROOT/root/usr/sbin/eqos" ||
 	fail "EQoS does not implement MAC tc matching"
 grep -q 'ether "$addr"' "$EQOS_ROOT/root/usr/sbin/eqos" ||
 	fail "EQoS does not implement MAC nft matching"
+grep -q '^START=95$' "$EQOS_ROOT/root/etc/init.d/eqos" ||
+	fail "EQoS still starts before TurboACC converges"
+grep -q 'wait_qdma_layout' "$EQOS_ROOT/root/usr/sbin/eqos" ||
+	fail "EQoS does not wait for late HNAT/QDMA debugfs nodes"
+if grep -Fq '[ -w "$HNAT_DIR/' "$EQOS_ROOT/root/usr/sbin/eqos"; then
+	fail "EQoS still trusts unreliable debugfs W_OK probes"
+fi
+grep -Fq 'debugfs_create_file(name, 0600, eth->debugfs->root' \
+	"$ROOT/../../../../target/linux/mediatek/patches-6.12/999-eth-90-mtk_eth_soc-support-proprietary-debugfs.patch" ||
+	fail "QDMA HQoS controls are not root-writable"
+grep -Fq 'debugfs_create_file("hnat_entry", 0600' \
+	"$ROOT/../../../../target/linux/mediatek/patches-6.12/999-zzzz-6000-c2000max-hqos-debugfs-write-permissions.patch" ||
+	fail "HNAT flow-table control is not root-writable"
 grep -q 'debugfs_create_file("mib_sync"' \
 	"$ROOT/../../../../target/linux/mediatek/files-6.12/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c" ||
 	fail "HNAT driver does not expose the lightweight MIB sync path"

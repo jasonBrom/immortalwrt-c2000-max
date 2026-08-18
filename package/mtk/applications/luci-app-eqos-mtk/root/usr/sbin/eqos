@@ -9,6 +9,7 @@ HNAT_DIR="/sys/kernel/debug/hnat"
 NFT="/usr/sbin/nft"
 RUNTIME_DIR="/var/run/eqos"
 BACKEND_FILE="$RUNTIME_DIR/backend"
+HNAT_READY_WAIT="${EQOS_HNAT_READY_WAIT:-5}"
 
 TABLE_FAMILY="inet"
 TABLE_NAME="eqos"
@@ -88,7 +89,10 @@ write_hnat() {
 	local node="$1"
 	local value="$2"
 
-	[ -w "$HNAT_DIR/$node" ] || die "$HNAT_DIR/$node is not writable"
+	# access(W_OK) is not reliable for debugfs files whose vendor mode is 0444
+	# even though their file_operations implement write and root can open them.
+	# Check presence here and let the real write report the authoritative error.
+	[ -e "$HNAT_DIR/$node" ] || die "$HNAT_DIR/$node is missing"
 	printf '%s' "$value" > "$HNAT_DIR/$node" ||
 		die "failed to write $HNAT_DIR/$node"
 }
@@ -98,13 +102,37 @@ need_qdma_layout() {
 
 	for node in qdma_sch$UP_SCH qdma_sch$DL_SCH \
 		qdma_txq$UP_QID_BASE qdma_txq$DL_QID_BASE qdma_txq$MANAGED_QID_LAST; do
-		[ -w "$HNAT_DIR/$node" ] || die "$HNAT_DIR/$node is not writable"
+		[ -e "$HNAT_DIR/$node" ] || die "$HNAT_DIR/$node is missing"
 	done
 
 	[ -e "$HNAT_DIR/qdma_txq0" ] ||
 		die "qid0 is missing; expected $QDMA_QUEUE_COUNT-QDMA NETSYS layout"
 	[ -e "$HNAT_DIR/qdma_txq$PPD_QID" ] ||
 		die "qid$PPD_QID is missing; expected PPD-reserved queue"
+}
+
+wait_qdma_layout() {
+	local waited=0 ready node
+
+	case "$HNAT_READY_WAIT" in
+		''|*[!0-9]*) HNAT_READY_WAIT=5 ;;
+	esac
+	while [ "$waited" -lt "$HNAT_READY_WAIT" ]; do
+		ready=1
+		[ -d "$HNAT_DIR" ] || ready=0
+		for node in qos_toggle hnat_entry qdma_sch$UP_SCH qdma_sch$DL_SCH \
+			qdma_txq0 qdma_txq$UP_QID_BASE qdma_txq$DL_QID_BASE \
+			qdma_txq$MANAGED_QID_LAST qdma_txq$PPD_QID; do
+			[ -e "$HNAT_DIR/$node" ] || ready=0
+		done
+		[ "$ready" -eq 0 ] || return 0
+		sleep 1
+		waited=$((waited + 1))
+	done
+
+	need_qdma_layout
+	[ -e "$HNAT_DIR/qos_toggle" ] || die "$HNAT_DIR/qos_toggle is missing"
+	[ -e "$HNAT_DIR/hnat_entry" ] || die "$HNAT_DIR/hnat_entry is missing"
 }
 
 stop_qos() {
@@ -208,12 +236,23 @@ reset_hnat_qdma() {
 start_hnat_qos() {
 	local dl="$1"
 	local up="$2"
+	local qos_state up_state dl_state
 
-	need_qdma_layout
+	wait_qdma_layout
 	write_hnat "qos_toggle" "1"
 	reset_hnat_qdma
 	write_hnat "qdma_sch$UP_SCH" "1 wrr $((up * 1000))"
 	write_hnat "qdma_sch$DL_SCH" "1 wrr $((dl * 1000))"
+
+	qos_state="$(cat "$HNAT_DIR/qos_toggle" 2>/dev/null)"
+	printf '%s\n' "$qos_state" | grep -q 'mode=hqos' ||
+		die "HNAT rejected HQoS mode: ${qos_state:-unreadable}"
+	up_state="$(cat "$HNAT_DIR/qdma_sch$UP_SCH" 2>/dev/null)"
+	dl_state="$(cat "$HNAT_DIR/qdma_sch$DL_SCH" 2>/dev/null)"
+	printf '%s\n' "$up_state" | grep -Eq '^1[[:space:]]+WRR' ||
+		die "QDMA upload scheduler $UP_SCH did not enable"
+	printf '%s\n' "$dl_state" | grep -Eq '^1[[:space:]]+WRR' ||
+		die "QDMA download scheduler $DL_SCH did not enable"
 }
 
 stop_hnat_qos() {
@@ -555,9 +594,10 @@ activate_backend() {
 			# existed. Invalidate every PPE cache without toggling or changing
 			# the user's selected acceleration mode; the next packets rebind with
 			# the HQoS queue or software-fallback bypass bit.
-			[ -w "$HNAT_DIR/hnat_entry" ] || return 1
+			[ -e "$HNAT_DIR/hnat_entry" ] ||
+				die "$HNAT_DIR/hnat_entry is missing"
 			for command in 3 5 7; do
-				printf '%s -1\n' "$command" > "$HNAT_DIR/hnat_entry" || return 1
+				write_hnat "hnat_entry" "$command -1"
 			done
 			;;
 		software)
@@ -567,6 +607,57 @@ activate_backend() {
 			;;
 		*) die "invalid EQoS backend: $backend" ;;
 	esac
+}
+
+diagnose_runtime() {
+	local acceleration="$1" node hook qos
+
+	[ -d "/sys/class/net/$DEV_DEFAULT" ] || {
+		echo "LAN device $DEV_DEFAULT is not ready"
+		return 1
+	}
+	[ -x "$NFT" ] || {
+		echo "nftables is not installed"
+		return 1
+	}
+
+	if [ "$acceleration" = mediatek_hnat ]; then
+		[ -d "$HNAT_DIR" ] || {
+			echo "HNAT debugfs is not ready"
+			return 1
+		}
+		for node in hook_toggle qos_toggle hnat_entry \
+			qdma_sch$UP_SCH qdma_sch$DL_SCH qdma_txq0 \
+			qdma_txq$UP_QID_BASE qdma_txq$DL_QID_BASE \
+			qdma_txq$MANAGED_QID_LAST qdma_txq$PPD_QID; do
+			[ -e "$HNAT_DIR/$node" ] || {
+				echo "HNAT HQoS node is missing: $HNAT_DIR/$node"
+				return 1
+			}
+		done
+		hook="$(cat "$HNAT_DIR/hook_toggle" 2>/dev/null)"
+		[ "$hook" = enabled ] || {
+			echo "HNAT hook is not enabled: ${hook:-unreadable}"
+			return 1
+		}
+		qos="$(cat "$HNAT_DIR/qos_toggle" 2>/dev/null)"
+		printf '%s\n' "$qos" | grep -q 'mode=hqos' || {
+			echo "HNAT HQoS is not enabled: ${qos:-unreadable}"
+			return 1
+		}
+	else
+		command -v tc >/dev/null 2>&1 || {
+			echo "tc is not installed"
+			return 1
+		}
+		command -v ip >/dev/null 2>&1 || {
+			echo "ip-full is not installed"
+			return 1
+		}
+	fi
+
+	echo "EQoS did not finish applying; run /etc/init.d/eqos reload for the exact error"
+	return 1
 }
 
 start_all() {
@@ -628,6 +719,7 @@ Commands:
   start <hnat|software> <download_mbit> <upload_mbit>
   add <hnat|software> <slot> <download_kbit> <upload_kbit> <ipv4|ipv6|mac> [total_down_mbit] [total_up_mbit]
   activate <hnat|software>
+  diagnose <mediatek_hnat|flow_offloading|disabled>
   stop
 
 In the HNAT backend, queue slots 1-31 use the common NETSYS V2/V3
@@ -659,6 +751,10 @@ case "$1" in
 		require_c2000_accel_locks
 		shift
 		activate_backend "$@"
+		;;
+	diagnose)
+		shift
+		diagnose_runtime "$@"
 		;;
 	*)
 		usage

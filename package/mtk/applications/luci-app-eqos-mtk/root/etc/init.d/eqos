@@ -3,7 +3,7 @@
 
 . /lib/functions/system.sh
 
-START=50
+START=95
 USE_PROCD=1
 
 QDMA_RATE_MAX=1000000
@@ -15,6 +15,8 @@ C2000_ROLE_LOCK="${C2000_ROLE_LOCK:-/var/lock/c2000max-port-role.lock}"
 C2000_HNAT_LOCK="${C2000_HNAT_LOCK:-/var/lock/c2000max-hnat.lock}"
 C2000_EQOS_ROLE_HELD=0
 C2000_EQOS_HNAT_HELD=0
+EQOS_RUNTIME_DIR="${EQOS_RUNTIME_DIR:-/var/run/eqos}"
+EQOS_ERROR_FILE="$EQOS_RUNTIME_DIR/last_error"
 
 : >>"$C2000_ROLE_LOCK" || exit 1
 : >>"$C2000_HNAT_LOCK" || exit 1
@@ -344,8 +346,31 @@ c2000_eqos_run_locked() {
 	return "$rc"
 }
 
+eqos_run_reported() {
+	local callback="$1" rc tmp effective
+
+	shift
+	mkdir -p "$EQOS_RUNTIME_DIR" || return 1
+	tmp="$EQOS_RUNTIME_DIR/service.$$"
+	c2000_eqos_run_locked "$callback" "$@" >"$tmp" 2>&1
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		rm -f "$EQOS_ERROR_FILE" "$tmp"
+		return 0
+	fi
+	if [ ! -s "$tmp" ]; then
+		effective="$(cat /var/run/c2000max-hnat-effective 2>/dev/null)"
+		/usr/sbin/eqos diagnose "$effective" >"$tmp" 2>&1 || true
+	fi
+	[ -s "$tmp" ] ||
+		echo "eqos: limiter backend failed without a diagnostic" >"$tmp"
+	cat "$tmp" >&2
+	mv "$tmp" "$EQOS_ERROR_FILE"
+	return "$rc"
+}
+
 start_service() {
-	c2000_eqos_run_locked eqos_start_service_locked "$@"
+	eqos_run_reported eqos_start_service_locked "$@"
 }
 
 stop_service() {
@@ -353,7 +378,7 @@ stop_service() {
 }
 
 reload_service() {
-	c2000_eqos_run_locked eqos_reload_service_locked "$@"
+	eqos_run_reported eqos_reload_service_locked "$@"
 }
 
 service_triggers() {
