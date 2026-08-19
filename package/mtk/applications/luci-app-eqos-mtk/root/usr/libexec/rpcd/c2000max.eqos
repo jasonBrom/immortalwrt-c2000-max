@@ -24,27 +24,40 @@ status_json()
 				qos_state="$(cat /sys/kernel/debug/hnat/qos_toggle 2>/dev/null)"
 				if [ "$effective" = mediatek_hnat ] &&
 				   [ "$(cat /sys/kernel/debug/hnat/hook_toggle 2>/dev/null)" = enabled ] &&
-				   printf '%s' "$qos_state" | grep -q 'mode=hqos' &&
+				   printf '%s' "$qos_state" | grep -Fq 'mode=hqos uplink=enabled downlink=enabled' &&
 				   nft list table inet eqos >/dev/null 2>&1; then
 					active=1
 				else
 					reason="HNAT HQoS 运行态校验失败"
 				fi
 				;;
-			software)
-				if tc qdisc show dev br-lan 2>/dev/null | grep -q 'qdisc htb 1:' &&
-				   tc qdisc show dev ifb-eqos 2>/dev/null | grep -q 'qdisc htb 1:' &&
+			hybrid)
+				qos_state="$(cat /sys/kernel/debug/hnat/qos_toggle 2>/dev/null)"
+				if [ "$effective" = mediatek_hnat ] &&
+				   [ "$(cat /sys/kernel/debug/hnat/hook_toggle 2>/dev/null)" = enabled ] &&
+				   printf '%s\n' "$qos_state" | grep -Fq 'mode=disabled' &&
+				   tc qdisc show dev br-lan 2>/dev/null | grep -q 'qdisc htb 1:' &&
+				   tc qdisc show dev br-lan 2>/dev/null | grep -q 'qdisc ingress ffff:' &&
 				   nft list table inet eqos >/dev/null 2>&1; then
 					active=1
 				else
-					reason="tc/IFB 运行态校验失败"
+					reason="HNAT 选择性 tc 限速运行态校验失败"
+				fi
+				;;
+			software)
+				if tc qdisc show dev br-lan 2>/dev/null | grep -q 'qdisc htb 1:' &&
+				   tc qdisc show dev br-lan 2>/dev/null | grep -q 'qdisc ingress ffff:' &&
+				   nft list table inet eqos >/dev/null 2>&1; then
+					active=1
+				else
+					reason="tc HTB/Police 运行态校验失败"
 				fi
 				;;
 			*) reason="配置已启用，但没有已应用的限速后端" ;;
 		esac
 	fi
 	if [ -z "$error" ] && [ -n "$reason" ]; then
-		diagnostic="$(/usr/sbin/eqos diagnose "$effective" 2>&1)"
+		diagnostic="$(/usr/sbin/eqos diagnose "$effective" "$backend" 2>&1)"
 		error="${diagnostic:-$reason}"
 	fi
 

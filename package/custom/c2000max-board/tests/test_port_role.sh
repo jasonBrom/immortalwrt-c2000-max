@@ -1574,8 +1574,20 @@ grep -q 'ifup|ifdown|update' "$HNAT_HOTPLUG" ||
 grep -q 'exec /etc/init.d/c2000max-hnat reload' "$HNAT_HOTPLUG" ||
 	fail "C2000 HNAT hotplug does not run fail-closed controller convergence"
 EQOS_HOTPLUG="$ROOT/../.."/mtk/applications/luci-app-eqos-mtk/root/etc/hotplug.d/iface/10-eqos
-grep -q 'exec /etc/init.d/eqos stop' "$EQOS_HOTPLUG" ||
+grep -q '/etc/init.d/eqos stop' "$EQOS_HOTPLUG" ||
 	fail "C2000 EQoS hotplug does not stop unsafe runtime state"
+grep -q 'c2000max-eqos-hotplug.lock' "$EQOS_HOTPLUG" ||
+	fail "C2000 EQoS hotplug does not debounce delayed uplink convergence"
+grep -q '/etc/init.d/eqos reload' "$EQOS_HOTPLUG" ||
+	fail "C2000 EQoS hotplug does not re-evaluate external uplinks"
+grep -q '^START=91$' "$HNAT_INIT" ||
+	fail "C2000 HNAT still starts before TurboACC/network convergence"
+grep -Fq 'S91c2000max-hnat' "$ROOT/Makefile" &&
+	grep -Fq 'S99eqos' "$ROOT/Makefile" ||
+	fail "firmware does not ship deterministic HNAT/EQoS boot links"
+grep -Fq 'S??c2000max-hnat' \
+	"$ROOT/files/etc/uci-defaults/99-y-c2000max-v3601-services" ||
+	fail "preserved upgrades do not migrate stale acceleration rc.d links"
 EQOS_INIT="$ROOT/../.."/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/eqos
 EQOS_CLI="$ROOT/../.."/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/eqos
 source <(awk '$0 != ". /lib/functions/system.sh" { print }' "$EQOS_INIT")
@@ -1990,21 +2002,21 @@ assert_argon_v31_resources()
 	local header="$1" label="$2" versioned_count
 
 	[[ -f "$header" ]] || fail "$label Argon header.ut is missing"
-	grep -Fq "{{ dispatcher.build_url('admin/translations', dispatcher.lang) }}?v={{ version.luciversion }}-c2000max-v35" \
+	grep -Fq "{{ dispatcher.build_url('admin/translations', dispatcher.lang) }}?v={{ version.luciversion }}-c2000max-v36.01" \
 		"$header" ||
-		fail "$label Argon translations URL is missing the c2000max-v35 cache token"
-	grep -Fq '{{ resource }}/cbi.js?v={{ version.luciversion }}-c2000max-v35' \
+		fail "$label Argon translations URL is missing the c2000max-v36.01 cache token"
+	grep -Fq '{{ resource }}/cbi.js?v={{ version.luciversion }}-c2000max-v36.01' \
 		"$header" ||
-		fail "$label Argon cbi.js URL is missing the c2000max-v35 cache token"
-	grep -Fq '{{ resource }}/luci.js?v={{ version.luciversion }}-c2000max-v35' \
+		fail "$label Argon cbi.js URL is missing the c2000max-v36.01 cache token"
+	grep -Fq '{{ resource }}/luci.js?v={{ version.luciversion }}-c2000max-v36.01' \
 		"$header" ||
-		fail "$label Argon luci.js URL is missing the c2000max-v35 cache token"
+		fail "$label Argon luci.js URL is missing the c2000max-v36.01 cache token"
 	versioned_count="$(
-		grep -Ec '<script[[:space:]]+src=.*c2000max-v35' "$header" || true
+		grep -Ec '<script[[:space:]]+src=.*c2000max-v36\.01' "$header" || true
 	)"
 	[[ "$versioned_count" == 3 ]] ||
-		fail "$label Argon header does not contain exactly three V35-versioned resource URLs"
-	if grep -Eq 'c2000max-v(21|22|23|24|25|26|31|34)' "$header"; then
+		fail "$label Argon header does not contain exactly three V36.01-versioned resource URLs"
+	if grep -Eq 'c2000max-v(21|22|23|24|25|26|31|34|35)([^0-9]|$)' "$header"; then
 		fail "$label Argon header still contains a stale cache token"
 	fi
 }
@@ -2018,10 +2030,10 @@ fi
 
 FEED_BASE_HEADER="$ROOT/../../../feeds/luci/modules/luci-base/ucode/template/header.ut"
 if [[ -f "$FEED_BASE_HEADER" ]]; then
-	grep -Fq '{{ resource }}/luci.js?v={# PKG_VERSION #}-{{ pkgs_update_time }}-c2000max-v35' \
+	grep -Fq '{{ resource }}/luci.js?v={# PKG_VERSION #}-{{ pkgs_update_time }}-c2000max-v36.01' \
 		"$FEED_BASE_HEADER" ||
-		fail "feed LuCI base header is missing the c2000max-v35 cache token"
-	if grep -Eq 'c2000max-v(21|22|23|24|25|26|31|34)' "$FEED_BASE_HEADER"; then
+		fail "feed LuCI base header is missing the c2000max-v36.01 cache token"
+	if grep -Eq 'c2000max-v(21|22|23|24|25|26|31|34|35)([^0-9]|$)' "$FEED_BASE_HEADER"; then
 		fail "feed LuCI base header still contains a stale cache token"
 	fi
 fi

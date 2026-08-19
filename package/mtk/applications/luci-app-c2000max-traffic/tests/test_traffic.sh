@@ -41,6 +41,11 @@ grep -q '^42	aa:bb:cc:dd:ee:01	1200	3400	256	192.168.66.10	phone	1002$' \
 	"$TMP/current.tsv" || fail "IPv4/hex-mark parser output is wrong"
 grep -q '^43	aa:bb:cc:dd:ee:02	200	300	512	192.168.66.11	laptop	0$' \
 	"$TMP/current.tsv" || fail "unknown OAF sentinel was not normalized to application 0"
+record_audit_diagnostics "$TMP/conntrack.raw" "$TMP/current.tsv"
+grep -q '^total=2$' "$AUDIT_DIAG_FILE" || fail "audit diagnostic connection count is wrong"
+grep -q '^identified=1$' "$AUDIT_DIAG_FILE" || fail "audit diagnostic APP_ID count is wrong"
+grep -q '^unknown=1$' "$AUDIT_DIAG_FILE" || fail "audit diagnostic unknown count is wrong"
+grep -q '^secmarks=2$' "$AUDIT_DIAG_FILE" || fail "audit diagnostic secmark count is wrong"
 
 cat > "$TMP/marks.tsv" <<'EOF'
 256	fiveg
@@ -95,6 +100,20 @@ merge_audit "$TMP/deltas.tsv" 1700003660
 awk -F '\t' '$2=="aa:bb:cc:dd:ee:01" && $5==1002 && $6==200 && $7==400 {found=1} END{exit !found}' "$AUDIT_FILE" ||
 	fail "enabled audit did not retain the OAF APP_ID"
 
+# The application-detail and trend logs share one bounded logical budget.
+# Trimming keeps complete newest TSV rows and removes the oldest rows first.
+C2000_TRAFFIC_STORAGE_LIMIT_BYTES=320
+export C2000_TRAFFIC_STORAGE_LIMIT_BYTES
+awk -v OFS='\t' 'BEGIN { for (i=1; i<=40; i++) print 1700000000+i,"device",i,"name",1002,1,2,3,4,5,6,1700000000+i }' > "$AUDIT_FILE"
+first_before="$(head -n 1 "$AUDIT_FILE" | cut -f1)"
+enforce_storage_limit
+[ $(( $(wc -c < "$AUDIT_FILE") + $(wc -c < "$HISTORY_FILE") )) -le 320 ] ||
+	fail "traffic log storage limit was not enforced"
+first_after="$(head -n 1 "$AUDIT_FILE" | cut -f1)"
+[ -z "$first_after" ] || [ "$first_after" -gt "$first_before" ] ||
+	fail "traffic log eviction did not remove the oldest rows first"
+unset C2000_TRAFFIC_STORAGE_LIMIT_BYTES
+
 CATALOG="$TMP/catalog.tsv"
 build_feature_catalog "$CATALOG"
 awk -F '\t' '$1==1003 && $2=="微博" && $3==1 {found=1} END{exit !found}' "$CATALOG" ||
@@ -128,14 +147,62 @@ sh -n "$TRAFFIC" "$EQOS_ROOT/root/usr/sbin/eqos" \
 	"$EQOS_ROOT/root/usr/libexec/rpcd/c2000max.eqos" \
 	"$ROOT/../c2000max-appfilter/files/c2000max-appfilter.init"
 
-grep -q "createElementNS('http://www.w3.org/2000/svg'" \
-	"$ROOT/htdocs/luci-static/resources/view/c2000max/traffic.js" ||
-	fail "traffic trend chart still creates non-SVG namespace elements"
+TRAFFIC_VIEW="$ROOT/htdocs/luci-static/resources/view/c2000max/traffic.js"
+TRAFFIC_CHART="$ROOT/htdocs/luci-static/resources/c2000max/traffic-chart.js"
+grep -Fq "require c2000max.traffic-chart as trafficChart" "$TRAFFIC_VIEW" ||
+	fail "traffic UI does not load the reusable chart component"
+grep -Fq "'require baseclass';" "$TRAFFIC_CHART" &&
+	grep -Fq 'return baseclass.extend({' "$TRAFFIC_CHART" ||
+	fail "traffic chart module does not return a LuCI class constructor"
+grep -Fq "getContext('2d')" "$TRAFFIC_CHART" ||
+	fail "traffic charts are not rendered through responsive canvas"
+grep -Fq "addEventListener('mousemove'" "$TRAFFIC_CHART" ||
+	fail "traffic charts do not expose pointer interaction"
+grep -Fq "ResizeObserver" "$TRAFFIC_CHART" ||
+	fail "traffic charts do not resize with their LuCI container"
+grep -Fq 'ctx.measureText(label).width' "$TRAFFIC_CHART" ||
+	fail "traffic chart does not reserve space for variable-width Y-axis labels"
+if grep -q 'createElementNS\|conic-gradient' "$TRAFFIC_VIEW" "$TRAFFIC_CHART"; then
+	fail "traffic charts still depend on the clipped static SVG/CSS renderer"
+fi
+grep -Fq 'max-height:calc(100vh - 190px);overflow-y:auto' "$TRAFFIC_VIEW" ||
+	fail "device audit modal is not vertically scrollable"
+grep -Fq "'c2000max-audit-modal'" "$TRAFFIC_VIEW" &&
+	grep -Fq 'max-width:1280px!important' "$TRAFFIC_VIEW" ||
+	fail "device audit modal does not use the wide responsive layout"
+if grep -Fq "E('h4', {}, '该设备流量趋势')" "$TRAFFIC_VIEW"; then
+	fail "device audit modal still renders the unnecessary per-device trend"
+fi
+grep -Fq 'var pageSize = 20' "$TRAFFIC_VIEW" &&
+	grep -Fq "'traffic_desc', '流量：从大到小'" "$TRAFFIC_VIEW" &&
+	grep -Fq "'time_desc', '时间：最近优先'" "$TRAFFIC_VIEW" ||
+	fail "application details do not provide 20-row paging and traffic/time sorting"
+grep -Fq 'json_add_int last_seen' "$TRAFFIC" ||
+	fail "application audit API does not expose the last activity time"
+grep -q "option storage_limit_mb '100'" "$ROOT/root/etc/config/c2000max_traffic" &&
+	grep -Fq "'storage_limit_mb', '日志数据上限（MB）'" "$TRAFFIC_VIEW" ||
+	fail "traffic log storage does not default to a configurable 100 MB cap"
+grep -q "option control_mode 'seamless'" "$ROOT/root/etc/config/c2000max_traffic" &&
+	grep -Fq "o.value('force', '强力管控" "$TRAFFIC_VIEW" &&
+	grep -Fq '[ "$control_mode" != force ] || invalidate_acceleration_cache' "$TRAFFIC" ||
+	fail "application control does not expose seamless and force enforcement"
 grep -q 'ct secmark & 0x0000ffff' "$TRAFFIC" ||
 	fail "application blocking is not keyed by the isolated OAF APP_ID"
 grep -q 'OAF_CT_TAG(ct) ((ct)->secmark)' \
 	"$ROOT/../c2000max-appfilter/src/oaf/app_filter.c" ||
 	fail "OAF still risks overwriting policy-routing conntrack marks"
+SECMARK_PATCH="$ROOT/../../../../target/linux/mediatek/patches-6.12/999-zzzz-6002-c2000max-conntrack-export-secmark.patch"
+grep -Fq 'nla_put_be32(skb, CTA_SECMARK, htonl(secmark))' "$SECMARK_PATCH" ||
+	fail "Linux 6.12 conntrack dumps do not expose the OAF APP_ID secmark"
+grep -Fq 'ctnetlink_dump_secmark(skb, ct, true)' "$SECMARK_PATCH" ||
+	fail "conntrack dump/get replies omit the raw application secmark"
+grep -Fq 'nla_total_size(sizeof(u_int32_t)) /* CTA_SECMARK */' "$SECMARK_PATCH" ||
+	fail "conntrack event buffers do not reserve space for CTA_SECMARK"
+grep -Fq 'ctnetlink_dump_secmark(skb, ct, false)' "$SECMARK_PATCH" ||
+	fail "conntrack update events omit nonzero application secmarks"
+if grep -Fq 'CTA_MARK, htonl(secmark)' "$SECMARK_PATCH"; then
+	fail "OAF APP_ID export collides with policy-routing conntrack marks"
+fi
 OAF_SOURCE="$ROOT/../c2000max-appfilter/src/oaf/app_filter.c"
 grep -q 'if (g_hold_acceleration)' "$OAF_SOURCE" &&
 	grep -q 'skb->mark |= OAF_ACCEL_BYPASS_MARK' "$OAF_SOURCE" ||
@@ -149,6 +216,7 @@ grep -Fq 'load_feature_config() < 0 || g_feature_init == 0' "$OAF_SOURCE" ||
 grep -Fq 'g_feature_init++' "$OAF_SOURCE" ||
 	fail "OAF does not expose the number of loaded kernel signatures"
 APPFILTER_INIT="$ROOT/../c2000max-appfilter/files/c2000max-appfilter.init"
+TRAFFIC_INIT="$ROOT/root/etc/init.d/c2000max-traffic"
 acct_line="$(grep -n 'nf_conntrack_acct=1' "$APPFILTER_INIT" | cut -d: -f1)"
 module_line="$(grep -n '^[[:space:]]*modprobe oaf' "$APPFILTER_INIT" | cut -d: -f1)"
 [ "$(grep -n 'ln -sf /etc/appfilter/feature.cfg' "$APPFILTER_INIT" | cut -d: -f1)" -lt "$module_line" ] ||
@@ -157,8 +225,25 @@ module_line="$(grep -n '^[[:space:]]*modprobe oaf' "$APPFILTER_INIT" | cut -d: -
 	fail "application audit does not enable conntrack accounting before OAF"
 grep -q "auto_load_engine='0'" "$APPFILTER_INIT" ||
 	fail "OAF daemon can still race the init script by loading the module twice"
-grep -q 'c2000max-traffic audit-refresh' "$APPFILTER_INIT" ||
-	fail "enabling audit does not invalidate pre-existing accelerator caches"
+grep -q 'c2000max-traffic audit-reset' "$APPFILTER_INIT" ||
+	fail "enabling audit does not reset old unclassifiable LAN sessions"
+reload_block="$(sed -n '/^reload_service()/,/^}/p' "$APPFILTER_INIT")"
+printf '%s\n' "$reload_block" | grep -Fq 'pidof c2000max-oafd' &&
+	printf '%s\n' "$reload_block" | grep -Fq 'apply_recognition_profile' ||
+	fail "saving traffic policy still restarts a healthy OAF engine"
+first_hot_apply="$(printf '%s\n' "$reload_block" | grep -n 'apply_recognition_profile' | head -n1 | cut -d: -f1)"
+first_restart="$(printf '%s\n' "$reload_block" | grep -n '^[[:space:]]*stop$' | tail -n1 | cut -d: -f1)"
+[ -n "$first_hot_apply" ] && [ -n "$first_restart" ] &&
+	[ "$first_hot_apply" -lt "$first_restart" ] ||
+	fail "OAF hot reload does not precede its recovery restart path"
+traffic_reload_block="$(sed -n '/^reload_service()/,/^}/p' "$TRAFFIC_INIT")"
+printf '%s\n' "$traffic_reload_block" | grep -Fq 'kill -0 "$pid"' &&
+	printf '%s\n' "$traffic_reload_block" | grep -Fq 'c2000max-traffic audit-policy' ||
+	fail "saving traffic settings still restarts the healthy collector"
+if printf '%s\n' "$traffic_reload_block" | sed -n '/kill -0/,/return 0/p' |
+	grep -Fq 'stop'; then
+	fail "traffic collector hot reload still flushes the full persisted log"
+fi
 grep -q '^#version v26\.4\.10$' "$ROOT/../c2000max-appfilter/files/feature.cfg" ||
 	fail "the supplied current OAF feature library is not bundled"
 grep -Fq 'if (ret < 0)' "$ROOT/../c2000max-appfilter/src/oafd/appfilter_netlink.c" ||
@@ -204,6 +289,13 @@ grep -Fq 'meta mark & 0x00800000 == 0 meta l4proto' \
 	fail "firewall4 does not exclude shaped flows"
 grep -q 'flower.*src_mac\|"${key}_mac"' "$EQOS_ROOT/root/usr/sbin/eqos" ||
 	fail "EQoS does not implement MAC tc matching"
+grep -Fq 'tc_police_rule mac "$mac" "$rule_id" "$dev" "$rate"' \
+	"$EQOS_ROOT/root/usr/sbin/eqos" ||
+	fail "EQoS does not police limited MAC uploads on the original LAN ingress"
+if grep -Fq 'action mirred' \
+	"$EQOS_ROOT/root/usr/sbin/eqos"; then
+	fail "EQoS still changes the firewall ingress path through an upload IFB"
+fi
 grep -q 'ether "$addr"' "$EQOS_ROOT/root/usr/sbin/eqos" ||
 	fail "EQoS does not implement MAC nft matching"
 grep -A5 -F 'nft_mark_rule()' "$EQOS_ROOT/root/usr/sbin/eqos" >/dev/null ||
@@ -211,8 +303,12 @@ grep -A5 -F 'nft_mark_rule()' "$EQOS_ROOT/root/usr/sbin/eqos" >/dev/null ||
 [ "$(sed -n '/^nft_mark_rule()/,/^}/p' "$EQOS_ROOT/root/usr/sbin/eqos" | \
 	grep -c '^[[:space:]]*counter')" -eq 3 ] ||
 	fail "EQoS HNAT selector rules do not expose nft packet counters"
-grep -q '^START=95$' "$EQOS_ROOT/root/etc/init.d/eqos" ||
-	fail "EQoS still starts before TurboACC converges"
+grep -q '^START=99$' "$EQOS_ROOT/root/etc/init.d/eqos" ||
+	fail "EQoS does not perform its final boot apply after uplink convergence"
+if grep -Eq '/etc/init\.d/eqos (restart|stop)' \
+	"$EQOS_ROOT/root/etc/uci-defaults/luci-eqos"; then
+	fail "EQoS uci-defaults still applies the limiter before HNAT boot convergence"
+fi
 grep -q 'wait_qdma_layout' "$EQOS_ROOT/root/usr/sbin/eqos" ||
 	fail "EQoS does not wait for late HNAT/QDMA debugfs nodes"
 awk '
@@ -242,10 +338,106 @@ grep -Fq 'debugfs_create_file("hnat_entry", 0600' \
 	"$ROOT/../../../../target/linux/mediatek/patches-6.12/999-zzzz-6000-c2000max-hqos-debugfs-write-permissions.patch" ||
 	fail "HNAT flow-table control is not root-writable"
 HQOS_EXT_PATCH="$ROOT/../../../../target/linux/mediatek/patches-6.12/999-zzzz-6001-c2000max-hqos-external-uplink.patch"
-grep -Fq 'IS_HQOS_EXT_UL_PATH(dev, skb)' "$HQOS_EXT_PATCH" ||
-	fail "HNAT HQoS does not recognize external uplinks"
-grep -Fq 'FROM_GE_LAN_GRP(skb) || FROM_WED(skb)' "$HQOS_EXT_PATCH" ||
-	fail "external HQoS uplink is not restricted to LAN/WED ingress"
+if grep -Fq 'IS_HQOS_EXT_UL_PATH(dev, skb)' "$HQOS_EXT_PATCH"; then
+	fail "unsafe external-WAN HQoS forcing is still present"
+fi
+grep -Fq 'must stay out of the' "$HQOS_EXT_PATCH" ||
+	fail "kernel patch does not document the external PPD/HQoS restriction"
+
+# USB/cellular external uplinks traverse the PPD-reserved QID 63. Verify that
+# the service detects both a routed device and an up device whose default route
+# has not appeared yet, then selects bidirectional selective tc for only the
+# limited flows while unrelated connections remain HNAT eligible.
+awk '
+/^c2000_eqos_external_uplink_active\(\) \{/ { copy = 1 }
+copy { print }
+copy && /^}/ { copy = 0 }
+' "$EQOS_ROOT/root/etc/init.d/eqos" > "$TMP/eqos-uplink-lib.sh"
+. "$TMP/eqos-uplink-lib.sh"
+mkdir -p "$TMP/hnat"
+cat > "$TMP/hnat/external_interface" <<'EOF'
+ext devices [0] = eth2  (ifindex=17)
+ext devices [19] = ra0  (ifindex=5)
+EOF
+cat > "$TMP/ip-route" <<'EOF'
+#!/bin/sh
+if [ "$1" = link ]; then
+	[ "${MOCK_LINK_UP:-0}" = 1 ] && [ "$4" = eth2 ] &&
+		printf '17: eth2: <BROADCAST,MULTICAST,UP,LOWER_UP> state UP\n'
+	exit 0
+fi
+printf 'default via 10.0.0.1 dev %s table 100\n' "${MOCK_ROUTE_DEV:-eth1}"
+EOF
+chmod +x "$TMP/ip-route"
+EQOS_HNAT_DIR="$TMP/hnat"
+EQOS_IP="$TMP/ip-route"
+MOCK_ROUTE_DEV=eth2
+export MOCK_ROUTE_DEV
+c2000_eqos_external_uplink_active ||
+	fail "EQoS did not detect an active HNAT external uplink"
+MOCK_ROUTE_DEV=eth1
+export MOCK_ROUTE_DEV
+if c2000_eqos_external_uplink_active; then
+	fail "EQoS mistook the Ethernet WAN route for an external uplink"
+fi
+mkdir -p "$TMP/sys-class-net/eth2"
+EQOS_SYS_CLASS_NET="$TMP/sys-class-net"
+MOCK_LINK_UP=1
+export MOCK_LINK_UP
+c2000_eqos_external_uplink_active ||
+	fail "EQoS missed an up external device before its default route appeared"
+grep -Fq 'EQOS_BACKEND=hybrid' "$EQOS_ROOT/root/etc/init.d/eqos" ||
+	fail "external uplinks do not select the HNAT/tc hybrid backend"
+resolved_block="$(sed -n '/The MAC rule above already owns/,/^[[:space:]]*done$/p' "$EQOS_ROOT/root/etc/init.d/eqos")"
+printf '%s\n' "$resolved_block" |
+	grep -Fq 'eqos download-alias "$EQOS_BACKEND" "$download" "$resolved"' ||
+	fail "resolved MAC addresses do not use the download-only alias path"
+printf '%s\n' "$resolved_block" |
+	grep -Fq '"$dl_profile"' ||
+	fail "resolved MAC download aliases do not retain the HNAT profile"
+if printf '%s\n' "$resolved_block" | grep -Fq 'eqos add '; then
+	fail "resolved MAC addresses still repeat a complete tc/HQoS rule"
+fi
+alias_block="$(sed -n '/^add_download_alias()/,/^}/p' "$EQOS_ROOT/root/usr/sbin/eqos")"
+printf '%s\n' "$alias_block" | grep -Fq 'nft_mark_rule dl' &&
+	printf '%s\n' "$alias_block" | grep -Fq 'nft_exception_rule dl' ||
+	fail "download aliases do not cover both pure HNAT and hybrid/software backends"
+awk '
+/^(is_uinteger|valid_ipv4|valid_ipv6|valid_mac|queue_from_profile|add_download_alias)\(\) \{/ { copy = 1 }
+copy { print }
+copy && /^}/ { copy = 0 }
+' "$EQOS_ROOT/root/usr/sbin/eqos" > "$TMP/eqos-download-alias-lib.sh"
+. "$TMP/eqos-download-alias-lib.sh"
+die() { return 1; }
+nft_mark_rule() { printf 'mark|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4"; }
+nft_exception_rule() { printf 'bypass|%s|%s|%s\n' "$1" "$2" "$3"; }
+DL_QID_BASE=32
+HNAT_PROFILE_MAX=31
+[ "$(add_download_alias hnat 100000 192.168.66.245 1)" = 'mark|dl|ip|192.168.66.245|32' ] ||
+	fail "pure-HNAT MAC alias did not mark the first download QID"
+[ "$(add_download_alias hybrid 100000 192.168.66.245 0)" = 'bypass|dl|ip|192.168.66.245' ] ||
+	fail "hybrid MAC alias did not bypass accelerated download forwarding"
+hybrid_block="$(sed -n '/if \[ "$backend" = hybrid \]/,/^[[:space:]]*fi$/p' \
+	"$EQOS_ROOT/root/usr/sbin/eqos" | head -n 60)"
+printf '%s\n' "$hybrid_block" | grep -Fq 'ensure_tc_qos' ||
+	fail "external hybrid does not create bidirectional selective tc"
+printf '%s\n' "$hybrid_block" | grep -Fq 'nft_exception_rule dl' ||
+	fail "external hybrid does not keep limited downloads out of HNAT"
+if printf '%s\n' "$hybrid_block" | grep -Fq 'program_queue'; then
+	fail "external hybrid still assigns an unsafe PPD-adjacent QDMA queue"
+fi
+grep -Fq 'external-uplink HQoS did not stay disabled' \
+	"$EQOS_ROOT/root/usr/sbin/eqos" ||
+	fail "external hybrid does not verify that QDMA HQoS stays disabled"
+grep -Fq 'flush_hnat_entries' \
+	"$EQOS_ROOT/root/usr/sbin/eqos" ||
+	fail "hybrid activation does not invalidate existing PPE entries"
+grep -A12 -F 'stop_hnat_qos()' "$EQOS_ROOT/root/usr/sbin/eqos" |
+	grep -Fq 'flush_hnat_entries' ||
+	fail "disabling HQoS leaves stale fqos/QID PPE entries active"
+grep -Fq "hybrid: 'HNAT + 下载 HTB / 上传 Police'" \
+	"$EQOS_ROOT/htdocs/luci-static/resources/view/eqos.js" ||
+	fail "LuCI does not explain the external-uplink hybrid backend"
 
 # Hardware queues are rate profiles, independent from the persistent rule ID.
 # Upload and download have separate 31-profile pools and equal rates reuse an
@@ -275,6 +467,12 @@ allocate_hnat_profile up 15000
 allocate_hnat_profile dl 15000
 [ "$HNAT_PROFILE_ID" -eq 1 ] && [ "$HNAT_DL_PROFILE_COUNT" -eq 1 ] ||
 	fail "download profiles are not allocated independently"
+EQOS_BACKEND=hybrid
+allocate_hnat_profile up 18000
+[ "$HNAT_PROFILE_ID" -eq 0 ] || fail "hybrid upload incorrectly consumes an HNAT profile"
+allocate_hnat_profile dl 18000
+[ "$HNAT_PROFILE_ID" -eq 0 ] || fail "hybrid download incorrectly consumes an HNAT profile"
+EQOS_BACKEND=hnat
 profile_rate=15001
 while [ "$HNAT_UP_PROFILE_COUNT" -lt "$HNAT_PROFILE_MAX" ]; do
 	allocate_hnat_profile up "$profile_rate"

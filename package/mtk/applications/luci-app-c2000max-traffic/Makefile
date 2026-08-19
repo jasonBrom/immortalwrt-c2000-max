@@ -5,6 +5,7 @@ LUCI_DEPENDS:=+conntrack +ip-full +coreutils-timeout +flock +kmod-mediatek_hnat 
 	+c2000max-appfilter +unzip +tar +gzip
 
 PKG_NAME:=luci-app-c2000max-traffic
+PKG_RELEASE:=3
 PKG_MAINTAINER:=C2000MAX maintainers
 
 define Package/luci-app-c2000max-traffic/conffiles

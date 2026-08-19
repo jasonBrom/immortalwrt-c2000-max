@@ -20,6 +20,74 @@ POLICY_TABLE="c2000_appaudit"
 POLICY_HASH_FILE="$RUNTIME_DIR/policy.hash"
 POLICY_COUNT_FILE="$RUNTIME_DIR/policy.count"
 POLICY_ERROR_FILE="$RUNTIME_DIR/policy.error"
+AUDIT_DIAG_FILE="$RUNTIME_DIR/audit-diagnostics"
+
+storage_limit_bytes()
+{
+	local megabytes
+
+	case "$C2000_TRAFFIC_STORAGE_LIMIT_BYTES" in
+		''|*[!0-9]*) ;;
+		*)
+			[ "$C2000_TRAFFIC_STORAGE_LIMIT_BYTES" -gt 0 ] 2>/dev/null && {
+				printf '%s\n' "$C2000_TRAFFIC_STORAGE_LIMIT_BYTES"
+				return 0
+			}
+			;;
+	esac
+	megabytes="$(uci -q get c2000max_traffic.config.storage_limit_mb)"
+	case "$megabytes" in ''|*[!0-9]*) megabytes=100 ;; esac
+	[ "$megabytes" -ge 1 ] 2>/dev/null || megabytes=1
+	[ "$megabytes" -le 2048 ] 2>/dev/null || megabytes=2048
+	printf '%s\n' "$((megabytes * 1024 * 1024))"
+}
+
+file_size()
+{
+	local size
+
+	size="$(wc -c < "$1" 2>/dev/null)"
+	case "$size" in ''|*[!0-9]*) size=0 ;; esac
+	printf '%s\n' "$size"
+}
+
+trim_oldest_rows()
+{
+	local file="$1" keep="$2" size tmp
+
+	[ -f "$file" ] || return 0
+	size="$(file_size "$file")"
+	[ "$size" -gt "$keep" ] 2>/dev/null || return 0
+	tmp="${file}.trim"
+	if [ "$keep" -le 0 ] 2>/dev/null; then
+		: > "$tmp" || return 1
+	else
+		# Logs are oldest-first. tail -c keeps the newest byte range and the
+		# first (possibly partial) TSV row is discarded to preserve validity.
+		tail -c "$keep" "$file" 2>/dev/null | sed '1d' > "$tmp" || return 1
+	fi
+	mv "$tmp" "$file"
+}
+
+enforce_storage_limit()
+{
+	local limit history_size audit_size audit_budget
+
+	limit="$(storage_limit_bytes)"
+	history_size="$(file_size "$HISTORY_FILE")"
+	audit_size="$(file_size "$AUDIT_FILE")"
+	[ $((history_size + audit_size)) -gt "$limit" ] || return 0
+
+	# The minute history is small and powers the overview chart. Preserve it
+	# first, then evict the oldest hourly application rows until the combined
+	# logical log size is within the configured budget.
+	audit_budget=$((limit - history_size))
+	[ "$audit_budget" -ge 0 ] || audit_budget=0
+	trim_oldest_rows "$AUDIT_FILE" "$audit_budget" || return 1
+	audit_size="$(file_size "$AUDIT_FILE")"
+	[ $((history_size + audit_size)) -le "$limit" ] ||
+		trim_oldest_rows "$HISTORY_FILE" "$((limit - audit_size))"
+}
 
 ensure_runtime()
 {
@@ -264,6 +332,40 @@ parse_conntrack()
 			print id, key, sprintf("%.0f", up), sprintf("%.0f", down),
 				mark, client, hostname[client], appid;
 		}' "$hosts" "$raw" > "$tmp" && mv "$tmp" "$output"
+}
+
+record_audit_diagnostics()
+{
+	local raw="$1" current="$2" total identified unknown secmarks hits
+
+	total="$(awk -F '\t' 'NF >= 8 { n++ } END { print n+0 }' "$current")"
+	identified="$(awk -F '\t' '$8 > 1000 && $8 < 32000 { n++ } END { print n+0 }' "$current")"
+	unknown="$(awk -F '\t' '$8 == 0 { n++ } END { print n+0 }' "$current")"
+	secmarks="$(awk '
+		function number(s, value, i, digit) {
+			if (s !~ /^0[xX][0-9a-fA-F]+$/) return s + 0;
+			s=tolower(substr(s, 3)); value=0;
+			for (i=1; i<=length(s); i++) {
+				digit=index("0123456789abcdef", substr(s, i, 1)) - 1;
+				value=value * 16 + digit;
+			}
+			return value;
+		}
+		{
+			for (i=1; i<=NF; i++) if ($i ~ /^secmark=/) {
+				split($i, kv, "="); if (number(kv[2]) != 0) n++;
+			}
+		}
+		END { print n+0 }' "$raw")"
+	hits="$(awk 'NR > 1 && $2 + 0 > 1000 && $2 + 0 < 32000 { n++ } END { print n+0 }' \
+		/proc/net/af_visit 2>/dev/null || true)"
+	{
+		printf 'total=%s\n' "$total"
+		printf 'identified=%s\n' "$identified"
+		printf 'unknown=%s\n' "$unknown"
+		printf 'secmarks=%s\n' "$secmarks"
+		printf 'kernel_hits=%s\n' "${hits:-0}"
+	} > "$AUDIT_DIAG_FILE.tmp" && mv "$AUDIT_DIAG_FILE.tmp" "$AUDIT_DIAG_FILE"
 }
 
 calculate_deltas()
@@ -534,22 +636,43 @@ invalidate_acceleration_cache()
 	nft flush flowtable inet fw4 ft 2>/dev/null || true
 }
 
+reset_audit_connections()
+{
+	local hosts="$RUNTIME_DIR/audit-reset-hosts.tsv" ip key family
+
+	ensure_runtime || return 1
+	build_hosts "$hosts" || return 1
+	while IFS="$(printf '\t')" read -r ip key _name; do
+		[ -n "$ip" ] && [ "$key" != @router ] || continue
+		case "$ip" in
+			*:* ) family=ipv6 ;;
+			*.* ) family=ipv4 ;;
+			* ) continue ;;
+		esac
+		# OAF cannot reclassify an old connection whose accounting counter is
+		# already beyond the selected first-N-packet window.  Delete only client
+		# sessions when auditing starts or its feature database is reloaded; the
+		# applications reconnect immediately and unrelated router sessions stay up.
+		conntrack -D -f "$family" -s "$ip" >/dev/null 2>&1 || true
+		conntrack -D -f "$family" -d "$ip" >/dev/null 2>&1 || true
+	done < "$hosts"
+	rm -f "$hosts"
+	: > "$SNAPSHOT_FILE"
+	invalidate_acceleration_cache
+}
+
 clear_audit_policy()
 {
-	local old_count
-	old_count="$(cat "$POLICY_COUNT_FILE" 2>/dev/null)"
 	nft delete table inet "$POLICY_TABLE" 2>/dev/null || true
 	: > "$POLICY_HASH_FILE"
 	printf '0\n' > "$POLICY_COUNT_FILE"
 	: > "$POLICY_ERROR_FILE"
-	case "$old_count" in ''|0|*[!0-9]*) ;; *) invalidate_acceleration_cache ;; esac
 }
 
-apply_audit_policy()
+apply_audit_policy_locked()
 {
-	local nft_bin rule_file hash old_hash error
+	local nft_bin rule_file apply_file hash old_hash error control_mode
 
-	ensure_runtime || return 1
 	audit_enabled || { clear_audit_policy; return 0; }
 	[ -r /proc/sys/oaf/version ] || {
 		printf '%s\n' '应用审计引擎尚未就绪' > "$POLICY_ERROR_FILE"
@@ -578,27 +701,55 @@ apply_audit_policy()
 		printf '}\n'
 	} >> "$rule_file"
 
-	if ! error="$($nft_bin -c -f "$rule_file" 2>&1)"; then
-		printf '%s\n' "${error:-应用阻断规则语法校验失败}" > "$POLICY_ERROR_FILE"
-		return 1
-	fi
-	hash="$(sha256sum "$rule_file" | awk '{print $1}')"
+	control_mode="$(uci -q get c2000max_traffic.audit.control_mode)"
+	[ "$control_mode" = force ] || control_mode=seamless
+	hash="$({ cat "$rule_file"; printf 'control_mode=%s\n' "$control_mode"; } |
+		sha256sum | awk '{print $1}')"
 	old_hash="$(cat "$POLICY_HASH_FILE" 2>/dev/null)"
-	if [ "$hash" = "$old_hash" ]; then
+	if [ "$hash" = "$old_hash" ] &&
+	   $nft_bin list table inet "$POLICY_TABLE" >/dev/null 2>&1; then
 		printf '%s\n' "$POLICY_ACTIVE_COUNT" > "$POLICY_COUNT_FILE"
 		: > "$POLICY_ERROR_FILE"
 		return 0
 	fi
 
-	$nft_bin delete table inet "$POLICY_TABLE" 2>/dev/null || true
-	if ! error="$($nft_bin -f "$rule_file" 2>&1)"; then
+	apply_file="$RUNTIME_DIR/policy.apply.nft"
+	: > "$apply_file" || return 1
+	if $nft_bin list table inet "$POLICY_TABLE" >/dev/null 2>&1; then
+		printf 'delete table inet %s\n' "$POLICY_TABLE" >> "$apply_file"
+	fi
+	cat "$rule_file" >> "$apply_file" || return 1
+	if ! error="$($nft_bin -c -f "$apply_file" 2>&1)"; then
+		printf '%s\n' "${error:-应用阻断规则语法校验失败}" > "$POLICY_ERROR_FILE"
+		return 1
+	fi
+	# Deleting the old table and creating the replacement in one nft batch is
+	# atomic, so packets never observe a temporary no-policy window.
+	if ! error="$($nft_bin -f "$apply_file" 2>&1)"; then
 		printf '%s\n' "${error:-应用阻断规则加载失败}" > "$POLICY_ERROR_FILE"
 		return 1
 	fi
 	printf '%s\n' "$hash" > "$POLICY_HASH_FILE"
 	printf '%s\n' "$POLICY_ACTIVE_COUNT" > "$POLICY_COUNT_FILE"
 	: > "$POLICY_ERROR_FILE"
-	invalidate_acceleration_cache
+	# Seamless control only affects new/CPU-visible flows. Force control also
+	# invalidates existing HNAT/PPE and software-flowtable entries so already
+	# accelerated connections are re-evaluated immediately, at the cost of a
+	# brief network disturbance while every flow rebinds.
+	[ "$control_mode" != force ] || invalidate_acceleration_cache
+}
+
+apply_audit_policy()
+{
+	local rc
+
+	ensure_runtime || return 1
+	exec 7> "$RUNTIME_DIR/policy.lock" || return 1
+	flock -x 7 || return 1
+	apply_audit_policy_locked
+	rc=$?
+	flock -u 7
+	return "$rc"
 }
 
 flush_totals()
@@ -634,10 +785,12 @@ sample_once()
 	sync_hardware_mib
 	read_conntrack "$raw" || return 1
 	parse_conntrack "$hosts" "$raw" "$current" || return 1
+	record_audit_diagnostics "$raw" "$current" || return 1
 	calculate_deltas "$marks" "$SNAPSHOT_FILE" "$current" "$deltas" "$fallback" "$now" || return 1
 	merge_audit "$deltas" "$now" || return 1
 	merge_totals "$deltas" || return 1
 	append_history "$now" || return 1
+	enforce_storage_limit || return 1
 	mv "$current" "$SNAPSHOT_FILE" || return 1
 	printf '%s\n' "$now" > "$UPDATED_FILE"
 
@@ -740,8 +893,8 @@ audit_json()
 	awk -F '\t' -v OFS='\t' -v dev="$device" -v from="$from" -v to="$to" '
 		FILENAME == ARGV[1] { n[$1]=$2; cid[$1]=$3; cn[$1]=$4; next }
 		FILENAME == ARGV[2] && $2==dev && $1>=from && $1<=to {
-			a=$5+0; fu[a]+=$6; fd[a]+=$7; ou[a]+=$8; od[a]+=$9;
-			uu[a]+=$10; ud[a]+=$11;
+				a=$5+0; fu[a]+=$6; fd[a]+=$7; ou[a]+=$8; od[a]+=$9;
+				uu[a]+=$10; ud[a]+=$11; if ($12+0 > last[a]) last[a]=$12+0;
 		}
 		END {
 			for (a in fu) {
@@ -749,7 +902,7 @@ audit_json()
 				catid=(a==0 ? 0 : cid[a]); catname=(a==0 ? "未知" : cn[a]);
 				if (catname=="") catname="未知";
 				total=fu[a]+fd[a]+ou[a]+od[a]+uu[a]+ud[a];
-				print a,name,catid,catname,fu[a],fd[a],ou[a],od[a],uu[a],ud[a],total;
+					print a,name,catid,catname,fu[a],fd[a],ou[a],od[a],uu[a],ud[a],total,last[a];
 			}
 		}' "$catalog" "$AUDIT_FILE" | sort -t "$(printf '\t')" -k11,11nr > "$app_rows"
 
@@ -771,7 +924,7 @@ audit_json()
 	json_add_int from "$from"
 	json_add_int to "$to"
 	json_add_array apps
-	while IFS="$(printf '\t')" read -r appid name class_id class_name fu fd ou od uu ud total; do
+	while IFS="$(printf '\t')" read -r appid name class_id class_name fu fd ou od uu ud total last_seen; do
 		[ -n "$appid" ] || continue
 		total_up=$((total_up + fu + ou + uu)); total_down=$((total_down + fd + od + ud))
 		json_add_object ""
@@ -783,6 +936,7 @@ audit_json()
 		json_add_string other_upload "$ou"; json_add_string other_download "$od"
 		json_add_string unknown_upload "$uu"; json_add_string unknown_download "$ud"
 		json_add_string total "$total"
+		json_add_int last_seen "${last_seen:-0}"
 		json_close_object
 	done < "$app_rows"
 	json_close_array
@@ -820,8 +974,10 @@ status_json()
 	local total_fu=0 total_fd=0 total_ou=0 total_od=0 total_uu=0 total_ud=0
 	local rows="$RUNTIME_DIR/status.rows" daemon_pid audit_on=0 audit_active=0
 	local feature_version feature_format feature_apps policy_rules policy_error history_samples
-	local audit_mode audit_packets audit_hold=0
+	local storage_limit storage_used
+	local audit_mode audit_control_mode audit_packets audit_hold=0
 	local audit_features=0 audit_record=0 audit_daemon=0 audit_runtime_error=""
+	local audit_total=0 audit_identified=0 audit_unknown=0 audit_secmarks=0 audit_kernel_hits=0
 
 	ensure_runtime || return 1
 	daemon_pid="$(cat "$DAEMON_PID_FILE" 2>/dev/null)"
@@ -845,6 +1001,16 @@ status_json()
 	esac
 	audit_enabled && audit_on=1
 	if [ "$audit_on" -eq 1 ]; then
+		audit_total="$(sed -n 's/^total=//p' "$AUDIT_DIAG_FILE" 2>/dev/null)"
+		audit_identified="$(sed -n 's/^identified=//p' "$AUDIT_DIAG_FILE" 2>/dev/null)"
+		audit_unknown="$(sed -n 's/^unknown=//p' "$AUDIT_DIAG_FILE" 2>/dev/null)"
+		audit_secmarks="$(sed -n 's/^secmarks=//p' "$AUDIT_DIAG_FILE" 2>/dev/null)"
+		audit_kernel_hits="$(sed -n 's/^kernel_hits=//p' "$AUDIT_DIAG_FILE" 2>/dev/null)"
+		case "$audit_total" in ''|*[!0-9]*) audit_total=0 ;; esac
+		case "$audit_identified" in ''|*[!0-9]*) audit_identified=0 ;; esac
+		case "$audit_unknown" in ''|*[!0-9]*) audit_unknown=0 ;; esac
+		case "$audit_secmarks" in ''|*[!0-9]*) audit_secmarks=0 ;; esac
+		case "$audit_kernel_hits" in ''|*[!0-9]*) audit_kernel_hits=0 ;; esac
 		audit_features="$(cat "$OAF_SYSCTL_DIR/feature_init" 2>/dev/null)"
 		audit_record="$(cat "$OAF_SYSCTL_DIR/record_enable" 2>/dev/null)"
 		case "$audit_features" in ''|*[!0-9]*) audit_features=0 ;; esac
@@ -857,12 +1023,17 @@ status_json()
 			audit_runtime_error="OAF 流量记录未启用"
 		elif [ "$audit_daemon" -ne 1 ]; then
 			audit_runtime_error="OAF 用户态服务未运行"
+		elif [ "$audit_kernel_hits" -gt 0 ] && [ "$audit_identified" -eq 0 ] &&
+		     [ "$audit_secmarks" -eq 0 ]; then
+			audit_runtime_error="OAF 已命中特征，但 Conntrack 没有导出 APP_ID；请确认正在运行包含 CTA_SECMARK 修复的新内核"
 		else
 			audit_active=1
 		fi
 	fi
 	audit_mode="$(uci -q get c2000max_traffic.audit.recognition_mode)"
 	case "$audit_mode" in balanced|precise) ;; *) audit_mode=seamless ;; esac
+	audit_control_mode="$(uci -q get c2000max_traffic.audit.control_mode)"
+	[ "$audit_control_mode" = force ] || audit_control_mode=seamless
 	audit_packets="$(cat "$OAF_SYSCTL_DIR/max_dpi_packets" 2>/dev/null)"
 	case "$audit_packets" in
 		''|*[!0-9]*)
@@ -878,6 +1049,8 @@ status_json()
 	policy_error="$(cat "$POLICY_ERROR_FILE" 2>/dev/null)"
 	[ -n "$policy_error" ] || policy_error="$audit_runtime_error"
 	history_samples="$(awk -F '\t' 'NF>=7 && $1~/^[0-9]+$/ {n++} END {print n+0}' "$HISTORY_FILE")"
+	storage_limit="$(storage_limit_bytes)"
+	storage_used=$(( $(file_size "$HISTORY_FILE") + $(file_size "$AUDIT_FILE") ))
 	case "$feature_apps" in ''|*[!0-9]*) feature_apps=0 ;; esac
 	case "$policy_rules" in ''|*[!0-9]*) policy_rules=0 ;; esac
 	case "$history_samples" in ''|*[!0-9]*) history_samples=0 ;; esac
@@ -889,15 +1062,22 @@ status_json()
 	json_add_string counter_source "$source"
 	json_add_int updated "$updated"
 	json_add_int history_samples "$history_samples"
+	json_add_string storage_limit "$storage_limit"
+	json_add_string storage_used "$storage_used"
 	json_add_boolean audit_enabled "$audit_on"
 	json_add_boolean audit_active "$audit_active"
 	json_add_string audit_mode "$audit_mode"
+	json_add_string control_mode "$audit_control_mode"
 	json_add_int audit_packets "$audit_packets"
 	json_add_boolean audit_holds_acceleration "$audit_hold"
 	json_add_string feature_version "${feature_version:-未知}"
 	json_add_string feature_format "${feature_format:-未知}"
 	json_add_int feature_apps "$feature_apps"
 	json_add_int audit_loaded_features "$audit_features"
+	json_add_int audit_connections "$audit_total"
+	json_add_int audit_identified_connections "$audit_identified"
+	json_add_int audit_unknown_connections "$audit_unknown"
+	json_add_int audit_secmark_connections "$audit_secmarks"
 	json_add_int policy_rules "$policy_rules"
 	json_add_string audit_error "$policy_error"
 	json_add_array devices
@@ -992,6 +1172,7 @@ if [ "${C2000_TRAFFIC_LIB_ONLY:-0}" != 1 ]; then
 		sample) sample_once ;;
 		mib-sync) sync_hardware_mib ;;
 		audit-refresh) invalidate_acceleration_cache ;;
+		audit-reset) reset_audit_connections ;;
 		status) status_json ;;
 		audit) audit_json "${2:-}" "${3:-}" "${4:-}" ;;
 		catalog) catalog_json ;;
@@ -999,6 +1180,6 @@ if [ "${C2000_TRAFFIC_LIB_ONLY:-0}" != 1 ]; then
 		audit-policy-clear) clear_audit_policy ;;
 		flush) flush_totals ;;
 		reset) reset_totals ;;
-		*) echo "Usage: $0 {daemon|sample|mib-sync|audit-refresh|status|audit|catalog|audit-policy|audit-policy-clear|flush|reset}" >&2; exit 1 ;;
+		*) echo "Usage: $0 {daemon|sample|mib-sync|audit-refresh|audit-reset|status|audit|catalog|audit-policy|audit-policy-clear|flush|reset}" >&2; exit 1 ;;
 	esac
 fi

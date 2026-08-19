@@ -9,6 +9,7 @@ HNAT_DIR="${EQOS_HNAT_DIR:-/sys/kernel/debug/hnat}"
 NFT="${EQOS_NFT:-/usr/sbin/nft}"
 RUNTIME_DIR="${EQOS_RUNTIME_DIR:-/var/run/eqos}"
 BACKEND_FILE="$RUNTIME_DIR/backend"
+SELECTORS_FILE="$RUNTIME_DIR/selectors"
 HNAT_READY_WAIT="${EQOS_HNAT_READY_WAIT:-5}"
 
 TABLE_FAMILY="inet"
@@ -147,11 +148,13 @@ stop_qos() {
 	if tc qdisc show dev "$dev" 2>/dev/null | grep -q "qdisc htb 1:"; then
 		tc qdisc del dev "$dev" root 2>/dev/null
 	fi
-	[ "$have_ifb" -eq 1 ] || return 0
-
-	tc qdisc del dev "$dev" ingress 2>/dev/null
-	tc qdisc del dev "$IFB_DEV" root 2>/dev/null
-	ip link del dev "$IFB_DEV" 2>/dev/null
+	if tc qdisc show dev "$dev" 2>/dev/null | grep -q "qdisc ingress ffff:"; then
+		tc qdisc del dev "$dev" ingress 2>/dev/null
+	fi
+	if [ "$have_ifb" -eq 1 ]; then
+		tc qdisc del dev "$IFB_DEV" root 2>/dev/null
+		ip link del dev "$IFB_DEV" 2>/dev/null
+	fi
 }
 
 start_qos() {
@@ -175,18 +178,9 @@ start_qos() {
 		return 1
 	fi
 
-	ip link add "$IFB_DEV" type ifb || return 1
-
-	if ! ip link set dev "$IFB_DEV" up ||
-	   ! tc qdisc add dev "$dev" root handle 1: htb ||
+	if ! tc qdisc add dev "$dev" root handle 1: htb ||
 	   ! tc class add dev "$dev" parent 1: classid 1:1 htb rate "${dl}mbit" ||
-	   ! tc qdisc add dev "$IFB_DEV" root handle 1: htb ||
-	   ! tc class add dev "$IFB_DEV" parent 1: classid 1:1 htb rate "${up}mbit" ||
-	   ! tc qdisc add dev "$dev" ingress ||
-	   ! tc filter add dev "$dev" parent ffff: protocol ip pref 1 u32 \
-		match u32 0 0 action mirred egress redirect dev "$IFB_DEV" ||
-	   ! tc filter add dev "$dev" parent ffff: protocol ipv6 pref 2 u32 \
-		match u32 0 0 action mirred egress redirect dev "$IFB_DEV"; then
+	   ! tc qdisc add dev "$dev" ingress; then
 		stop_qos "$dev"
 		return 1
 	fi
@@ -236,28 +230,55 @@ reset_hnat_qdma() {
 	done
 }
 
+flush_hnat_entries() {
+	local command
+
+	[ -e "$HNAT_DIR/hnat_entry" ] || return 0
+	for command in 3 5 7; do
+		write_hnat "hnat_entry" "$command -1"
+	done
+}
+
 start_hnat_qos() {
 	local dl="$1"
 	local up="$2"
-	local qos_state up_state dl_state
+	local direction="${3:-both}"
+	local qos_state up_state dl_state expected
 
 	wait_qdma_layout
 	# Keep HQoS disabled until every scheduler and queue has a complete,
 	# internally consistent configuration. Enabling it last also repairs a
 	# stale disabled toggle left by an interrupted earlier transaction.
 	reset_hnat_qdma
-	write_hnat "qdma_sch$UP_SCH" "1 wrr $((up * 1000))"
-	write_hnat "qdma_sch$DL_SCH" "1 wrr $((dl * 1000))"
-	write_hnat "qos_toggle" "1"
+	case "$direction" in
+		downlink)
+			# External USB/5G uploads use the PPD path. Enabling uplink
+			# HQoS there can collapse throughput for the whole LAN.
+			write_hnat "qdma_sch$DL_SCH" "1 wrr $((dl * 1000))"
+			write_hnat "qos_toggle" "1 downlink"
+			expected='mode=hqos uplink=disabled downlink=enabled'
+			;;
+		both)
+			write_hnat "qdma_sch$UP_SCH" "1 wrr $((up * 1000))"
+			write_hnat "qdma_sch$DL_SCH" "1 wrr $((dl * 1000))"
+			write_hnat "qos_toggle" "1"
+			expected='mode=hqos uplink=enabled downlink=enabled'
+			;;
+		*) die "invalid HNAT HQoS direction: $direction" ;;
+	esac
 
 	qos_state="$(cat "$HNAT_DIR/qos_toggle" 2>/dev/null)"
-	printf '%s\n' "$qos_state" |
-		grep -q 'mode=hqos uplink=enabled downlink=enabled' ||
+	printf '%s\n' "$qos_state" | grep -Fq "$expected" ||
 		die "HNAT rejected HQoS mode: ${qos_state:-unreadable}"
 	up_state="$(cat "$HNAT_DIR/qdma_sch$UP_SCH" 2>/dev/null)"
 	dl_state="$(cat "$HNAT_DIR/qdma_sch$DL_SCH" 2>/dev/null)"
-	printf '%s\n' "$up_state" | grep -Eq '^1[[:space:]]+WRR' ||
-		die "QDMA upload scheduler $UP_SCH did not enable"
+	if [ "$direction" = both ]; then
+		printf '%s\n' "$up_state" | grep -Eq '^1[[:space:]]+WRR' ||
+			die "QDMA upload scheduler $UP_SCH did not enable"
+	else
+		printf '%s\n' "$up_state" | grep -Eq '^0[[:space:]]+WRR' ||
+			die "QDMA upload scheduler $UP_SCH did not stay disabled"
+	fi
 	printf '%s\n' "$dl_state" | grep -Eq '^1[[:space:]]+WRR' ||
 		die "QDMA download scheduler $DL_SCH did not enable"
 }
@@ -269,6 +290,9 @@ stop_hnat_qos() {
 	need_qdma_layout
 	write_hnat "qos_toggle" "0"
 	reset_hnat_qdma
+	# Bound FOE entries retain their old fqos/QID fields. Invalidate them now
+	# so disabling a bad HQoS setup restores normal forwarding immediately.
+	flush_hnat_entries
 }
 
 queue_from_profile() {
@@ -302,12 +326,42 @@ ensure_tc_qos() {
 		die "total rate must not exceed $TOTAL_RATE_MAX Mbit/s"
 
 	if tc qdisc show dev "$dev" 2>/dev/null | grep -q "qdisc htb 1:" &&
-	   tc qdisc show dev "$IFB_DEV" 2>/dev/null | grep -q "qdisc htb 1:"; then
+	   tc qdisc show dev "$dev" 2>/dev/null | grep -q "qdisc ingress ffff:"; then
 		return 0
 	fi
 
 	stop_qos "$dev"
 	start_qos "$dev" "$dl" "$up"
+}
+
+remember_selector() {
+	local family="$1" value="$2"
+
+	[ -n "$value" ] || return 0
+	mkdir -p "$RUNTIME_DIR" || return 1
+	touch "$SELECTORS_FILE" || return 1
+	grep -Fqx "$family	$value" "$SELECTORS_FILE" 2>/dev/null ||
+		printf '%s\t%s\n' "$family" "$value" >> "$SELECTORS_FILE"
+}
+
+flush_limited_conntrack() {
+	local family value
+
+	[ -s "$SELECTORS_FILE" ] || return 0
+	command -v conntrack >/dev/null 2>&1 || return 0
+	while IFS="$(printf '\t')" read -r family value; do
+		[ -n "$value" ] || continue
+		case "$family" in
+			ip)
+				conntrack -D -f ipv4 -s "$value" >/dev/null 2>&1 || true
+				conntrack -D -f ipv4 -d "$value" >/dev/null 2>&1 || true
+				;;
+			ip6)
+				conntrack -D -f ipv6 -s "$value" >/dev/null 2>&1 || true
+				conntrack -D -f ipv6 -d "$value" >/dev/null 2>&1 || true
+				;;
+		esac
+	done < "$SELECTORS_FILE"
 }
 
 program_queue() {
@@ -332,7 +386,7 @@ tc_filter_rule() {
 
 	case "$dir" in
 		up)
-			tcdev="$IFB_DEV"
+			tcdev="$dev"
 			key="src"
 			;;
 		dl)
@@ -363,6 +417,49 @@ tc_filter_rule() {
 	esac
 }
 
+tc_police_rule() {
+	local family="$1"
+	local value="$2"
+	local pref="$3"
+	local dev="$4"
+	local rate="$5"
+	local burst_kb
+
+	[ -n "$value" ] || return 0
+	[ "$rate" -ne 0 ] || return 0
+
+	# A 100 ms token bucket is large enough for TCP/GRO bursts without the
+	# IFB redirect which changes the apparent LAN ingress device. Cap the
+	# bucket so high-rate rules do not create multi-megabyte bursts.
+	burst_kb=$((rate / 80))
+	[ "$burst_kb" -ge 64 ] || burst_kb=64
+	[ "$burst_kb" -le 2048 ] || burst_kb=2048
+
+	case "$family" in
+		ip)
+			tc filter add dev "$dev" parent ffff: protocol ip pref "$pref" u32 \
+				match ip src "$value" \
+				action police rate "${rate}kbit" burst "${burst_kb}k" \
+				mtu 64kb conform-exceed drop
+			;;
+		ip6)
+			tc filter add dev "$dev" parent ffff: protocol ipv6 pref "$pref" u32 \
+				match ip6 src "$value" \
+				action police rate "${rate}kbit" burst "${burst_kb}k" \
+				mtu 64kb conform-exceed drop
+			;;
+		mac)
+			tc filter add dev "$dev" parent ffff: protocol all pref "$pref" flower \
+				src_mac "$value" \
+				action police rate "${rate}kbit" burst "${burst_kb}k" \
+				mtu 64kb conform-exceed drop
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
 program_tc_queue() {
 	local dir="$1"
 	local rule_id="$2"
@@ -371,24 +468,31 @@ program_tc_queue() {
 	local ip6="$5"
 	local mac="$6"
 	local dev="$7"
-	local classid tcdev
+	local classid
 
 	[ "$rate" -eq 0 ] && return 0
 	[ -n "$ip4$ip6$mac" ] ||
 		die "software tc queue requires an IPv4, IPv6 or MAC selector"
 
+	classid="$(tc_classid_from_rule "$rule_id")"
 	case "$dir" in
-		up) tcdev="$IFB_DEV" ;;
-		dl) tcdev="$dev" ;;
+		up)
+			# Police at the original br-lan ingress hook. Redirecting a bridge
+			# master packet to IFB changes its firewall ingress context and can
+			# make mwan3/multi-WAN drop every packet from the limited device.
+			tc_police_rule ip "$ip4" "$rule_id" "$dev" "$rate" || return 1
+			tc_police_rule ip6 "$ip6" "$rule_id" "$dev" "$rate" || return 1
+			tc_police_rule mac "$mac" "$rule_id" "$dev" "$rate" || return 1
+			;;
+		dl)
+			tc class replace dev "$dev" parent 1:1 classid "1:$classid" \
+				htb rate "${rate}kbit" ceil "${rate}kbit" || return 1
+			tc_filter_rule dl ip "$ip4" "$rule_id" "$classid" "$dev" || return 1
+			tc_filter_rule dl ip6 "$ip6" "$rule_id" "$classid" "$dev" || return 1
+			tc_filter_rule dl mac "$mac" "$rule_id" "$classid" "$dev" || return 1
+			;;
 		*) return 1 ;;
 	esac
-
-	classid="$(tc_classid_from_rule "$rule_id")"
-	tc class replace dev "$tcdev" parent 1:1 classid "1:$classid" \
-		htb rate "${rate}kbit" ceil "${rate}kbit" || return 1
-	tc_filter_rule "$dir" ip "$ip4" "$rule_id" "$classid" "$dev" || return 1
-	tc_filter_rule "$dir" ip6 "$ip6" "$rule_id" "$classid" "$dev" || return 1
-	tc_filter_rule "$dir" mac "$mac" "$rule_id" "$classid" "$dev" || return 1
 }
 
 nft_mark_rule() {
@@ -529,9 +633,12 @@ add_rule() {
 		die "exactly one selector is required: IPv4, IPv6 or MAC"
 
 	[ "$dl" -ne 0 ] || [ "$up" -ne 0 ] || return 0
+	remember_selector ip "$ip4" || return 1
+	remember_selector ip6 "$ip6" || return 1
+	remember_selector mac "$mac" || return 1
 
 	case "$backend" in
-		hnat|software) ;;
+		hnat|hybrid|software) ;;
 		*) die "invalid EQoS backend: $backend" ;;
 	esac
 
@@ -542,6 +649,22 @@ add_rule() {
 		# Flowtable forwarding bypasses tc. Tag both directions of every
 		# limited connection so firewall4 keeps only those flows on the regular
 		# forwarding path; mwan3's conntrack mark remains untouched.
+		nft_exception_rule up ip "$ip4" || return 1
+		nft_exception_rule up ip6 "$ip6" || return 1
+		nft_exception_rule up mac "$mac" || return 1
+		nft_exception_rule dl ip "$ip4" || return 1
+		nft_exception_rule dl ip6 "$ip6" || return 1
+		nft_exception_rule dl mac "$mac" || return 1
+		return 0
+	fi
+	if [ "$backend" = hybrid ]; then
+		need_nft
+		# External 5G/USB traverses the PPD-reserved queue. Bypass PPE and
+		# flowtable only for this rule and shape both directions with tc;
+		# unrelated flows remain eligible for HNAT.
+		ensure_tc_qos "$dev" "$total_dl" "$total_up" || return 1
+		program_tc_queue up "$rule_id" "$up" "$ip4" "$ip6" "$mac" "$dev" || return 1
+		program_tc_queue dl "$rule_id" "$dl" "$ip4" "$ip6" "$mac" "$dev" || return 1
 		nft_exception_rule up ip "$ip4" || return 1
 		nft_exception_rule up ip6 "$ip6" || return 1
 		nft_exception_rule up mac "$mac" || return 1
@@ -625,8 +748,47 @@ add_inferred_rule() {
 		"$total_dl" "$total_up" "$up_profile" "$dl_profile"
 }
 
+add_download_alias() {
+	local backend="$1"
+	local rate="$2"
+	local selector="$3"
+	local dl_profile="${4:-0}"
+	local family qid
+
+	case "$backend" in
+		hnat|hybrid|software) ;;
+		*) die "invalid EQoS backend: $backend" ;;
+	esac
+	is_uinteger "$rate" || die "download alias rate must be an integer"
+	[ "$rate" -gt 0 ] || return 0
+	if valid_ipv4 "$selector"; then
+		family=ip
+	elif valid_ipv6 "$selector"; then
+		family=ip6
+	else
+		die "download alias must be an IPv4 or IPv6 address"
+	fi
+
+	case "$backend" in
+		hnat)
+			is_uinteger "$dl_profile" &&
+				[ "$dl_profile" -ge 1 ] && [ "$dl_profile" -le "$HNAT_PROFILE_MAX" ] ||
+				die "HNAT download alias requires a hardware rate profile"
+			qid="$(queue_from_profile "$dl_profile" dl)"
+			nft_mark_rule dl "$family" "$selector" "$qid"
+			;;
+		hybrid|software)
+			# A routed packet's Ethernet destination in the inet forward hook is
+			# not reliably the LAN client's MAC yet. Add its resolved L3 address
+			# solely to the acceleration-bypass rule; the existing dst_mac tc
+			# classifier still owns the per-device download class.
+			nft_exception_rule dl "$family" "$selector"
+			;;
+	esac
+}
+
 activate_backend() {
-	local backend="$1" command
+	local backend="$1"
 
 	case "$backend" in
 		hnat)
@@ -636,9 +798,15 @@ activate_backend() {
 			# the HQoS queue or software-fallback bypass bit.
 			[ -e "$HNAT_DIR/hnat_entry" ] ||
 				die "$HNAT_DIR/hnat_entry is missing"
-			for command in 3 5 7; do
-				write_hnat "hnat_entry" "$command -1"
-			done
+			flush_hnat_entries
+			;;
+		hybrid)
+			# Both directions of limited clients carry HNAT_EXCEPTION_TAG and
+			# stay on tc/IFB; unrelated flows can rebind to PPE.
+			[ -e "$HNAT_DIR/hnat_entry" ] ||
+				die "$HNAT_DIR/hnat_entry is missing"
+			flush_hnat_entries
+			"$NFT" flush flowtable inet fw4 ft 2>/dev/null || true
 			;;
 		software)
 			# Drop only cached flowtable entries. Conntrack/NAT state remains and
@@ -650,7 +818,7 @@ activate_backend() {
 }
 
 diagnose_runtime() {
-	local acceleration="$1" node hook qos
+	local acceleration="$1" backend="${2:-}" node hook qos
 
 	[ -d "/sys/class/net/$DEV_DEFAULT" ] || {
 		echo "LAN device $DEV_DEFAULT is not ready"
@@ -661,7 +829,33 @@ diagnose_runtime() {
 		return 1
 	}
 
-	if [ "$acceleration" = mediatek_hnat ]; then
+	if [ "$backend" = hybrid ]; then
+		[ "$acceleration" = mediatek_hnat ] || {
+			echo "hybrid limiter requires MediaTek HNAT"
+			return 1
+		}
+		[ "$(cat "$HNAT_DIR/hook_toggle" 2>/dev/null)" = enabled ] || {
+			echo "HNAT hook is not enabled"
+			return 1
+		}
+		qos="$(cat "$HNAT_DIR/qos_toggle" 2>/dev/null)"
+		printf '%s\n' "$qos" | grep -Fq 'mode=disabled' || {
+			echo "external-uplink HQoS did not stay disabled: ${qos:-unreadable}"
+			return 1
+		}
+		command -v tc >/dev/null 2>&1 || {
+			echo "tc is not installed"
+			return 1
+		}
+		tc qdisc show dev "$DEV_DEFAULT" 2>/dev/null | grep -q 'qdisc htb 1:' || {
+			echo "selective download tc is not active"
+			return 1
+		}
+		tc qdisc show dev "$DEV_DEFAULT" 2>/dev/null | grep -q 'qdisc ingress ffff:' || {
+			echo "selective upload police is not active"
+			return 1
+		}
+	elif [ "$acceleration" = mediatek_hnat ]; then
 		[ -d "$HNAT_DIR" ] || {
 			echo "HNAT debugfs is not ready"
 			return 1
@@ -681,7 +875,8 @@ diagnose_runtime() {
 			return 1
 		}
 		qos="$(cat "$HNAT_DIR/qos_toggle" 2>/dev/null)"
-		printf '%s\n' "$qos" | grep -q 'mode=hqos' || {
+		printf '%s\n' "$qos" |
+			grep -Fq 'mode=hqos uplink=enabled downlink=enabled' || {
 			echo "HNAT HQoS is not enabled: ${qos:-unreadable}"
 			return 1
 		}
@@ -692,6 +887,14 @@ diagnose_runtime() {
 		}
 		command -v ip >/dev/null 2>&1 || {
 			echo "ip-full is not installed"
+			return 1
+		}
+		tc qdisc show dev "$DEV_DEFAULT" 2>/dev/null | grep -q 'qdisc htb 1:' || {
+			echo "download HTB is not active"
+			return 1
+		}
+		tc qdisc show dev "$DEV_DEFAULT" 2>/dev/null | grep -q 'qdisc ingress ffff:' || {
+			echo "upload police is not active"
 			return 1
 		}
 	fi
@@ -708,8 +911,8 @@ start_all() {
 	local tmp
 
 	case "$backend" in
-		hnat|software) ;;
-		*) die "backend must be hnat or software" ;;
+		hnat|hybrid|software) ;;
+		*) die "backend must be hnat, hybrid or software" ;;
 	esac
 
 	is_uinteger "$dl" || die "download rate must be an integer"
@@ -721,6 +924,10 @@ start_all() {
 
 	stop_qos "$dev"
 	nft_stop
+	stop_hnat_qos
+	flush_limited_conntrack
+	mkdir -p "$RUNTIME_DIR" || die "failed to create EQoS runtime directory"
+	: > "$SELECTORS_FILE" || die "failed to initialize selector state"
 
 	case "$backend" in
 		hnat)
@@ -728,15 +935,21 @@ start_all() {
 			start_hnat_qos "$dl" "$up"
 			nft_start "$dev" hnat || die "failed to configure nftables"
 			;;
+		hybrid)
+			# QDMA HQoS is unsafe on the external PPD topology. Limited
+			# connections use selective tc/ingress policing while unrelated
+			# traffic remains eligible for HNAT.
+			nft_start "$dev" hnat || die "failed to configure nftables"
+			start_qos "$dev" "$dl" "$up" ||
+				die "failed to configure selective external-uplink shaping"
+			;;
 		software)
-			stop_hnat_qos
 			nft_start "$dev" software || die "failed to configure nftables"
 			start_qos "$dev" "$dl" "$up" ||
-				die "failed to configure tc/IFB shaping"
+				die "failed to configure tc HTB/Police shaping"
 			;;
 	esac
 
-	mkdir -p "$RUNTIME_DIR" || die "failed to create EQoS runtime directory"
 	tmp="${BACKEND_FILE}.$$"
 	printf '%s\n' "$backend" > "$tmp" && mv "$tmp" "$BACKEND_FILE" ||
 		die "failed to publish EQoS backend"
@@ -748,7 +961,8 @@ stop_all() {
 	stop_qos "$dev"
 	nft_stop
 	stop_hnat_qos
-	rm -f "$BACKEND_FILE"
+	flush_limited_conntrack
+	rm -f "$BACKEND_FILE" "$SELECTORS_FILE"
 }
 
 usage() {
@@ -756,19 +970,22 @@ usage() {
 Usage: $0 <command> [options]
 
 Commands:
-  start <hnat|software> <download_mbit> <upload_mbit>
-  add <hnat|software> <rule_id> <download_kbit> <upload_kbit> <ipv4|ipv6|mac> [total_down_mbit] [total_up_mbit] [up_profile] [down_profile]
-  activate <hnat|software>
-  diagnose <mediatek_hnat|flow_offloading|disabled>
+  start <hnat|hybrid|software> <download_mbit> <upload_mbit>
+  add <hnat|hybrid|software> <rule_id> <download_kbit> <upload_kbit> <ipv4|ipv6|mac> [total_down_mbit] [total_up_mbit] [up_profile] [down_profile]
+  download-alias <hnat|hybrid|software> <download_kbit> <ipv4|ipv6> [down_profile]
+  activate <hnat|hybrid|software>
+  diagnose <mediatek_hnat|flow_offloading|disabled> [backend]
   stop
 
 In the HNAT backend, the persistent rule ID is independent of QDMA. Rules
 with the same rate share one of 31 upload profiles (qid1-31) and one of 31
 download profiles (qid32-62). qid0 remains the default queue and qid63 is
-reserved for PPD. If an active direction needs a 32nd distinct rate, that
-rule uses tc software shaping. A shared QDMA profile is an aggregate cap for
-all rules assigned to it. The software backend uses tc for every rule and
-excludes only limited connections from firewall4 flow offload.
+reserved for PPD. External cellular/USB uplinks use a selective hybrid:
+only limited connections use download HTB and upload ingress policing, QDMA HQoS stays off,
+and unrelated connections remain hardware accelerated. A shared QDMA profile is an
+aggregate cap for all rules assigned to it. The software backend uses the same
+download HTB/upload police path and excludes only limited connections from
+firewall4 flow offload.
 EOF
 }
 
@@ -787,6 +1004,11 @@ case "$1" in
 		require_c2000_accel_locks
 		shift
 		add_inferred_rule "$@"
+		;;
+	download-alias)
+		require_c2000_accel_locks
+		shift
+		add_download_alias "$@"
 		;;
 	activate)
 		require_c2000_accel_locks

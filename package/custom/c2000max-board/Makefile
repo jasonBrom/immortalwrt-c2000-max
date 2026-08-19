@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=c2000max-board
 PKG_VERSION:=2.36.01
-PKG_RELEASE:=1
+PKG_RELEASE:=3
 PKG_LICENSE:=GPL-2.0-or-later
 
 include $(INCLUDE_DIR)/package.mk
@@ -33,7 +33,7 @@ define Build/Compile
 endef
 
 define Package/c2000max-board/install
-	$(INSTALL_DIR) $(1)/etc/config $(1)/etc/init.d $(1)/etc/uci-defaults
+	$(INSTALL_DIR) $(1)/etc/config $(1)/etc/init.d $(1)/etc/uci-defaults $(1)/etc/rc.d
 	$(INSTALL_DATA) ./files/etc/c2000max-build $(1)/etc/c2000max-build
 	$(INSTALL_CONF) ./files/etc/config/c2000max $(1)/etc/config/c2000max
 	$(INSTALL_BIN) ./files/etc/init.d/c2000max-sim $(1)/etc/init.d/c2000max-sim
@@ -47,7 +47,10 @@ define Package/c2000max-board/install
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/iface
 	$(INSTALL_BIN) ./files/etc/hotplug.d/iface/98-c2000max-uplink $(1)/etc/hotplug.d/iface/98-c2000max-uplink
 	$(INSTALL_BIN) ./files/etc/uci-defaults/99-c2000max-defaults $(1)/etc/uci-defaults/99-c2000max-defaults
+	$(INSTALL_BIN) ./files/etc/uci-defaults/99-y-c2000max-v3601-services $(1)/etc/uci-defaults/99-y-c2000max-v3601-services
 	$(INSTALL_BIN) ./files/etc/uci-defaults/99-z-c2000max-feed-fix $(1)/etc/uci-defaults/99-z-c2000max-feed-fix
+	ln -sf ../init.d/c2000max-hnat $(1)/etc/rc.d/S91c2000max-hnat
+	ln -sf ../init.d/eqos $(1)/etc/rc.d/S99eqos
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-sim $(1)/usr/sbin/c2000max-sim
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-leds $(1)/usr/sbin/c2000max-leds

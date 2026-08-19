@@ -1,0 +1,11 @@
+#!/bin/sh
+
+# A preserved sysupgrade can retain an old rc.d link (or a whiteout for a
+# formerly missing one). Recreate the two acceleration services with the
+# current START values. The package also ships ROM links so the first boot is
+# covered before uci-defaults is processed.
+rm -f /etc/rc.d/S??c2000max-hnat /etc/rc.d/S??eqos
+/etc/init.d/c2000max-hnat enable >/dev/null 2>&1 || true
+/etc/init.d/eqos enable >/dev/null 2>&1 || true
+
+exit 0

@@ -69,9 +69,11 @@ start_service()
 	procd_set_param stderr 1
 	procd_close_instance
 
-	# Existing PPE/flowtable entries predate the OAF hooks. Flush accelerator
-	# caches only; conntrack/NAT sessions remain and can be classified next.
-	/usr/sbin/c2000max-traffic audit-refresh >/dev/null 2>&1 || true
+	# Account old sessions once, then replace only LAN-client conntrack entries.
+	# Merely flushing PPE is insufficient: connections already beyond OAF's
+	# first-N-packet window are terminally unknown and cannot be reclassified.
+	/usr/sbin/c2000max-traffic sample >/dev/null 2>&1 || true
+	/usr/sbin/c2000max-traffic audit-reset >/dev/null 2>&1 || true
 }
 
 stop_service()
@@ -82,6 +84,24 @@ stop_service()
 
 reload_service()
 {
+	if ! audit_enabled; then
+		stop
+		return 0
+	fi
+
+	# Most c2000max_traffic changes are schedules, retention or UI settings.
+	# Restarting the engine for those changes used to run audit-reset, destroy
+	# every LAN conntrack entry and flush all PPE flows. Keep a healthy engine
+	# alive and update only the two runtime recognition controls. A full start
+	# (and its one-time connection reset) is reserved for first enable/recovery.
+	if [ -d /sys/module/oaf ] && pidof c2000max-oafd >/dev/null 2>&1; then
+		apply_recognition_profile || {
+			logger -t c2000max-appfilter "cannot hot-apply OAF recognition profile"
+			return 1
+		}
+		return 0
+	fi
+
 	stop
 	start
 }

@@ -10,10 +10,18 @@ if [ "$(board_name)" = "nradio,c2000-max" ]; then
 	esac
 	[ ! -e /var/run/c2000max-port-role.switching ] || exit 0
 	if [ "$INTERFACE" = "lan" ] && [ "$ACTION" = "ifdown" ]; then
-		exec /etc/init.d/eqos stop
+		/etc/init.d/eqos stop >/dev/null 2>&1
 	fi
-	[ "$INTERFACE" = "lan" ] || exit 0
-	exec /etc/init.d/eqos reload
+	# External/QModem routes commonly settle after br-lan on a soft boot.
+	# Re-evaluate after every interface transition and after the later HNAT
+	# hotplug handler. flock coalesces bursts into one delayed reload.
+	(
+		exec 9>/var/lock/c2000max-eqos-hotplug.lock
+		flock -n 9 || exit 0
+		sleep 4
+		/etc/init.d/eqos reload >/dev/null 2>&1
+	) &
+	exit 0
 fi
 
 [ "$ACTION" = "ifup" ] || exit 0

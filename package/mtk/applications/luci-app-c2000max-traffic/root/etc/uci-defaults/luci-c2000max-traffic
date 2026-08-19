@@ -18,10 +18,15 @@ fi
 	uci -q set c2000max_traffic.audit='audit'
 	uci -q set c2000max_traffic.audit.enabled='0'
 	uci -q set c2000max_traffic.audit.recognition_mode='seamless'
+	uci -q set c2000max_traffic.audit.control_mode='seamless'
 	uci -q set c2000max_traffic.audit.retention_days='30'
 }
 [ -n "$(uci -q get c2000max_traffic.audit.recognition_mode)" ] || \
 	uci -q set c2000max_traffic.audit.recognition_mode='seamless'
+[ -n "$(uci -q get c2000max_traffic.audit.control_mode)" ] || \
+	uci -q set c2000max_traffic.audit.control_mode='seamless'
+[ -n "$(uci -q get c2000max_traffic.config.storage_limit_mb)" ] || \
+	uci -q set c2000max_traffic.config.storage_limit_mb='100'
 uci -q commit c2000max_traffic
 
 uci -q batch <<-EOF >/dev/null

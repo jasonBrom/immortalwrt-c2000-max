@@ -1,0 +1,79 @@
+From: C2000MAX maintainers <noreply@example.com>
+Date: Wed, 19 Aug 2026 06:30:00 +0900
+Subject: [PATCH] netfilter: ctnetlink: export raw conntrack secmark
+
+OpenAppFilter stores its application identifier in nf_conn::secmark so it
+does not collide with policy-routing and QoS users of nf_conn::mark.  Linux
+6.12 keeps CTA_SECMARK in the UAPI but no longer emits the raw value in
+conntrack netlink dumps; it only attempts to translate secmark into an LSM
+security context.  Consequently conntrack(8) cannot expose OAF's APP_ID and
+the userspace traffic collector accounts every classified connection as
+unknown.
+
+Restore the legacy read-only CTA_SECMARK attribute for dump/get replies.
+This does not change mark handling, accept userspace writes, or alter the
+packet fast path.
+---
+ net/netfilter/nf_conntrack_netlink.c | 29 +++++++++++++++++++++++++++--
+ 1 file changed, 27 insertions(+), 2 deletions(-)
+
+--- a/net/netfilter/nf_conntrack_netlink.c
++++ b/net/netfilter/nf_conntrack_netlink.c
+@@ -349,6 +349,27 @@ static int ctnetlink_dump_mark(struct sk
+ #define ctnetlink_dump_mark(a, b, c) (0)
+ #endif
+ 
++#ifdef CONFIG_NF_CONNTRACK_SECMARK
++static int ctnetlink_dump_secmark(struct sk_buff *skb,
++				  const struct nf_conn *ct, bool dump)
++{
++	u32 secmark = READ_ONCE(ct->secmark);
++
++	if (!secmark && !dump)
++		return 0;
++
++	if (nla_put_be32(skb, CTA_SECMARK, htonl(secmark)))
++		goto nla_put_failure;
++
++	return 0;
++
++nla_put_failure:
++	return -1;
++}
++#else
++#define ctnetlink_dump_secmark(a, b, c) (0)
++#endif
++
+ #ifdef CONFIG_NF_CONNTRACK_SECMARK
+ static int ctnetlink_dump_secctx(struct sk_buff *skb, const struct nf_conn *ct)
+ {
+@@ -551,6 +572,7 @@ static int ctnetlink_dump_info(struct sk
+ {
+ 	if (ctnetlink_dump_status(skb, ct) < 0 ||
+ 	    ctnetlink_dump_mark(skb, ct, true) < 0 ||
++	    ctnetlink_dump_secmark(skb, ct, true) < 0 ||
+ 	    ctnetlink_dump_secctx(skb, ct) < 0 ||
+ 	    ctnetlink_dump_id(skb, ct) < 0 ||
+ 	    ctnetlink_dump_use(skb, ct) < 0 ||
+@@ -714,6 +736,9 @@ static size_t ctnetlink_nlmsg_size(const
+ #ifdef CONFIG_NF_CONNTRACK_MARK
+ 	       + nla_total_size(sizeof(u_int32_t)) /* CTA_MARK */
+ #endif
++#ifdef CONFIG_NF_CONNTRACK_SECMARK
++	       + nla_total_size(sizeof(u_int32_t)) /* CTA_SECMARK */
++#endif
+ #ifdef CONFIG_NF_CONNTRACK_ZONES
+ 	       + nla_total_size(sizeof(u_int16_t)) /* CTA_ZONE|CTA_TUPLE_ZONE */
+ #endif
+@@ -814,9 +839,10 @@ ctnetlink_conntrack_event(unsigned int e
+ 		    && ctnetlink_dump_helpinfo(skb, ct) < 0)
+ 			goto nla_put_failure;
+ 
+ #ifdef CONFIG_NF_CONNTRACK_SECMARK
+ 		if ((events & (1 << IPCT_SECMARK) || ct->secmark)
+-		    && ctnetlink_dump_secctx(skb, ct) < 0)
++		    && (ctnetlink_dump_secmark(skb, ct, false) < 0 ||
++			ctnetlink_dump_secctx(skb, ct) < 0))
+ 			goto nla_put_failure;
+ #endif
+ 		if (events & (1 << IPCT_LABEL) &&

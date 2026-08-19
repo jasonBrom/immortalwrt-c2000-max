@@ -28,7 +28,12 @@ function accelerationName(value) {
 }
 
 function backendName(value) {
-	return ({ hnat: '硬件 HQoS', software: '软件 tc/IFB', inactive: '未启用' })[value] || value || '未启用';
+	return ({
+		hnat: '硬件 HQoS',
+		hybrid: 'HNAT + 下载 HTB / 上传 Police',
+		software: '软件 HTB / Police',
+		inactive: '未启用'
+	})[value] || value || '未启用';
 }
 
 function renderStatus(status) {
@@ -38,6 +43,11 @@ function renderStatus(status) {
 	var color = active ? '#22a06b' : (enabled ? '#c9372c' : '#777');
 	var profiles = '%s / 31 上传，%s / 31 下载'.format(
 		Number(status.upload_profiles || 0), Number(status.download_profiles || 0));
+		var profileState = status.backend === 'hybrid' ?
+			'0（外部出口使用选择性 tc，不占用 HQoS 档位）' :
+		(status.backend === 'hnat' ? profiles : '不适用');
+	var sharing = status.backend === 'hnat' ? '同方向、同速率共享总带宽' :
+		(status.backend === 'hybrid' ? '仅受限设备软件整形；其他设备保持 HNAT' : '每台设备独立 tc 类');
 
 	return E('div', { 'class': 'cbi-section' }, [
 		E('h3', {}, '实时运行状态'),
@@ -52,13 +62,13 @@ function renderStatus(status) {
 				E('div', { 'class': 'td left' }, '限速后端'),
 				E('div', { 'class': 'td left' }, backendName(status.backend)),
 				E('div', { 'class': 'td left' }, '硬件速率档位'),
-				E('div', { 'class': 'td left' }, status.backend === 'hnat' ? profiles : '不适用')
+				E('div', { 'class': 'td left' }, profileState)
 			]),
 			E('div', { 'class': 'tr' }, [
 				E('div', { 'class': 'td left' }, '规则类型'),
 				E('div', { 'class': 'td left' }, 'IPv4 / IPv6 / MAC'),
 				E('div', { 'class': 'td left' }, '档位共享方式'),
-				E('div', { 'class': 'td left' }, '同方向、同速率共享总带宽')
+				E('div', { 'class': 'td left' }, sharing)
 			])
 		]),
 		status.error ? E('p', { 'class': 'alert-message error' }, [
@@ -147,7 +157,7 @@ return view.extend({
 		var hosts = data[1] ? data[1].hosts || {} : {};
 		var choices = collectHostChoices(hosts);
 		var m = new form.Map('eqos', 'C2000MAX 网络限速',
-			'同一套规则自动适配 MediaTek HNAT/HQoS、Flow Offloading 和普通转发。保存后会立即应用并校验真实运行状态。');
+			'同一套规则自动适配 MediaTek HNAT/HQoS、Flow Offloading 和普通转发。5G/USB 外部接口下，为避免 PPD 与 IFB 改道断流，仅受限设备使用下载 HTB 和上传入口限速，其他设备继续硬件加速。保存后会立即应用并校验真实运行状态。');
 		var s = m.section(form.NamedSection, 'config', 'eqos', '全局设置');
 		var o;
 		s.anonymous = true;

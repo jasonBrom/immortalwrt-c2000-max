@@ -10,10 +10,8 @@ EOF
 rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*
 [ -n "$IPKG_INSTROOT" ] || {
 	/etc/init.d/eqos enable >/dev/null 2>&1
-	if [ "$(uci -q get eqos.config.enabled)" = 1 ]; then
-		/etc/init.d/eqos restart >/dev/null 2>&1 || true
-	else
-		/etc/init.d/eqos stop >/dev/null 2>&1 || true
-	fi
+	# Do not start the limiter from uci-defaults during the first boot after a
+	# sysupgrade. HNAT, the external uplink and QDMA are not converged yet.
+	# S99eqos and c2000max-hnat apply the preserved configuration in order.
 }
 exit 0

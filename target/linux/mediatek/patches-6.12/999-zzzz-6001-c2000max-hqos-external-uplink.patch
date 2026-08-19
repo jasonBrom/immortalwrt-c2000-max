@@ -1,36 +1,31 @@
 From: C2000MAX maintainers <noreply@example.com>
 Date: Tue, 18 Aug 2026 20:45:00 +0800
-Subject: [PATCH] net: mediatek: apply HQoS to external uplinks
+Subject: [PATCH] net: mediatek: document external uplink HQoS restriction
 
 C2000MAX uses an HNAT external device such as eth2 for its cellular
-uplink while the ordinary HNAT WAN endpoint is intentionally empty in LAN
-role.  HQOS_FLAG only recognized an Ethernet WAN output, so LAN-to-cellular
-FOE entries kept their QID but were committed with fqos and QDMA tport
-disabled.  The configured upload queue consequently never shaped the
-hardware fast path.
+uplink and sends that traffic through the PPD-reserved queue.  A normal
+per-device HQoS QID must not be forced onto this external ping-pong path:
+doing so collapses throughput for every client while the mode is enabled.
 
-Treat an external output as an HQoS uplink only when the packet originated
-from a LAN, WED, or virtual ingress.  This covers wired and Wi-Fi clients
-without changing external-to-LAN downlink handling or external-to-external
-flows.
+Keep HQOS_FLAG restricted to a real HNAT WAN endpoint.  The C2000MAX EQoS
+service enables HQoS for the LAN/downlink direction only and uses selective
+tc/IFB shaping for limited uploads. Unrelated uploads remain on HNAT.
 ---
- drivers/net/ethernet/mediatek/mtk_hnat/hnat.h | 7 ++++++-
- 1 file changed, 6 insertions(+), 1 deletion(-)
+ drivers/net/ethernet/mediatek/mtk_hnat/hnat.h | 4 ++++
+ 1 file changed, 4 insertions(+)
 
 --- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
 +++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
-@@ -1476,8 +1476,13 @@ enum FoeIpAct {
+@@ -1476,6 +1476,10 @@ enum FoeIpAct {
  #define PINGPONG_EXT_ID GENMASK(5, 0)
  #define PINGPONG_MAPE_TOKEN 0x01
  
-+#define IS_HQOS_EXT_UL_PATH(dev, skb)\
-+	(IS_EXT(dev) && (FROM_GE_LAN_GRP(skb) || FROM_WED(skb) ||\
-+			 FROM_GE_VIRTUAL(skb)))
++/* External USB/cellular uploads use the PPD queue and must stay out of the
++ * ordinary uplink HQoS QID path. Downstream LAN HQoS remains valid.
++ */
 +
  #define HQOS_FLAG(dev, skb, qid)				\
--	((IS_HQOS_UL_MODE && IS_WAN(dev)) ||			\
-+	((IS_HQOS_UL_MODE && (IS_WAN(dev) ||			\
-+			      IS_HQOS_EXT_UL_PATH(dev, skb))) ||	\
+ 	((IS_HQOS_UL_MODE && IS_WAN(dev)) ||			\
  	 (IS_HQOS_DL_MODE && IS_LAN_GRP(dev)) ||		\
  	 (IS_PPPQ_MODE && (IS_PPPQ_PATH(dev, skb) ||		\
  			   qid >= MAX_PPPQ_QUEUE_NUM)))

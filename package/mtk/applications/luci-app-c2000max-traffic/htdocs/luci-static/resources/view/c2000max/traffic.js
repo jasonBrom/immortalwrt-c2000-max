@@ -1,4 +1,5 @@
 'use strict';
+'require c2000max.traffic-chart as trafficChart';
 'require form';
 'require poll';
 'require rpc';
@@ -84,6 +85,10 @@ function auditModeName(mode) {
 	return '无感（机会式识别）';
 }
 
+function controlModeName(mode) {
+	return mode === 'force' ? '强力管控（现有连接立即重检）' : '无感管控（新连接生效）';
+}
+
 function trafficPair(upload, download) {
 	return E('span', {}, [
 		E('span', { 'style': 'white-space:nowrap' }, [ '↑ ', bytes(upload) ]),
@@ -106,23 +111,8 @@ function asArray(value) {
 	return [];
 }
 
-function svgNode(name, attributes, children) {
-	var node = document.createElementNS('http://www.w3.org/2000/svg', name);
-	Object.keys(attributes || {}).forEach(function(key) {
-		node.setAttribute(key, attributes[key]);
-	});
-	asArray(children).forEach(function(child) {
-		if (child != null)
-			node.appendChild(child.nodeType ? child : document.createTextNode(String(child)));
-	});
-	return node;
-}
-
 function renderChart(history) {
 	var samples = [];
-	var width = 900;
-	var height = 220;
-	var padding = 34;
 	var maxRate = 0;
 
 	history = asArray(history).filter(function(point) {
@@ -153,67 +143,20 @@ function renderChart(history) {
 		return E('div', { 'class': 'alert-message notice' },
 			'尚无有效历史样本；服务首次采样后即显示图表。');
 
-	maxRate = maxRate || 1;
-	function points(field) {
-		return samples.map(function(sample, index) {
-			var x = padding + index * (width - padding * 2) / Math.max(1, samples.length - 1);
-			var y = height - padding - sample[field] * (height - padding * 2) / maxRate;
-			return '%s,%s'.format(x.toFixed(1), y.toFixed(1));
-		}).join(' ');
-	}
-
-	var svg = svgNode('svg', {
-		viewBox: '0 0 %d %d'.format(width, height),
-		style: 'display:block;width:100%;height:auto;min-height:180px;background:rgba(127,127,127,.06);border-radius:4px',
-		role: 'img',
-		'aria-label': '总上传和下载流量趋势'
-	}, [
-		svgNode('line', { x1: padding, y1: height - padding, x2: width - padding,
-			y2: height - padding, stroke: '#888', 'stroke-width': 1 }),
-		svgNode('line', { x1: padding, y1: padding, x2: padding,
-			y2: height - padding, stroke: '#888', 'stroke-width': 1 }),
-		svgNode('polyline', { points: points('download'), fill: 'none', stroke: '#1677ff',
-			'stroke-width': 3, 'stroke-linejoin': 'round' }),
-		svgNode('polyline', { points: points('upload'), fill: 'none', stroke: '#22a06b',
-			'stroke-width': 3, 'stroke-linejoin': 'round' })
-	]);
-
 	return E('div', {}, [
-		E('div', { 'style': 'display:flex;gap:1.5em;margin-bottom:.5em' }, [
-			E('span', { 'style': 'color:#1677ff' }, '● 下载'),
-			E('span', { 'style': 'color:#22a06b' }, '● 上传'),
-			E('span', { 'style': 'margin-left:auto' }, '峰值：%s · %d 个速率点'.format(speed(maxRate), samples.length))
-		]),
-		svg
+		E('div', { 'style': 'text-align:right;margin-bottom:.25em;color:#777' },
+			'峰值：%s · %d 个速率点 · 可悬停查看详情'.format(speed(maxRate), samples.length)),
+		trafficChart.line(samples, { formatValue: speed, height: 240 })
 	]);
 }
 
 function renderPie(items, emptyText) {
-	var colors = [ '#1677ff', '#22a06b', '#fa8c16', '#722ed1', '#eb2f96', '#13c2c2', '#a0d911', '#8c8c8c' ];
-	var total = items.reduce(function(sum, item) { return sum + Number(item.value || 0); }, 0);
-	var offset = 0;
-	var gradients = [];
-
-	if (!total)
-		return E('div', { 'class': 'alert-message notice' }, emptyText || '这个时间段没有应用流量。');
-
-	items.forEach(function(item, index) {
-		var end = offset + Number(item.value || 0) * 100 / total;
-		gradients.push('%s %.3f%% %.3f%%'.format(colors[index % colors.length], offset, end));
-		item.color = colors[index % colors.length];
-		offset = end;
+	return trafficChart.doughnut(items, {
+		emptyText: emptyText || '这个时间段没有应用流量。',
+		formatValue: bytes,
+		centerLabel: '总计',
+		height: 220
 	});
-
-	return E('div', { 'style': 'display:flex;gap:1.25em;align-items:center;flex-wrap:wrap' }, [
-		E('div', { 'style': 'width:150px;height:150px;border-radius:50%;background:conic-gradient(%s)'.format(gradients.join(',')) }),
-		E('div', { 'style': 'min-width:220px;flex:1' }, items.map(function(item) {
-			return E('div', { 'style': 'display:flex;gap:.5em;align-items:center;margin:.25em 0' }, [
-				E('span', { 'style': 'color:%s'.format(item.color) }, '●'),
-				E('span', { 'style': 'flex:1' }, item.name),
-				E('span', {}, '%s（%.1f%%）'.format(bytes(item.value), Number(item.value) * 100 / total))
-			]);
-		}))
-	]);
 }
 
 function createAlwaysBlock(device, app) {
@@ -259,7 +202,7 @@ function showDeviceAudit(device, seconds) {
 	var from = now - seconds;
 	ui.showModal('应用流量审计 - %s'.format(device.name || device.ip || device.id), [
 		E('p', { 'class': 'spinning' }, '正在加载应用流量…')
-	]);
+	], 'c2000max-audit-modal');
 
 	return L.resolveDefault(callTrafficAudit(device.id, from, now), { apps: [], categories: [] }).then(function(data) {
 		var apps = asArray(data.apps);
@@ -281,49 +224,106 @@ function showDeviceAudit(device, seconds) {
 			other += Number(app.other_upload || 0) + Number(app.other_download || 0);
 			unknown += Number(app.unknown_upload || 0) + Number(app.unknown_download || 0);
 		});
-		var rows = apps.slice(0, 100).map(function(app) {
-			return E('div', { 'class': 'tr' }, [
-				E('div', { 'class': 'td' }, [ E('strong', {}, app.name), E('div', { 'style': 'color:#777;font-size:90%' }, app.category || '未知') ]),
-				E('div', { 'class': 'td' }, trafficPair(app.fiveg_upload, app.fiveg_download)),
-				E('div', { 'class': 'td' }, trafficPair(app.other_upload, app.other_download)),
-				E('div', { 'class': 'td' }, trafficPair(app.unknown_upload, app.unknown_download)),
-				E('div', { 'class': 'td' }, bytes(app.total)),
-				E('div', { 'class': 'td' }, app.id > 0 && device.mac ? E('button', {
-					'class': 'btn cbi-button-negative',
-					'click': function() { confirmAlwaysBlock(device, app); }
-				}, '阻断') : '-')
-			]);
-		});
-		if (!rows.length)
-			rows.push(E('div', { 'class': 'tr' }, E('div', { 'class': 'td' }, '所选时间段没有流量。')));
 
-		ui.showModal('应用流量审计 - %s'.format(device.name || device.ip || device.id), [
-			E('div', { 'style': 'display:flex;gap:.5em;flex-wrap:wrap;margin-bottom:1em' }, [
-				[ 86400, '24 小时' ], [ 604800, '7 天' ], [ 2592000, '30 天' ]
-			].map(function(period) {
-				return E('button', {
-					'class': 'btn %s'.format(seconds === period[0] ? 'cbi-button-action' : ''),
-					'click': function() { return showDeviceAudit(device, period[0]); }
-				}, period[1]);
-			})),
-			E('h4', {}, '应用分类占比'),
-			renderPie(categories, '这个时间段没有可展示的应用分类。'),
-			E('h4', {}, '出口流量类型'),
-			renderPie([
-				{ name: '5G', value: fiveg },
-				{ name: '其他/宽带', value: other },
-				{ name: '未分类出口', value: unknown }
-			], '这个时间段没有出口流量。'),
-			E('h4', {}, '应用明细'),
-			E('div', { 'class': 'table cbi-section-table' }, [
-				E('div', { 'class': 'tr table-titles' }, [
-					E('div', { 'class': 'th' }, '应用'), E('div', { 'class': 'th' }, '5G（上传 / 下载）'),
-					E('div', { 'class': 'th' }, '其他（上传 / 下载）'), E('div', { 'class': 'th' }, '未分类'),
-					E('div', { 'class': 'th' }, '总计'), E('div', { 'class': 'th' }, '操作')
-				])
-			].concat(rows)),
-			E('div', { 'class': 'right' }, E('button', { 'class': 'btn', 'click': ui.hideModal }, '关闭'))
-		]);
+		function renderAuditPage(page, sortMode) {
+			var pageSize = 20;
+			var sorted = apps.slice();
+			var descending = /_desc$/.test(sortMode);
+			var sortField = /^time_/.test(sortMode) ? 'last_seen' : 'total';
+			sorted.sort(function(a, b) {
+				var av = Number(a[sortField] || 0);
+				var bv = Number(b[sortField] || 0);
+				if (av === bv)
+					return String(a.name || '').localeCompare(String(b.name || ''));
+				return descending ? bv - av : av - bv;
+			});
+			var pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
+			page = Math.max(1, Math.min(Number(page) || 1, pageCount));
+			var rows = sorted.slice((page - 1) * pageSize, page * pageSize).map(function(app) {
+				var lastSeen = Number(app.last_seen || 0);
+				return E('div', { 'class': 'tr' }, [
+					E('div', { 'class': 'td', 'style': 'min-width:150px;word-break:normal' }, [
+						E('strong', {}, app.name),
+						E('div', { 'style': 'color:#777;font-size:90%' }, app.category || '未知')
+					]),
+					E('div', { 'class': 'td' }, trafficPair(app.fiveg_upload, app.fiveg_download)),
+					E('div', { 'class': 'td' }, trafficPair(app.other_upload, app.other_download)),
+					E('div', { 'class': 'td' }, trafficPair(app.unknown_upload, app.unknown_download)),
+					E('div', { 'class': 'td' }, bytes(app.total)),
+					E('div', { 'class': 'td', 'style': 'white-space:nowrap' },
+						lastSeen ? new Date(lastSeen * 1000).toLocaleString() : '-'),
+					E('div', { 'class': 'td' }, app.id > 0 && device.mac ? E('button', {
+						'class': 'btn cbi-button-negative',
+						'click': function() { confirmAlwaysBlock(device, app); }
+					}, '阻断') : '-')
+				]);
+			});
+			if (!rows.length)
+				rows.push(E('div', { 'class': 'tr' }, E('div', { 'class': 'td' }, '所选时间段没有流量。')));
+
+			var sortSelect = E('select', {
+				'class': 'cbi-input-select',
+				'change': function(ev) { renderAuditPage(1, ev.target.value); }
+			}, [
+				[ 'traffic_desc', '流量：从大到小' ], [ 'traffic_asc', '流量：从小到大' ],
+				[ 'time_desc', '时间：最近优先' ], [ 'time_asc', '时间：最早优先' ]
+			].map(function(option) {
+				return E('option', { 'value': option[0], 'selected': sortMode === option[0] ? '' : null }, option[1]);
+			}));
+			var pagination = E('div', {
+				'style': 'display:flex;align-items:center;justify-content:flex-end;gap:.6em;margin-top:.75em'
+			}, [
+				E('button', {
+					'class': 'btn', 'disabled': page <= 1 ? '' : null,
+					'click': function() { renderAuditPage(page - 1, sortMode); }
+				}, '上一页'),
+				E('span', {}, '第 %d / %d 页，共 %d 个应用'.format(page, pageCount, sorted.length)),
+				E('button', {
+					'class': 'btn', 'disabled': page >= pageCount ? '' : null,
+					'click': function() { renderAuditPage(page + 1, sortMode); }
+				}, '下一页')
+			]);
+
+			ui.showModal('应用流量审计 - %s'.format(device.name || device.ip || device.id), [
+				E('div', { 'style': 'max-height:calc(100vh - 190px);overflow-y:auto;overflow-x:hidden;padding-right:.5em' }, [
+					E('div', { 'style': 'display:flex;gap:.5em;flex-wrap:wrap;margin-bottom:1em' }, [
+						[ 86400, '24 小时' ], [ 604800, '7 天' ], [ 2592000, '30 天' ]
+					].map(function(period) {
+						return E('button', {
+							'class': 'btn %s'.format(seconds === period[0] ? 'cbi-button-action' : ''),
+							'click': function() { return showDeviceAudit(device, period[0]); }
+						}, period[1]);
+					})),
+					E('div', { 'class': 'c2000max-audit-pies' }, [
+						E('div', {}, [ E('h4', {}, '应用分类占比'),
+							renderPie(categories, '这个时间段没有可展示的应用分类。') ]),
+						E('div', {}, [ E('h4', {}, '出口流量类型'), renderPie([
+							{ name: '5G', value: fiveg },
+							{ name: '其他/宽带', value: other },
+							{ name: '未分类出口', value: unknown }
+						], '这个时间段没有出口流量。') ])
+					]),
+					E('div', { 'style': 'display:flex;align-items:center;justify-content:space-between;gap:1em;flex-wrap:wrap;margin-top:1.25em' }, [
+						E('h4', { 'style': 'margin:0' }, '应用明细'),
+						E('label', {}, [ '排序：', sortSelect ])
+					]),
+					E('div', { 'style': 'overflow-x:auto;max-width:100%;margin-top:.5em' }, E('div', {
+						'class': 'table cbi-section-table', 'style': 'min-width:1080px'
+					}, [
+						E('div', { 'class': 'tr table-titles' }, [
+							E('div', { 'class': 'th' }, '应用'), E('div', { 'class': 'th' }, '5G（上传 / 下载）'),
+							E('div', { 'class': 'th' }, '其他（上传 / 下载）'), E('div', { 'class': 'th' }, '未分类'),
+							E('div', { 'class': 'th' }, '总计'), E('div', { 'class': 'th' }, '最后活动'),
+							E('div', { 'class': 'th' }, '操作')
+						])
+					].concat(rows))),
+					pagination
+				]),
+				E('div', { 'class': 'right' }, E('button', { 'class': 'btn', 'click': ui.hideModal }, '关闭'))
+			], 'c2000max-audit-modal');
+		}
+
+		renderAuditPage(1, 'traffic_desc');
 	});
 }
 
@@ -388,8 +388,22 @@ function renderTraffic(status) {
 				E('div', { 'class': 'tr' }, [
 					E('div', { 'class': 'td left' }, '生效阻断规则'),
 					E('div', { 'class': 'td left' }, String(Number(status.policy_rules || 0))),
+					E('div', { 'class': 'td left' }, '管控方式'),
+					E('div', { 'class': 'td left' }, controlModeName(status.control_mode))
+				]),
+				E('div', { 'class': 'tr' }, [
 					E('div', { 'class': 'td left' }, '趋势样本'),
-					E('div', { 'class': 'td left' }, String(Number(status.history_samples || 0)))
+					E('div', { 'class': 'td left' }, String(Number(status.history_samples || 0))),
+					E('div', { 'class': 'td left' }, '日志占用'),
+					E('div', { 'class': 'td left' }, '%s / %s'.format(bytes(status.storage_used), bytes(status.storage_limit)))
+				]),
+				E('div', { 'class': 'tr' }, [
+					E('div', { 'class': 'td left' }, '当前连接识别'),
+					E('div', { 'class': 'td left' }, '%d 已识别 / %d 未识别'.format(
+						Number(status.audit_identified_connections || 0),
+						Number(status.audit_unknown_connections || 0))),
+					E('div', { 'class': 'td left' }, '可见 secmark'),
+					E('div', { 'class': 'td left' }, String(Number(status.audit_secmark_connections || 0)))
 				])
 			])
 		].concat(status.audit_error ? [ E('div', { 'class': 'alert-message warning' }, '应用审计错误：%s'.format(status.audit_error)) ] : [])),
@@ -452,6 +466,7 @@ return view.extend({
 		var o = s.option(form.Flag, 'enabled', '启用流量统计'); o.default = o.enabled; o.rmempty = false;
 		o = s.option(form.Value, 'sample_interval', '采样间隔（秒）'); o.datatype = 'and(uinteger,min(5),max(300))'; o.default = '10'; o.rmempty = false;
 		o = s.option(form.Value, 'flush_interval', '持久化间隔（秒）', '写入闪存的间隔，建议不小于 3600 秒。'); o.datatype = 'and(uinteger,min(300),max(86400))'; o.default = '3600'; o.rmempty = false;
+		o = s.option(form.Value, 'storage_limit_mb', '日志数据上限（MB）', '默认最多保留 100 MB 的趋势和应用明细；超过后自动删除最早记录。'); o.datatype = 'and(uinteger,min(1),max(2048))'; o.default = '100'; o.rmempty = false;
 
 		s = m.section(form.NamedSection, 'audit', 'audit', '应用流量审计',
 			'默认关闭。无感模式不会为了识别阻止 HNAT/PPE 或软件 Flow Offload，未识别连接直接记为“未知/其他”；均衡和精确模式会暂缓未知连接加速以提高识别率。');
@@ -463,6 +478,11 @@ return view.extend({
 		o.value('precise', '精确（未知连接最多检查 64 包）');
 		o.default = 'seamless'; o.rmempty = false;
 		o.description = '无感模式只检查连接在加速建立前自然经过 CPU 的数据包，不额外增加慢路径时间；应用禁用对未识别连接可能延后到下一次连接。';
+		o = s.option(form.ListValue, 'control_mode', '管控生效方式');
+		o.value('seamless', '无感管控（推荐）');
+		o.value('force', '强力管控（立即中断现有连接）');
+		o.default = 'seamless'; o.rmempty = false;
+		o.description = '无感管控只让新连接立即受规则约束，已有 HNAT/Flowtable 连接自然结束后生效；强力管控会清空加速连接使规则立即生效，保存时可能出现短暂卡顿。';
 		o = s.option(form.Value, 'retention_days', '明细保留天数'); o.datatype = 'and(uinteger,min(1),max(90))'; o.default = '30'; o.rmempty = false;
 		o = s.option(form.Button, '_upload_feature', '上传/更新特征库',
 			'支持官方 ZIP，或 ZIP 内单独的 feature3.0_*.bin；当前：%s，%d 个应用。'.format(catalog.version || '未知', apps.length));
@@ -504,12 +524,17 @@ return view.extend({
 		apps.forEach(function(app) { o.value(String(app.id), '【%s】%s'.format(app.category || '未知', app.name)); });
 
 		var trafficNode = E('div', { 'id': 'c2000-traffic-body' }, renderTraffic(status));
+		var modalStyle = E('style', {}, [
+			'.modal.c2000max-audit-modal{width:calc(100vw - 3rem);max-width:1280px!important;}',
+			'.c2000max-audit-pies{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1.25em;align-items:start;}',
+			'@media(max-width:760px){.modal.c2000max-audit-modal{width:calc(100vw - 1rem);margin:1em auto;}.c2000max-audit-pies{grid-template-columns:1fr;}}'
+		].join(''));
 		poll.add(function() {
 			return L.resolveDefault(callTrafficStatus(), {}).then(function(status) {
 				var node = document.getElementById('c2000-traffic-body');
 				if (node) L.dom.content(node, renderTraffic(status));
 			});
 		}, 5);
-		return m.render().then(function(formNode) { return E('div', {}, [ trafficNode, formNode ]); });
+		return m.render().then(function(formNode) { return E('div', {}, [ modalStyle, trafficNode, formNode ]); });
 	}
 });

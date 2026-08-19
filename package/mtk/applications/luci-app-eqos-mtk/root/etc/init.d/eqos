@@ -3,7 +3,7 @@
 
 . /lib/functions/system.sh
 
-START=95
+START=99
 USE_PROCD=1
 
 QDMA_RATE_MAX=1000000
@@ -19,6 +19,9 @@ C2000_EQOS_HNAT_HELD=0
 EQOS_RUNTIME_DIR="${EQOS_RUNTIME_DIR:-/var/run/eqos}"
 EQOS_ERROR_FILE="$EQOS_RUNTIME_DIR/last_error"
 EQOS_PROFILE_FILE="$EQOS_RUNTIME_DIR/profiles"
+EQOS_HNAT_DIR="${EQOS_HNAT_DIR:-/sys/kernel/debug/hnat}"
+EQOS_IP="${EQOS_IP:-ip}"
+EQOS_SYS_CLASS_NET="${EQOS_SYS_CLASS_NET:-/sys/class/net}"
 HNAT_UP_PROFILES=""
 HNAT_DL_PROFILES=""
 HNAT_UP_PROFILE_COUNT=0
@@ -74,13 +77,49 @@ addresses_for_mac() {
 	} | sort -u
 }
 
+c2000_eqos_external_uplink_active() {
+	local ext_devices route_devices ext route_dev
+	local sys_class_net="${EQOS_SYS_CLASS_NET:-/sys/class/net}"
+
+	[ -r "$EQOS_HNAT_DIR/external_interface" ] || return 1
+	ext_devices="$(sed -n \
+		's/^ext devices \[[^]]*\] = \([^[:space:]]*\).*/\1/p' \
+		"$EQOS_HNAT_DIR/external_interface" 2>/dev/null)"
+	[ -n "$ext_devices" ] || return 1
+
+	route_devices="$({
+		"$EQOS_IP" -4 route show table all default 2>/dev/null
+		"$EQOS_IP" -6 route show table all default 2>/dev/null
+	} | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1) }' |
+		sort -u)"
+
+	for ext in $ext_devices; do
+		for route_dev in $route_devices; do
+			[ "$ext" = "$route_dev" ] && return 0
+		done
+		# During a soft reboot QModem may create eth2 before installing its
+		# default route. Treat an up, non-bridge HNAT external device as an
+		# uplink candidate so EQoS never briefly enables the unsafe QDMA upload
+		# path. Wi-Fi external devices are br-lan members and are excluded.
+		[ -d "$sys_class_net/$ext" ] || continue
+		[ ! -e "$sys_class_net/$ext/brport" ] || continue
+		"$EQOS_IP" link show dev "$ext" 2>/dev/null |
+			grep -Eq '(^|[<,])UP([,>]|$)|state[[:space:]]+UP' && return 0
+	done
+
+	return 1
+}
+
 allocate_hnat_profile() {
 	local dir="$1"
 	local rate="$2"
 	local profiles count item item_rate item_id
 
 	HNAT_PROFILE_ID=0
-	[ "$EQOS_BACKEND" = hnat ] || return 0
+	case "$EQOS_BACKEND:$dir" in
+		hnat:up|hnat:dl) ;;
+		*) return 0 ;;
+	esac
 	[ "$rate" -ne 0 ] || return 0
 
 	case "$dir" in
@@ -281,12 +320,15 @@ parse_device() {
 		return 0
 	fi
 
-	# MAC is the stable selector used by tc and uplink HQoS. Add every known
-	# address too, so routed downloads are marked before br-lan rewrites L2.
-	[ -n "$mac" ] || return 0
+	# The MAC rule above already owns the per-device tc class and both filters.
+	# Add known L3 download aliases without repeating the tc rule: inet/forward
+	# cannot reliably match the final LAN destination MAC of a routed packet.
+	# Pure HNAT uses the alias to apply the download QID; hybrid/software use it
+	# to keep the download flow out of HNAT/flowtable before dst_mac HTB shaping.
+	[ -n "$mac" ] && [ "$download" -ne 0 ] || return 0
 	for resolved in $(addresses_for_mac "$mac"); do
-		if ! eqos add "$EQOS_BACKEND" "$rule_id" "$download" "$upload" "$resolved" \
-			"$total_download" "$total_upload" "$up_profile" "$dl_profile"; then
+		if ! eqos download-alias "$EQOS_BACKEND" "$download" "$resolved" \
+			"$dl_profile"; then
 			echo "eqos: failed to apply resolved address $resolved for rule $rule_id" >&2
 			CONFIG_ERROR=1
 			return 0
@@ -307,7 +349,15 @@ eqos_start_service_locked() {
 	effective="$(cat /var/run/c2000max-hnat-effective 2>/dev/null)"
 	hook="$(cat /sys/kernel/debug/hnat/hook_toggle 2>/dev/null)"
 	if [ "$effective" = mediatek_hnat ] && [ "$hook" = enabled ]; then
-		EQOS_BACKEND=hnat
+		if c2000_eqos_external_uplink_active; then
+			# USB/cellular HNAT uses the PPD-reserved queue 63. QDMA HQoS on
+			# either direction is firmware/topology dependent and has caused
+			# both near-zero speed and complete loss of connectivity. Keep HNAT
+			# for unrelated clients and move only limited flows to tc/police.
+			EQOS_BACKEND=hybrid
+		else
+			EQOS_BACKEND=hnat
+		fi
 	else
 		EQOS_BACKEND=software
 	fi
@@ -402,7 +452,7 @@ c2000_eqos_run_locked() {
 
 	# rc.common already serializes EQoS service calls with its procd lock.
 	# Acquire the shared acceleration locks in the one permitted order and keep
-	# them across HNAT convergence, QDMA programming, nftables and tc/IFB.
+	# them across HNAT convergence, QDMA programming, nftables and tc/police.
 	trap c2000_eqos_signal_abort HUP INT TERM
 	flock -x 4 || {
 		trap - HUP INT TERM

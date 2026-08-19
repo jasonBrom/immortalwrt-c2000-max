@@ -28,7 +28,28 @@ stop_service()
 
 reload_service()
 {
-	stop
+	local enabled pid
+
+	config_load c2000max_traffic
+	config_get_bool enabled config enabled 1
+	pid="$(cat /tmp/c2000max-traffic/daemon.pid 2>/dev/null)"
+	if [ "$enabled" -ne 1 ]; then
+		stop
+		return 0
+	fi
+
+	case "$pid" in
+		''|*[!0-9]*) ;;
+		*)
+			if kill -0 "$pid" 2>/dev/null; then
+				# The daemon reads sampling/retention/storage settings on each
+				# iteration. Apply only the small nft policy delta here; do not
+				# flush a potentially 100 MB log or restart a healthy collector.
+				/usr/sbin/c2000max-traffic audit-policy >/dev/null 2>&1 || true
+				return 0
+			fi
+			;;
+	esac
 	start
 }
 

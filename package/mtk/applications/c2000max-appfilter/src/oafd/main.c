@@ -815,7 +815,6 @@ void oaf_timeout_handler(struct uloop_timeout *t)
         appfilter_nl_fd.fd = appfilter_nl_init();
         if (appfilter_nl_fd.fd > 0){
             uloop_fd_add(&appfilter_nl_fd, ULOOP_READ);
-            system("oaf_rule reload &");
             LOG_INFO("netlink connect success\n");
         }
     }
