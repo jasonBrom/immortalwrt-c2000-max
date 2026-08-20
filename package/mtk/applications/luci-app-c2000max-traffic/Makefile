@@ -1,11 +1,12 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=C2000MAX acceleration-independent traffic accounting
-LUCI_DEPENDS:=+conntrack +ip-full +coreutils-timeout +flock +kmod-mediatek_hnat \
-	+c2000max-appfilter +unzip +tar +gzip
+LUCI_DEPENDS:=+conntrack +ip-full +coreutils-timeout +coreutils-od +coreutils-sort +coreutils-stat +flock +kmod-mediatek_hnat \
+	+c2000max-appfilter +unzip +tar +gzip +ucode +ucode-mod-fs
 
 PKG_NAME:=luci-app-c2000max-traffic
-PKG_RELEASE:=3
+PKG_VERSION:=26.232.0
+PKG_RELEASE:=8
 PKG_MAINTAINER:=C2000MAX maintainers
 
 define Package/luci-app-c2000max-traffic/conffiles

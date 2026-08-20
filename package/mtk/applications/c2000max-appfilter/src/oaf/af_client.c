@@ -20,7 +20,7 @@
 #include <linux/netfilter_ipv6.h>
 #include <linux/ipv6.h>
 #include <linux/in6.h>
-#include <linux/timer.h>
+#include <linux/workqueue.h>
 
 #include "af_client.h"
 #include "af_client_fs.h"
@@ -31,11 +31,21 @@
 
 DEFINE_RWLOCK(af_client_lock);
 
+/*
+ * Legacy client reports build a JSON document and therefore allocate with
+ * GFP_KERNEL.  They used to run from a timer softirq roughly 61 seconds after
+ * a client was discovered, which can sleep in atomic context and eventually
+ * trip the hardware watchdog.  Keep all recurring client/maintenance work on
+ * one ordered process-context queue.  Ordering also prevents every client
+ * from building its report concurrently after boot.
+ */
+struct workqueue_struct *af_workqueue;
+
 u32 total_client = 0;
 struct list_head af_client_list_table[MAX_AF_CLIENT_HASH_SIZE];
 
-static void init_client_timer(af_client_info_t *client);
-static void stop_client_timer(af_client_info_t *client);
+static void init_client_work(af_client_info_t *client);
+static void stop_client_work(af_client_info_t *client);
 
 
 static void
@@ -68,7 +78,7 @@ nf_client_list_clear(void)
 			memset(mac_str, 0x0, sizeof(mac_str));
 			sprintf(mac_str, MAC_FMT, MAC_ARRAY(p->mac));
 			AF_DEBUG("clean mac:%s\n", mac_str);
-			stop_client_timer(p);
+			stop_client_work(p);
 			list_del(&(p->hlist));
 			kfree(p);
 		}
@@ -185,7 +195,7 @@ nf_client_add(unsigned char *mac)
 
 	AF_LMT_INFO("new client mac=" MAC_FMT "\n", MAC_ARRAY(node->mac));
 	total_client++;
-	init_client_timer(node);
+	init_client_work(node);
 	list_add(&(node->hlist), &af_client_list_table[index]);
 	return node;
 }
@@ -207,7 +217,7 @@ void check_client_expire(void)
 			if (jiffies > (node->update_jiffies + MAX_CLIENT_ACTIVE_TIME * HZ))
 			{
 				AF_INFO("del client:" MAC_FMT "\n", MAC_ARRAY(node->mac));
-				stop_client_timer(node);
+				stop_client_work(node);
 				list_del(&(node->hlist));
 				kfree(node);
 				AF_CLIENT_UNLOCK_W();
@@ -266,6 +276,9 @@ static int __af_visit_info_report(af_client_info_t *node)
 	cJSON *visit_obj = NULL;
 	cJSON *visit_info_array = NULL;
 	cJSON *root_obj = NULL;
+
+	/* This path deliberately requires process context. */
+	might_sleep();
 
 	flush_expired_visit_info(node);
 
@@ -569,21 +582,13 @@ static struct nf_hook_ops af_client_ops[] = {
 #endif
 
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
-static void client_timer_handler(struct timer_list *t)
+static void client_work_handler(struct work_struct *work)
 {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
-    af_client_info_t *client = from_timer(client, t, client_timer);
-#else
-    af_client_info_t *client = timer_container_of(client, t, client_timer);
-#endif
-#else
-static void client_timer_handler(unsigned long data)
-{
-    af_client_info_t *client = (af_client_info_t *)data;
-#endif
+    af_client_info_t *client = container_of(to_delayed_work(work),
+						    af_client_info_t, client_work);
+
     if (!client) {
-        AF_ERROR("client timer handler: invalid client\n");
+        AF_ERROR("client work handler: invalid client\n");
         return;
     }
 
@@ -594,38 +599,28 @@ static void client_timer_handler(unsigned long data)
 
 	af_update_client_status(client);
 	client->timer_count++;
-    mod_timer(&client->client_timer, jiffies + HZ * 2);
+	queue_delayed_work(af_workqueue, &client->client_work, HZ * 2);
 }
 
- void init_client_timer(af_client_info_t *client)
+static void init_client_work(af_client_info_t *client)
 {
     if (!client) {
-        AF_ERROR("init_client_timer: invalid client\n");
+        AF_ERROR("init_client_work: invalid client\n");
         return;
     }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
-    timer_setup(&client->client_timer, client_timer_handler, 0);
-#else
-    setup_timer(&client->client_timer, client_timer_handler, (unsigned long)client);
-#endif
-
-    mod_timer(&client->client_timer, jiffies + HZ * 1);
+	INIT_DELAYED_WORK(&client->client_work, client_work_handler);
+	queue_delayed_work(af_workqueue, &client->client_work, HZ);
 }
 
- void stop_client_timer(af_client_info_t *client)
+static void stop_client_work(af_client_info_t *client)
 {
-
     if (!client) {
-        AF_ERROR("stop_client_timer: invalid client\n");
+        AF_ERROR("stop_client_work: invalid client\n");
         return;
     }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
-    del_timer_sync(&client->client_timer);
-#else
-    timer_delete_sync(&client->client_timer);
-#endif
+	cancel_delayed_work_sync(&client->client_work);
 }
 
 
@@ -634,6 +629,11 @@ static void client_timer_handler(unsigned long data)
 int af_client_init(void)
 {
 	int err;
+
+	af_workqueue = alloc_ordered_workqueue("oaf_work", WQ_MEM_RECLAIM);
+	if (!af_workqueue)
+		return -ENOMEM;
+
 	nf_client_list_init();
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
 	err = nf_register_net_hooks(&init_net, af_client_ops, ARRAY_SIZE(af_client_ops));
@@ -642,6 +642,10 @@ int af_client_init(void)
 #endif
 	if (err) {
 		AF_ERROR("oaf register client hooks failed!\n");
+		nf_client_list_clear();
+		destroy_workqueue(af_workqueue);
+		af_workqueue = NULL;
+		return err;
 	}
 	AF_INFO("init app afclient ........ok\n");
 
@@ -656,5 +660,7 @@ void af_client_exit(void)
 	nf_unregister_hooks(af_client_ops, ARRAY_SIZE(af_client_ops));
 #endif
 	nf_client_list_clear();
+	destroy_workqueue(af_workqueue);
+	af_workqueue = NULL;
 	return;
 }

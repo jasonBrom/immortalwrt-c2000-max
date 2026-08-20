@@ -23,11 +23,12 @@ THE SOFTWARE.
 #define __APPFILTER_CONFIG_H__
 #include <uci.h>
 
-#define MAX_SUPPORT_APP_NUM 1024
+#include "appfilter_user.h"
+
+#define MAX_SUPPORT_APP_NUM (MAX_APP_TYPE * MAX_APP_ID_NUM)
 #define MAX_CLASS_NAME_LEN 32
 #define MAX_PARAM_LIST_LEN 1024
 
-#include "appfilter_user.h"
 extern int g_cur_class_num;
 extern int g_app_count;
 extern char CLASS_NAME_TABLE[MAX_APP_TYPE][MAX_CLASS_NAME_LEN];

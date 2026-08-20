@@ -8,12 +8,38 @@ case "$1" in
 	"sample": {},
 	"reset": {},
 	"catalog": {},
+	"catalog_info": {
+		"profile": "String"
+	},
+	"catalog_search": {
+		"profile": "String",
+		"query": "String",
+		"category": "Integer",
+		"offset": "Integer",
+		"limit": "Integer"
+	},
+	"catalog_lookup": {
+		"profile": "String",
+		"ids": "String"
+	},
 	"audit": {
 		"device": "String",
 		"from": "Integer",
 		"to": "Integer"
 	},
+	"recent_audit": {
+		"offset": "Integer",
+		"limit": "Integer"
+	},
+	"feature_list": {},
+	"feature_activate": {
+		"id": "String"
+	},
+	"feature_rollback": {},
 	"feature_install": {},
+	"feature_install_status": {
+		"job_id": "String"
+	},
 	"policy_reload": {}
 }
 EOF
@@ -37,14 +63,53 @@ EOF
 			catalog)
 				exec /usr/sbin/c2000max-traffic catalog
 				;;
+			catalog_info)
+				profile="$(printf '%s' "$input" | jsonfilter -e '@.profile' 2>/dev/null)"
+				exec /usr/sbin/c2000max-traffic catalog-info "$profile"
+				;;
+			catalog_search)
+				profile="$(printf '%s' "$input" | jsonfilter -e '@.profile' 2>/dev/null)"
+				query="$(printf '%s' "$input" | jsonfilter -e '@.query' 2>/dev/null)"
+				category="$(printf '%s' "$input" | jsonfilter -e '@.category' 2>/dev/null)"
+				offset="$(printf '%s' "$input" | jsonfilter -e '@.offset' 2>/dev/null)"
+				limit="$(printf '%s' "$input" | jsonfilter -e '@.limit' 2>/dev/null)"
+				exec /usr/sbin/c2000max-traffic catalog-search "$profile" "$query" "$category" "$offset" "$limit"
+				;;
+			catalog_lookup)
+				profile="$(printf '%s' "$input" | jsonfilter -e '@.profile' 2>/dev/null)"
+				ids="$(printf '%s' "$input" | jsonfilter -e '@.ids' 2>/dev/null)"
+				exec /usr/sbin/c2000max-traffic catalog-lookup "$profile" "$ids"
+				;;
 			audit)
 				device="$(printf '%s' "$input" | jsonfilter -e '@.device' 2>/dev/null)"
 				from="$(printf '%s' "$input" | jsonfilter -e '@.from' 2>/dev/null)"
 				to="$(printf '%s' "$input" | jsonfilter -e '@.to' 2>/dev/null)"
 				exec /usr/sbin/c2000max-traffic audit "$device" "$from" "$to"
 				;;
+			recent_audit)
+				offset="$(printf '%s' "$input" | jsonfilter -e '@.offset' 2>/dev/null)"
+				limit="$(printf '%s' "$input" | jsonfilter -e '@.limit' 2>/dev/null)"
+				exec /usr/sbin/c2000max-traffic recent-audit "$offset" "$limit"
+				;;
 			feature_install)
-				exec /usr/sbin/c2000max-feature-install /tmp/c2000max-feature-upload
+				# Parsing 3000+ native applications and waiting for the kernel's
+				# generation acknowledgement can legitimately outlive an RPC/XHR.
+				# Atomically hand the upload to one detached worker instead.
+				/usr/sbin/c2000max-feature-job start /tmp/c2000max-feature-upload || true
+				;;
+			feature_install_status)
+				job_id="$(printf '%s' "$input" | jsonfilter -e '@.job_id' 2>/dev/null)"
+				/usr/sbin/c2000max-feature-job status "$job_id" || true
+				;;
+			feature_list)
+				exec /usr/sbin/c2000max-feature-manager list
+				;;
+			feature_activate)
+				id="$(printf '%s' "$input" | jsonfilter -e '@.id' 2>/dev/null)"
+				/usr/sbin/c2000max-feature-job activate "$id" || true
+				;;
+			feature_rollback)
+				/usr/sbin/c2000max-feature-job rollback || true
 				;;
 			policy_reload)
 				/usr/sbin/c2000max-traffic audit-policy >/dev/null 2>&1 || true

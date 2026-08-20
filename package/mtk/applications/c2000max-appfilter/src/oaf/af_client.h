@@ -1,5 +1,6 @@
 #ifndef __AF_CLIENT_H__
 #define __AF_CLIENT_H__
+#include <linux/workqueue.h>
 #include "app_filter.h"
 
 extern rwlock_t af_client_lock;
@@ -76,7 +77,7 @@ typedef struct af_client_info
 	flow_stat_t last_flow;
 	flow_stat_t period_flow;
 	flow_rate_t rate;
-	struct timer_list client_timer;
+	struct delayed_work client_work;
 	unsigned int visit_app_num;
 	int active_time;
 	int inactive_time;
@@ -86,6 +87,8 @@ typedef struct af_client_info
 	int report_count;
 	app_visit_info_t visit_info[MAX_RECORD_APP_NUM];
 } af_client_info_t;
+
+extern struct workqueue_struct *af_workqueue;
 
 int af_client_init(void);
 

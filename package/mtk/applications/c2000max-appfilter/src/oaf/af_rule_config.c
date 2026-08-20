@@ -9,9 +9,6 @@
 #include "af_config.h"
 #include "af_rule_config.h"
 
-#define AF_MAX_APP_TYPE_NUM 32
-#define AF_MAX_APP_NUM 512
-
 DEFINE_RWLOCK(af_rule_lock);
 
 #define af_rule_read_lock() read_lock_bh(&af_rule_lock);
@@ -21,7 +18,7 @@ DEFINE_RWLOCK(af_rule_lock);
 
 extern u_int32_t g_update_jiffies;
 
-char g_app_id_array[AF_MAX_APP_TYPE_NUM][AF_MAX_APP_NUM] = {0};
+char g_app_id_array[AF_MAX_APP_TYPE_NUM][AF_MAX_APP_ID_NUM] = {0};
 
 
 static int af_change_app_status(cJSON *data_obj, int status)
@@ -46,8 +43,12 @@ static int af_change_app_status(cJSON *data_obj, int status)
 		cJSON *appid_obj = cJSON_GetArrayItem(appid_arr, i);
 		if (!appid_obj)
 			return -1;
-		id = AF_APP_ID(appid_obj->valueint);
-		type = AF_APP_TYPE(appid_obj->valueint);
+		if (!af_appid_valid(appid_obj->valueint)) {
+			AF_ERROR("invalid appid %d\n", appid_obj->valueint);
+			return -1;
+		}
+		id = AF_APP_ID_INDEX(appid_obj->valueint);
+		type = AF_APP_TYPE_INDEX(appid_obj->valueint);
 		af_rule_write_lock();
 		g_app_id_array[type][id] = status;
 		af_rule_write_unlock();
@@ -64,7 +65,7 @@ void af_init_app_status(void)
 
 	for (i = 0; i < AF_MAX_APP_TYPE_NUM; i++)
 	{
-		for (j = 0; j < AF_MAX_APP_NUM; j++)
+		for (j = 0; j < AF_MAX_APP_ID_NUM; j++)
 		{
 			af_rule_write_lock();
 			g_app_id_array[i][j] = AF_FALSE;
@@ -75,8 +76,14 @@ void af_init_app_status(void)
 int af_get_app_status(int appid)
 {
 	int status = 0;
-	int id = AF_APP_ID(appid);
-	int type = AF_APP_TYPE(appid);
+	int id;
+	int type;
+
+	if (!af_appid_valid(appid))
+		return AF_FALSE;
+
+	id = AF_APP_ID_INDEX(appid);
+	type = AF_APP_TYPE_INDEX(appid);
 	af_rule_read_lock();
 	status = g_app_id_array[type][id];
 	af_rule_read_unlock();

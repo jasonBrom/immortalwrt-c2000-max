@@ -3,7 +3,7 @@
 		"description": "Grant access to C2000MAX traffic accounting",
 		"read": {
 			"ubus": {
-				"c2000max.traffic": [ "status", "catalog", "audit" ]
+				"c2000max.traffic": [ "status", "catalog", "catalog_info", "catalog_search", "catalog_lookup", "audit", "recent_audit", "feature_list", "feature_install_status" ]
 			},
 			"uci": [ "c2000max_traffic" ]
 		},
@@ -13,7 +13,7 @@
 				"/tmp/c2000max-feature-upload": [ "write" ]
 			},
 			"ubus": {
-				"c2000max.traffic": [ "sample", "reset", "feature_install", "policy_reload" ]
+				"c2000max.traffic": [ "sample", "reset", "feature_install", "feature_activate", "feature_rollback", "policy_reload" ]
 			},
 			"uci": [ "c2000max_traffic" ]
 		}

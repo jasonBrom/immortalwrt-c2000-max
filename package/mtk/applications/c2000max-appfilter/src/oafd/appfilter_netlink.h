@@ -26,6 +26,7 @@ THE SOFTWARE.
 #define MAX_OAF_NETLINK_MSG_LEN 1024
 #define MAX_AF_MSG_DATA_LEN 800
 #define MAX_FEATURE_LINE_LEN 600
+#define MAX_FEATURE_NUM_TOTAL 32768
 
 struct af_msg_hdr
 {
@@ -37,7 +38,8 @@ enum E_MSG_TYPE
 {
     AF_MSG_INIT,
     AF_MSG_ADD_FEATURE,
-    AF_MSG_CLEAN_FEATURE,
+    AF_MSG_RELOAD_BEGIN,
+    AF_MSG_RELOAD_COMMIT,
     AF_MSG_MAX
 };
 
@@ -45,6 +47,12 @@ typedef struct af_msg
 {
     int action;
 } af_msg_t;
+
+typedef struct af_reload_commit_msg
+{
+    af_msg_t hdr;
+    unsigned int expected_count;
+} af_reload_commit_msg_t;
 
 typedef struct af_feature_msg{
     af_msg_t hdr;

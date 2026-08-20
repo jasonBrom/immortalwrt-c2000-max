@@ -48,6 +48,8 @@ af_config_t g_af_config;
 int g_hnat_init = 0;
 int g_feature_update = 0;
 int g_feature_update_time = 0;
+static volatile sig_atomic_t sigusr1_pending;
+static volatile sig_atomic_t sigusr2_pending;
 void oaf_timeout_handler(struct uloop_timeout *t);
 
 void af_init_time_status(void){
@@ -676,14 +678,115 @@ void update_oaf_app_filter_mode_status(void){
 }
 
 
-int af_nl_clean_feature(void){
+static int af_nl_begin_feature_reload(void){
     af_msg_t msg;
     if (appfilter_nl_fd.fd < 0){
         return -1;
     }
-    msg.action = AF_MSG_CLEAN_FEATURE;
+    msg.action = AF_MSG_RELOAD_BEGIN;
 
 	return send_msg_to_kernel(appfilter_nl_fd.fd, (void *)&msg, sizeof(msg));
+}
+
+static int af_nl_commit_feature_reload(unsigned int expected_count)
+{
+	af_reload_commit_msg_t msg;
+
+	if (appfilter_nl_fd.fd < 0 || expected_count == 0 ||
+	    expected_count > MAX_FEATURE_NUM_TOTAL)
+		return -1;
+	memset(&msg, 0, sizeof(msg));
+	msg.hdr.action = AF_MSG_RELOAD_COMMIT;
+	msg.expected_count = expected_count;
+	return send_msg_to_kernel(appfilter_nl_fd.fd, &msg, sizeof(msg));
+}
+
+static int af_read_feature_state(unsigned int *count, unsigned int *generation)
+{
+	FILE *fp;
+
+	if (!count || !generation)
+		return -1;
+	fp = fopen("/proc/sys/oaf/feature_init", "r");
+	if (!fp)
+		return -1;
+	if (fscanf(fp, "%u", count) != 1) {
+		fclose(fp);
+		return -1;
+	}
+	fclose(fp);
+	fp = fopen("/proc/sys/oaf/feature_generation", "r");
+	if (!fp)
+		return -1;
+	if (fscanf(fp, "%u", generation) != 1) {
+		fclose(fp);
+		return -1;
+	}
+	fclose(fp);
+	return 0;
+}
+
+static int af_feature_line_count(const char *line, unsigned int *count)
+{
+	const char *begin;
+	const char *end;
+	const char *cursor;
+	unsigned int total = 1;
+
+	if (!line || !count)
+		return -1;
+	begin = strstr(line, ":[");
+	if (!begin)
+		return -1;
+	begin += 2;
+	end = strrchr(begin, ']');
+	if (!end || end <= begin)
+		return -1;
+	for (cursor = begin; cursor < end; cursor++)
+		if (*cursor == ',')
+			total++;
+	*count = total;
+	return 0;
+}
+
+static int af_scan_feature_file(const char *path, unsigned int *feature_count)
+{
+	char line_buf[MAX_FEATURE_LINE_LEN + 1];
+	unsigned int line_feature_count;
+	unsigned int total = 0;
+	FILE *fp;
+	size_t len;
+	int ret = -1;
+
+	if (!path || !feature_count)
+		return -1;
+	fp = fopen(path, "r");
+	if (!fp)
+		return -1;
+
+	while (fgets(line_buf, sizeof(line_buf), fp)) {
+		len = strlen(line_buf);
+		/* A complete maximum-size record plus its newline fits this buffer.
+		 * Absence of a newline before EOF therefore means an overlong line. */
+		if (!memchr(line_buf, '\n', len) && !feof(fp))
+			goto out;
+		str_trim(line_buf);
+		len = strlen(line_buf);
+		if (len == 0 || len < 8 || strchr(line_buf, '#'))
+			continue;
+		if (len >= MAX_FEATURE_LINE_LEN ||
+		    af_feature_line_count(line_buf, &line_feature_count) < 0 ||
+		    line_feature_count > MAX_FEATURE_NUM_TOTAL - total)
+			goto out;
+		total += line_feature_count;
+	}
+	if (ferror(fp) || !total)
+		goto out;
+	*feature_count = total;
+	ret = 0;
+out:
+	fclose(fp);
+	return ret;
 }
 
 int af_nl_add_feature(char *feature){
@@ -708,49 +811,111 @@ int af_nl_add_feature(char *feature){
 
 
 int af_load_feature_to_kernel(void){
-	char line_buf[MAX_FEATURE_LINE_LEN] = {0};
-	FILE *fp = fopen("/tmp/feature.cfg", "r");
-	if (!fp)
-	{
+	char line_buf[MAX_FEATURE_LINE_LEN + 1] = {0};
+	unsigned int expected_count;
+	unsigned int sent_count = 0;
+	unsigned int kernel_count;
+	unsigned int generation_before;
+	unsigned int generation_after;
+	unsigned int line_feature_count;
+	size_t len;
+	FILE *fp;
+
+	/* Do a complete first pass before BEGIN. A read error or truncated line
+	 * must not turn a prefix of the selected library into a valid commit. */
+	if (af_scan_feature_file("/tmp/feature.cfg", &expected_count) < 0)
+		return -1;
+	fp = fopen("/tmp/feature.cfg", "r");
+	if (!fp) {
 		printf("open file failed\n");
 		return -1;
 	}
-	if (af_nl_clean_feature() < 0){
+	if (af_read_feature_state(&kernel_count, &generation_before) < 0 ||
+	    af_nl_begin_feature_reload() < 0) {
 		fclose(fp);
-        return -1;
-    }
-	while (fgets(line_buf, sizeof(line_buf), fp))
-	{
+		return -1;
+	}
+	while (fgets(line_buf, sizeof(line_buf), fp)) {
+		len = strlen(line_buf);
+		if (!memchr(line_buf, '\n', len) && !feof(fp)) {
+			fclose(fp);
+			return -1;
+		}
 		str_trim(line_buf);
-		if (strlen(line_buf) < 8)
+		len = strlen(line_buf);
+		if (len == 0 || len < 8 || strchr(line_buf, '#'))
 			continue;
-		if (strstr(line_buf, "#"))
-			continue;
-
-		if (strlen(line_buf) >= MAX_FEATURE_LINE_LEN - 1){
-			continue;
+		if (len >= MAX_FEATURE_LINE_LEN ||
+		    af_feature_line_count(line_buf, &line_feature_count) < 0 ||
+		    line_feature_count > MAX_FEATURE_NUM_TOTAL - sent_count) {
+			fclose(fp);
+			return -1;
 		}
 		if (af_nl_add_feature(line_buf) < 0) {
 			fclose(fp);
 			return -1;
 		}
+		sent_count += line_feature_count;
+	}
+	if (ferror(fp) || sent_count != expected_count) {
+		fclose(fp);
+		return -1;
 	}
 	fclose(fp);
-    return 0;
+	if (af_nl_commit_feature_reload(expected_count) < 0)
+		return -1;
+	if (af_read_feature_state(&kernel_count, &generation_after) < 0 ||
+	    kernel_count != expected_count ||
+	    generation_after == generation_before)
+		return -1;
+	return 0;
 }
 
 int reload_feature(void){
-    system("gen_class.sh /tmp/feature.cfg");
-    init_app_name_table();
-    init_app_class_name_table();
+    if (system("gen_class.sh /tmp/feature.cfg") != 0) {
+        LOG_ERROR("Failed to generate feature catalog\n");
+        return -1;
+    }
     if (af_load_feature_to_kernel() < 0){
         LOG_ERROR("Failed to load feature to kernel\n");
         return -1;
     }
+    init_app_name_table();
+    init_app_class_name_table();
     clean_invalid_app_records();
     clear_device_app_statistics();
     LOG_WARN("reload feature success\n");
     g_feature_update_time = get_timestamp();
+    return 0;
+}
+
+static int initialise_boot_feature_state(void)
+{
+    unsigned int expected_count;
+    unsigned int kernel_count;
+    unsigned int generation;
+
+    /* app_filter_init() already compiled /tmp/feature.cfg synchronously before
+     * registering its packet hooks.  Reloading that same 12k-rule native IK
+     * profile again as soon as oafd starts doubles the peak rule memory and
+     * repeats all regex compilation on a thermally constrained dual-A53 SoC.
+     * Reuse the boot database only after its exact node count matches a full
+     * userspace scan; a mismatch falls back to the normal atomic reload. */
+    if (system("gen_class.sh /tmp/feature.cfg") != 0 ||
+        af_scan_feature_file("/tmp/feature.cfg", &expected_count) < 0 ||
+        af_read_feature_state(&kernel_count, &generation) < 0 ||
+        kernel_count != expected_count) {
+        LOG_WARN("boot feature database is not ready; schedule atomic reload\n");
+        return -1;
+    }
+
+    init_app_name_table();
+    init_app_class_name_table();
+    clean_invalid_app_records();
+    clear_device_app_statistics();
+    g_feature_update_time = get_timestamp();
+    LOG_WARN("reuse boot feature database, count=%u generation=%u\n",
+             kernel_count, generation);
     return 0;
 }
 
@@ -777,6 +942,34 @@ void check_date_change(void)
 void oaf_timeout_handler(struct uloop_timeout *t)
 {
     static int count = 0;
+    sigset_t signal_set;
+    sigset_t old_set;
+    sig_atomic_t reload_pending;
+    sig_atomic_t log_level_pending;
+
+    sigemptyset(&signal_set);
+    sigaddset(&signal_set, SIGUSR1);
+    sigaddset(&signal_set, SIGUSR2);
+    sigprocmask(SIG_BLOCK, &signal_set, &old_set);
+    reload_pending = sigusr1_pending;
+    log_level_pending = sigusr2_pending;
+    sigusr1_pending = 0;
+    sigusr2_pending = 0;
+    sigprocmask(SIG_SETMASK, &old_set, NULL);
+
+    if (reload_pending) {
+        LOG_WARN("Received SIGUSR1 signal\n");
+        g_feature_update = 1;
+    }
+    if (log_level_pending) {
+        if (current_log_level >= LOG_LEVEL_ERROR)
+            current_log_level = LOG_LEVEL_DEBUG;
+        else
+            current_log_level++;
+        LOG_WARN("Received SIGUSR2; change log level to %d\n",
+                 current_log_level);
+    }
+
     if (count % 10 == 0){
         update_dev_list();
 		update_oaf_status();
@@ -845,17 +1038,13 @@ void af_load_engine(void){
 
 
 void handle_sigusr1(int sig) {
-    LOG_WARN("Received SIGUSR1 signal\n");
-    g_feature_update = 1;
+    (void)sig;
+    sigusr1_pending = 1;
 }
 
 void handle_sigusr2(int sig) {
-    LOG_INFO("Received SIGUSR2 signal\n");
-	if (current_log_level >= LOG_LEVEL_ERROR)
-		current_log_level = LOG_LEVEL_DEBUG;
-	else
-		current_log_level++;
-	LOG_WARN("change log level to %d\n", current_log_level);
+    (void)sig;
+    sigusr2_pending = 1;
 }
 
 
@@ -863,12 +1052,14 @@ int main(int argc, char **argv)
 {
     int ret = 0;
     LOG_INFO("appfilter start");
-    g_feature_update = 1;
+    g_feature_update = 0;
     af_load_config(&g_af_config);
     af_load_engine();
     af_init_status();
-    /* C2000MAX starts the module before the daemon. Apply classification and
-     * recording state immediately instead of waiting for a later UCI event. */
+    if (initialise_boot_feature_state() < 0)
+        g_feature_update = 1;
+    /* Keep the kernel fail-open until the boot database and userspace catalog
+     * have been cross-checked.  Only then enable classification/recording. */
     update_oaf_status();
     update_oaf_record_status();
     update_oaf_disable_quic_status();

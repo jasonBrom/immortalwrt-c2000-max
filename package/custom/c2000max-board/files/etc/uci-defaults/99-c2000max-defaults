@@ -190,7 +190,7 @@ if [ -z "$wan_zone" ]; then
 	uci -q set "firewall.${wan_zone}.output=ACCEPT"
 fi
 wan_networks="$(uci -q get "firewall.${wan_zone}.network")"
-for wan_network in wan wan6 c2000_wan c2000_wan6; do
+for wan_network in wan wan6 eth2 eth2v6 c2000_wan c2000_wan6; do
 	c2000_list_has "$wan_networks" "$wan_network" ||
 		uci -q add_list "firewall.${wan_zone}.network=$wan_network"
 done
@@ -395,6 +395,27 @@ if [ "$(uci -q get c2000max.migration.cpu_defaults_v16)" != '1' ]; then
 	uci -q set cpufreq.global.set='1'
 	uci -q set c2000max.migration='migration'
 	uci -q set c2000max.migration.cpu_defaults_v16='1'
+fi
+
+# The former factory profile pinned both A53 cores at 2 GHz while leaving the
+# board fan disabled.  A reboot report from that build measured both thermal
+# zones around 85 C within one minute.  Migrate only the exact old CPU profile
+# and exact old fan profile; preserve any deliberately customised values.
+if [ "$(uci -q get c2000max.migration.thermal_defaults_v37)" != '1' ]; then
+	if [ "$(uci -q get cpufreq.cpufreq.governor0)" = 'performance' ] &&
+	   [ "$(uci -q get cpufreq.cpufreq.minfreq0)" = '500000' ] &&
+	   [ "$(uci -q get cpufreq.cpufreq.maxfreq0)" = '2000000' ]; then
+		uci -q set cpufreq.cpufreq.governor0='schedutil'
+	fi
+	if [ "$(uci -q get c2000max.fan.enabled)" = '0' ] &&
+	   [ "$(uci -q get c2000max.fan.mode)" = 'smart' ] &&
+	   [ "$(uci -q get c2000max.fan.temp_low)" = '55' ] &&
+	   [ "$(uci -q get c2000max.fan.temp_medium)" = '65' ] &&
+	   [ "$(uci -q get c2000max.fan.temp_high)" = '75' ]; then
+		uci -q set c2000max.fan.enabled='1'
+	fi
+	uci -q set c2000max.migration='migration'
+	uci -q set c2000max.migration.thermal_defaults_v37='1'
 fi
 
 # Remove the V14/V15 module URLs.  Besides cleaning a possible overlay copy,

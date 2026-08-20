@@ -22,6 +22,7 @@ typedef struct {
     u8  protocol;
     u32 total_pkts;
     u32 app_id;
+	u32 fallback_app_id;
 	u8 client_hello;
     u8  drop;
     u8 ignore;

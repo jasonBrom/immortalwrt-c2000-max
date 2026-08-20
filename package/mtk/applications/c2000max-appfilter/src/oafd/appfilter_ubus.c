@@ -444,43 +444,38 @@ typedef struct app_visit_time_info
     unsigned long long total_time;
 } app_visit_time_info_t;
 
-int visit_time_compare(const void *a, const void *b)
-{
-    app_visit_time_info_t *p1 = (app_visit_time_info_t *)a;
-    app_visit_time_info_t *p2 = (app_visit_time_info_t *)b;
-    return p1->total_time < p2->total_time ? 1 : -1;
-}
-
-#define MAX_STAT_APP_NUM 128
+#define TOP_APP_NUM 5
 void update_top5_app(dev_node_t *node, app_visit_time_info_t top5_app_list[])
 {
-    int i, j;
-    app_visit_time_info_t app_visit_array[MAX_STAT_APP_NUM];
-    memset(app_visit_array, 0x0, sizeof(app_visit_array));
-    int app_visit_num = 0;
+    int i, j, rank, shift;
+
+    if (!node || !top5_app_list)
+        return;
+
+    memset(top5_app_list, 0, sizeof(*top5_app_list) * TOP_APP_NUM);
 
     for (i = 0; i < MAX_APP_TYPE; i++)
     {
         for (j = 0; j < MAX_APP_ID_NUM; j++)
         {
-            if (node->stat[i][j].total_time == 0)
-                continue;
-            app_visit_array[app_visit_num].app_id = (i + 1) * 1000 + j + 1;
-            app_visit_array[app_visit_num].total_time = node->stat[i][j].total_time;
-            app_visit_num++;
-        }
-    }
+            unsigned long long total_time = node->stat[i][j].total_time;
+            int app_id = (i + 1) * 1000 + j + 1;
 
-    qsort((void *)app_visit_array, app_visit_num, sizeof(app_visit_time_info_t), visit_time_compare);
-#if 0
-for (i = 0; i < app_visit_num; i++){
-printf("appid %d-----------total time %llu\n", app_visit_array[i].app_id,
-app_visit_array[i].total_time);
-}
-#endif
-    for (i = 0; i < 5; i++)
-    {
-        top5_app_list[i] = app_visit_array[i];
+            if (total_time == 0)
+                continue;
+
+            for (rank = 0; rank < TOP_APP_NUM; rank++)
+            {
+                if (total_time <= top5_app_list[rank].total_time)
+                    continue;
+
+                for (shift = TOP_APP_NUM - 1; shift > rank; shift--)
+                    top5_app_list[shift] = top5_app_list[shift - 1];
+                top5_app_list[rank].app_id = app_id;
+                top5_app_list[rank].total_time = total_time;
+                break;
+            }
+        }
     }
 }
 
@@ -502,11 +497,11 @@ appfilter_handle_dev_list(struct ubus_context *ctx, struct ubus_object *obj,
         {
             struct json_object *dev_obj = json_object_new_object();
             struct json_object *app_array = json_object_new_array();
-            app_visit_time_info_t top5_app_list[5];
+            app_visit_time_info_t top5_app_list[TOP_APP_NUM];
             memset(top5_app_list, 0x0, sizeof(top5_app_list));
             update_top5_app(node, top5_app_list);
 
-            for (j = 0; j < 5; j++)
+            for (j = 0; j < TOP_APP_NUM; j++)
             {
                 if (top5_app_list[j].app_id == 0 || strlen(get_app_name_by_id(top5_app_list[j].app_id)) == 0)
                     break;
@@ -629,6 +624,8 @@ handle_app_class_visit_time(struct ubus_context *ctx, struct ubus_object *obj,
     {
         if (i >= g_cur_class_num)
             break;
+        if (CLASS_NAME_TABLE[i][0] == '\0')
+            continue;
         struct json_object *app_class_obj = json_object_new_object();
         json_object_object_add(app_class_obj, "type", json_object_new_int(i));
         json_object_object_add(app_class_obj, "name", json_object_new_string(CLASS_NAME_TABLE[i]));
@@ -677,11 +674,16 @@ static int parse_feature_cfg(struct json_object *class_list) {
             app_list = json_object_new_array();
         } else if (current_class) {
             char *p_end = strstr(line, ":");
+            size_t app_len;
+
             if (!p_end) {
                 continue;
             }
-            strncpy(app_buf, line, p_end - line);
-            app_buf[p_end - line] = '\0';
+            app_len = p_end - line;
+            if (app_len == 0 || app_len >= sizeof(app_buf))
+                continue;
+            memcpy(app_buf, line, app_len);
+            app_buf[app_len] = '\0';
             char *appid_str = strtok(app_buf, " ");
             char *name = strtok(NULL, " ");
             if (appid_str && name) {
@@ -727,7 +729,7 @@ static int handle_get_class_list(struct ubus_context *ctx, struct ubus_object *o
 
     return 0;
 }
-#define MAX_APPFILTER_STR_LEN 8192
+#define MAX_APPFILTER_STR_LEN (MAX_SUPPORT_APP_NUM * 6 + 1)
 static int handle_get_app_filter(struct ubus_context *ctx, struct ubus_object *obj,
                                  struct ubus_request_data *req, const char *method,
                                  struct blob_attr *msg) {
@@ -745,7 +747,8 @@ static int handle_get_app_filter(struct ubus_context *ctx, struct ubus_object *o
     appfilter_buf[0] = '\0';
     struct json_object *response = json_object_new_object();
     struct json_object *app_list = json_object_new_array();
-    af_uci_get_list_value(uci_ctx, "appfilter.rule.app_list", appfilter_buf, MAX_APPFILTER_STR_LEN - 1, " ");
+    af_uci_get_list_value(uci_ctx, "appfilter.rule.app_list", appfilter_buf,
+                          MAX_APPFILTER_STR_LEN, " ");
     char *app_id_str = strtok(appfilter_buf, " ");
     while (app_id_str) {
         json_object_array_add(app_list, json_object_new_int(atoi(app_id_str)));
@@ -1496,10 +1499,10 @@ void all_users_callback(void *arg, dev_node_t *dev)
 
     if (flag > 2){
         struct json_object *app_array = json_object_new_array();
-        app_visit_time_info_t top5_app_list[5];
+        app_visit_time_info_t top5_app_list[TOP_APP_NUM];
         memset(top5_app_list, 0x0, sizeof(top5_app_list));
         update_top5_app(dev, top5_app_list);
-        for (i = 0; i < 5; i++)
+        for (i = 0; i < TOP_APP_NUM; i++)
         {
             if (top5_app_list[i].app_id == 0 || strlen(get_app_name_by_id(top5_app_list[i].app_id)) == 0)
                 break;

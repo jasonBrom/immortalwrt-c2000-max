@@ -1,0 +1,157 @@
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
+@@ -1121,6 +1121,9 @@
+ 	spinlock_t		flow_entry_lock;
+ 	spinlock_t		mib_lock[MAX_PPE_NUM];
+ 	spinlock_t		reg_lock[MAX_PPE_NUM];
++	struct mutex		mib_sync_lock;
++	u32			mib_sync_ppe;
++	u32			mib_sync_index;
+ 	spinlock_t		ext_if_lock;
+ 	spinlock_t		rx_ppdev_lock;
+ 	struct mutex		hook_lock;
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
+@@ -2296,6 +2296,9 @@
+ 		spin_lock_init(&h->mib_lock[i]);
+ 		spin_lock_init(&h->reg_lock[i]);
+ 	}
++	mutex_init(&h->mib_sync_lock);
++	h->mib_sync_ppe = 0;
++	h->mib_sync_index = 0;
+ 	spin_lock_init(&h->ext_if_lock);
+ 	spin_lock_init(&h->rx_ppdev_lock);
+ 	mutex_init(&h->hook_lock);
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
+@@ -1197,11 +1197,11 @@
+ 	spin_lock_bh(&h->mib_lock[ppe_id]);
+ 	writel(index | (1 << 16), h->ppe_base[ppe_id] + PPE_MIB_SER_CR);
+ 	ret = readx_poll_timeout_atomic(readl, h->ppe_base[ppe_id] + PPE_MIB_SER_CR, val,
+-					!(val & BIT_MIB_BUSY), 20, 10000);
++					!(val & BIT_MIB_BUSY), 20, 1000);
+ 
+ 	if (ret < 0) {
+ 		spin_unlock_bh(&h->mib_lock[ppe_id]);
+-		pr_notice("mib busy, please check later\n");
++		pr_notice_ratelimited("mib busy, please check later\n");
+ 		return ret;
+ 	}
+ 	cnt_r0 = readl(h->ppe_base[ppe_id] + PPE_MIB_SER_R0);
+@@ -1375,6 +1375,108 @@
+ 	return &h->acct[ppe_id][index];
+ }
+ 
++#define HNAT_MIB_SYNC_SCAN_BUDGET	8192U
++#define HNAT_MIB_SYNC_READ_BUDGET	128U
++#define HNAT_MIB_SYNC_RESCHED_INTERVAL	256U
++
++static int hnat_mib_sync_show(struct seq_file *m, void *private)
++{
++	struct mtk_hnat *h = m->private;
++	struct foe_entry *entry;
++	u32 ppe_id, index, ppe_num, entry_count;
++	u32 scanned = 0, attempted = 0, synced = 0;
++	u32 total_slots = 0, skipped_ppe = 0, i;
++	int ret;
++
++	ret = hnat_debugfs_lifecycle_trylock(h);
++	if (ret)
++		return ret;
++
++	if (!h->data->per_flow_accounting) {
++		ret = 0;
++		goto out_lifecycle;
++	}
++
++	if (mutex_lock_interruptible(&h->mib_sync_lock)) {
++		ret = -ERESTARTSYS;
++		goto out_lifecycle;
++	}
++
++	ppe_num = min_t(u32, READ_ONCE(h->ppe_num), MAX_PPE_NUM);
++	for (i = 0; i < ppe_num; i++) {
++		if (!hnat_debugfs_ppe_ready(h, i) ||
++		    !READ_ONCE(h->foe_table_cpu[i]))
++			continue;
++		total_slots += READ_ONCE(h->foe_etry_num_ppe[i]);
++	}
++
++	ppe_id = READ_ONCE(h->mib_sync_ppe);
++	index = READ_ONCE(h->mib_sync_index);
++	if (!ppe_num || !total_slots || ppe_id >= ppe_num) {
++		ppe_id = 0;
++		index = 0;
++	}
++
++	/* A full FOE walk can issue one atomic MIB transaction for every bound
++	 * entry.  On a busy dual-PPE router that monopolises the CPU long enough
++	 * to starve the watchdog.  Rotate through a bounded slice instead and keep
++	 * the cursor for the next collector sample. */
++	while (scanned < total_slots &&
++	       scanned < HNAT_MIB_SYNC_SCAN_BUDGET &&
++	       attempted < HNAT_MIB_SYNC_READ_BUDGET) {
++		entry_count = READ_ONCE(h->foe_etry_num_ppe[ppe_id]);
++		if (!hnat_debugfs_ppe_ready(h, ppe_id) ||
++		    !READ_ONCE(h->foe_table_cpu[ppe_id]) ||
++		    !entry_count) {
++			index = 0;
++			ppe_id = (ppe_id + 1) % ppe_num;
++			if (++skipped_ppe >= ppe_num)
++				break;
++			continue;
++		}
++		skipped_ppe = 0;
++		if (index >= entry_count)
++			index = 0;
++
++		entry = &h->foe_table_cpu[ppe_id][index];
++		if (entry->bfib1.state == BIND) {
++			attempted++;
++			if (hnat_get_count(h, ppe_id, index, NULL))
++				synced++;
++		}
++		scanned++;
++		index++;
++		if (index >= entry_count) {
++			index = 0;
++			ppe_id = (ppe_id + 1) % ppe_num;
++		}
++		if (!(scanned % HNAT_MIB_SYNC_RESCHED_INTERVAL))
++			cond_resched();
++	}
++
++	WRITE_ONCE(h->mib_sync_ppe, ppe_id);
++	WRITE_ONCE(h->mib_sync_index, index);
++	mutex_unlock(&h->mib_sync_lock);
++	seq_printf(m, "%u\n", synced);
++	ret = 0;
++
++out_lifecycle:
++	mutex_unlock(&h->lifecycle_lock);
++	return ret;
++}
++
++static int hnat_mib_sync_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, hnat_mib_sync_show, file->private_data);
++}
++
++static const struct file_operations hnat_mib_sync_fops = {
++	.open = hnat_mib_sync_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++
+ #define PRINT_COUNT(m, acct) {if (acct) \
+ 		seq_printf(m, "bytes=%llu|packets=%llu|", \
+ 			   acct->bytes, acct->packets); }
+@@ -5057,6 +5159,7 @@
+ 	}
+ 
+ 	debugfs_create_file("all_entry", 0444, root, h, &hnat_debug_fops);
++	debugfs_create_file("mib_sync", 0444, root, h, &hnat_mib_sync_fops);
+ 	debugfs_create_file("external_interface", 0444, root, h,
+ 			    &hnat_ext_fops);
+ 	debugfs_create_file("whnat_interface", 0444, root, h,

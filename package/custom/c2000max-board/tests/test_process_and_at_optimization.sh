@@ -28,6 +28,17 @@ grep -Fq "kill \"\$sleeper\"" "$WORKER" ||
 
 grep -Fq 'get c2000max.fan.enabled' "$FAN_INIT" ||
 	fail 'disabled fan still starts its polling daemon'
+grep -q '^START=18$' "$FAN_INIT" ||
+	fail 'fan does not start early enough to cover boot-time thermal load'
+grep -A2 -F "config fan 'fan'" "$ROOT/files/etc/config/c2000max" |
+	grep -Fq "option enabled '1'" ||
+	fail 'safe smart-fan factory default is not enabled'
+grep -Fq "cpufreq.default_governor=schedutil" "$DTS" ||
+	fail 'board kernel command line still pins the CPU to performance'
+grep -Fq 'ramoops@5ff80000' "$DTS" ||
+	fail 'board has no persistent kernel crash log reservation'
+sed -n '/ramoops@5ff80000/,/};/p' "$DTS" | grep -Fq 'no-map;' ||
+	fail 'ramoops memory can still be allocated as ordinary DDR'
 grep -Fq "interval=15" "$LEDS" ||
 	fail 'RGB status poll is not reduced to 15 seconds'
 

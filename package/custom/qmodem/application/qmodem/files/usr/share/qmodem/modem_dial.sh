@@ -637,29 +637,40 @@ check_ip()
         fi
 }
 
-append_to_fw_zone()
+find_wan_fw_zone()
 {
-    local fw_zone=$1
-    local if_name=$2
-    source /etc/os-release
-    local os_version=${VERSION_ID:0:2}
-    if [ "$os_version" -le 21 ];then
-        has_ifname=0
-        origin_line=$(uci -q get firewall.@zone[${fw_zone}].network)
-        for i in $origin_line
-        do
-            if [ "$i" = "$if_name" ];then
-                has_ifname=1
-            fi
-        done
-        if [ -n "$origin_line" ] && [ "$has_ifname" -eq 0 ];then
-            uci set firewall.@zone[${fw_zone}].network="${origin_line} ${if_name}"
-        elif [ -z "$origin_line" ];then
-            uci set firewall.@zone[${fw_zone}].network="${if_name}"
-        fi
-    else
-        uci add_list firewall.@zone[${fw_zone}].network=${if_name}
+    # Do not infer an anonymous section index from the number of matching
+    # zones.  A user's WAN zone is not required to be @zone[1].
+    uci -q show firewall 2>/dev/null | sed -n \
+        -e "s/^firewall\.\([^.=]*\)\.name='wan'$/\1/p" \
+        -e 's/^firewall\.\([^.=]*\)\.name="wan"$/\1/p' \
+        -e 's/^firewall\.\([^.=]*\)\.name=wan$/\1/p' | head -n 1
+}
+
+ensure_wan_zone_network()
+{
+    local if_name="$1"
+    local fw_zone origin_line network_name
+
+    [ -n "$if_name" ] || return 1
+    fw_zone=$(find_wan_fw_zone)
+    if [ -z "$fw_zone" ]; then
+        m_debug "cannot attach interface $if_name: WAN firewall zone not found"
+        return 1
     fi
+
+    origin_line=$(uci -q get "firewall.${fw_zone}.network")
+    for network_name in $origin_line; do
+        [ "$network_name" = "$if_name" ] && return 0
+    done
+
+    if ! uci -q add_list "firewall.${fw_zone}.network=${if_name}"; then
+        m_debug "cannot attach interface $if_name to WAN firewall zone $fw_zone"
+        return 1
+    fi
+    firewall_reload_flag=1
+    m_debug "attach interface $if_name to WAN firewall zone $fw_zone"
+    return 0
 }
 
 set_if()
@@ -735,7 +746,6 @@ set_if()
     [ "$fm350_ipv6_transport" -eq 1 ] && base_proto="none"
     interface=$(uci -q get network.$interface_name)
     interfacev6=$(uci -q get network.$interface6_name)
-    num=$(uci show firewall | grep "name='wan'" | wc -l)
     if [ "$env4" -eq 1 ] || [ "$fm350_ipv6_transport" -eq 1 ];then
         if [ -z "$interface" ];then
             uci set network.${interface_name}=interface
@@ -757,16 +767,12 @@ set_if()
             else
                 uci del network.${interface_name}.peerdns
             fi
-            if [ "$env4" -eq 1 ]; then
-                local wwan_num=$(uci -q get firewall.@zone[$num].network | grep -w "${interface_name}" | wc -l)
-                if [ "$wwan_num" = "0" ]; then
-                    append_to_fw_zone $num ${interface_name}
-                fi
-            fi
             network_reload_flag=1
-            [ "$env4" -eq 1 ] && firewall_reload_flag=1
             m_debug "create interface $interface_name with proto $(uci -q get network.${interface_name}.proto) and metric $metric"
         fi
+        # Repair the zone even when the logical network survived a reboot or
+        # sysupgrade.  The old create-only path left an existing eth2 unzoned.
+        [ "$env4" -eq 1 ] && ensure_wan_zone_network "$interface_name"
     else
         if [ -n "$interface" ];then
             uci delete network.${interface_name}
@@ -785,14 +791,10 @@ set_if()
             uci set network.${interface6_name}.device="@${interface_name}"
             uci set network.${interface6_name}.metric="${metric}"
             
-            local wwan6_num=$(uci -q get firewall.@zone[$num].network | grep -w "${interface6_name}" | wc -l)
-            if [ "$wwan6_num" = "0" ]; then
-                append_to_fw_zone $num ${interface6_name}
-            fi
             network_reload_flag=1
-            firewall_reload_flag=1
             m_debug "create interface $interface6_name with proto $protov6 and metric $metric"
         fi
+        ensure_wan_zone_network "$interface6_name"
         if [ "$ra_master" = "1" ];then
             uci set dhcp.${interface6_name}='dhcp'
             uci set dhcp.${interface6_name}.interface="${interface6_name}"

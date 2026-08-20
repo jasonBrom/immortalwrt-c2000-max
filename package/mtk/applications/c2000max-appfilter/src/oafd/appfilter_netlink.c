@@ -45,8 +45,10 @@ extern unsigned int g_feature_update_time;
 void appfilter_nl_handler(struct uloop_fd *u, unsigned int ev)
 {
     int ret;
+    int remaining;
     int i;
     char buf[MAX_NL_RCV_BUF_SIZE];
+    char json_buf[MAX_OAF_NETLINK_MSG_LEN];
     struct sockaddr_nl nladdr;
     struct iovec iov = {buf, sizeof(buf)};
     struct nlmsghdr *h;
@@ -54,6 +56,9 @@ void appfilter_nl_handler(struct uloop_fd *u, unsigned int ev)
     int id;
     char *mac = NULL;
     u_int32_t cur_time = get_timestamp();
+
+    memset(&nladdr, 0, sizeof(nladdr));
+    memset(buf, 0, sizeof(buf));
 
     struct msghdr msg = {
         .msg_name = &nladdr,
@@ -77,7 +82,28 @@ void appfilter_nl_handler(struct uloop_fd *u, unsigned int ev)
         return;
     }
 
+    if ((msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) ||
+        ret > (int)sizeof(buf) || msg.msg_namelen != sizeof(nladdr) ||
+        nladdr.nl_family != AF_NETLINK || nladdr.nl_pid != 0 ||
+        nladdr.nl_groups != 0 || ret < (int)NLMSG_HDRLEN)
+    {
+        printf("invalid netlink sender or truncated message\n");
+        return;
+    }
+
     h = (struct nlmsghdr *)buf;
+	remaining = ret;
+	if (!NLMSG_OK(h, remaining) || h->nlmsg_pid != 0 ||
+	    (int)NLMSG_ALIGN(h->nlmsg_len) != ret)
+	{
+		printf("invalid netlink header\n");
+		return;
+	}
+	if (NLMSG_PAYLOAD(h, 0) < sizeof(struct af_msg_hdr))
+	{
+		printf("short netlink payload\n");
+		return;
+	}
     char *kmsg = (char *)NLMSG_DATA(h);
     struct af_msg_hdr *af_hdr = (struct af_msg_hdr *)kmsg;
     if (af_hdr->magic != 0xa0b0c0d0)
@@ -86,21 +112,24 @@ void appfilter_nl_handler(struct uloop_fd *u, unsigned int ev)
         return;
     }
 
-    if (af_hdr->len <= 0 || af_hdr->len >= MAX_OAF_NETLINK_MSG_LEN)
+    if (af_hdr->len <= 0 || af_hdr->len >= MAX_OAF_NETLINK_MSG_LEN ||
+	(size_t)af_hdr->len != NLMSG_PAYLOAD(h, 0) - sizeof(*af_hdr))
     {
         printf("data len error\n");
         return;
     }
 
     char *kdata = kmsg + sizeof(struct af_msg_hdr);
-    struct json_object *root = json_tokener_parse(kdata);
+    memcpy(json_buf, kdata, af_hdr->len);
+    json_buf[af_hdr->len] = '\0';
+    struct json_object *root = json_tokener_parse(json_buf);
     if (!root)
     {
-        printf("parse json failed:%s", kdata);
+        printf("parse json failed:%s", json_buf);
         return;
     }
 
-    LOG_DEBUG("report %s\n", kdata);
+    LOG_DEBUG("report %s\n", json_buf);
     struct json_object *mac_obj = json_object_object_get(root, "mac");
 
     if (!mac_obj)
@@ -190,7 +219,8 @@ void appfilter_nl_handler(struct uloop_fd *u, unsigned int ev)
 
         type = appid / 1000;
         id = appid % 1000;
-        if (id <= 0 || type <= 0)
+        if (type < 1 || type > MAX_APP_TYPE ||
+            id < 1 || id > MAX_APP_ID_NUM)
             continue;
         node->stat[type - 1][id - 1].total_time += REPORT_INTERVAL_SECS;
         int hash = hash_appid(appid);

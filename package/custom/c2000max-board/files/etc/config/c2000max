@@ -10,7 +10,7 @@ config led 'led'
 	option good_rsrp '-80'
 
 config fan 'fan'
-	option enabled '0'
+	option enabled '1'
 	option mode 'smart'
 	option interval '5'
 	option temp_low '55'

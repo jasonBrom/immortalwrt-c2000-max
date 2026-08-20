@@ -1,0 +1,458 @@
+#!/bin/sh
+
+# Short-lived RPC front end for long feature-library imports, activation and
+# rollback.  All actions share one detached worker lease; uploaded archives
+# stay in /tmp while LuCI polls a small atomically-published JSON status file.
+
+set -u
+LC_ALL=C
+export LC_ALL
+umask 077
+
+STATE_DIR="${C2000_FEATURE_JOB_DIR:-/tmp/c2000max-feature-jobs}"
+ACTIVE_LOCK="${C2000_FEATURE_JOB_LOCK:-$STATE_DIR/active.lock}"
+CURRENT_FILE="${C2000_FEATURE_JOB_CURRENT:-$STATE_DIR/current}"
+DEFAULT_UPLOAD="${C2000_FEATURE_JOB_UPLOAD:-/tmp/c2000max-feature-upload}"
+INSTALLER="${C2000_FEATURE_JOB_INSTALLER:-/usr/sbin/c2000max-feature-install}"
+MANAGER="${C2000_FEATURE_JOB_MANAGER:-/usr/sbin/c2000max-feature-manager}"
+TRAFFIC_BIN="${C2000_FEATURE_JOB_TRAFFIC:-/usr/sbin/c2000max-traffic}"
+MAX_UPLOAD="${C2000_FEATURE_MAX_UPLOAD:-16777216}"
+SELF="$0"
+
+case "$SELF" in
+	/*) ;;
+	*) SELF="$(pwd)/$SELF" ;;
+esac
+
+is_uint()
+{
+	case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+}
+
+is_sha256()
+{
+	[ "${#1}" -eq 64 ] || return 1
+	case "$1" in *[!0-9a-f]*) return 1 ;; *) return 0 ;; esac
+}
+
+safe_path()
+{
+	case "$1" in /*) [ "$1" != / ] ;; *) return 1 ;; esac
+}
+
+ensure_state_dir()
+{
+	local owner
+	[ ! -L "$STATE_DIR" ] || return 1
+	mkdir -p "$STATE_DIR" || return 1
+	[ -d "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] || return 1
+	owner="$(stat -c '%u' "$STATE_DIR" 2>/dev/null || true)"
+	[ "$owner" = 0 ] || return 1
+	chmod 0700 "$STATE_DIR"
+}
+
+valid_job_id()
+{
+	[ -n "$1" ] && [ "${#1}" -le 80 ] || return 1
+	case "$1" in *[!0-9a-f-]*|*..*|*/*) return 1 ;; *) return 0 ;; esac
+}
+
+status_file()
+{
+	printf '%s/%s.json\n' "$STATE_DIR" "$1"
+}
+
+upload_file()
+{
+	printf '%s/%s.upload\n' "$STATE_DIR" "$1"
+}
+
+result_file()
+{
+	printf '%s/%s.result\n' "$STATE_DIR" "$1"
+}
+
+error_file()
+{
+	printf '%s/%s.error\n' "$STATE_DIR" "$1"
+}
+
+json_escape_line()
+{
+	# Callers collapse line breaks first; only JSON metacharacters remain.
+	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+publish_status()
+{
+	local job="$1" payload="$2" file tmp
+	file="$(status_file "$job")"
+	tmp="${file}.new.$$"
+	printf '%s\n' "$payload" > "$tmp" || return 1
+	chmod 0600 "$tmp" || return 1
+	mv -f "$tmp" "$file"
+}
+
+publish_running()
+{
+	local job="$1" started="$2" phase="$3" message="$4" now
+	now="$(date +%s)"
+	publish_status "$job" \
+		"{\"success\":true,\"async\":true,\"accepted\":true,\"job_id\":\"$job\",\"state\":\"running\",\"phase\":\"$phase\",\"message\":\"$message\",\"pid\":$$,\"started\":$started,\"updated\":$now}"
+}
+
+publish_failed()
+{
+	local job="$1" started="$2" message="$3" now escaped
+	now="$(date +%s)"
+	escaped="$(json_escape_line "$message")"
+	publish_status "$job" \
+		"{\"success\":false,\"async\":true,\"accepted\":true,\"job_id\":\"$job\",\"state\":\"failed\",\"phase\":\"failed\",\"message\":\"$escaped\",\"started\":$started,\"updated\":$now}"
+}
+
+publish_done()
+{
+	local job="$1" started="$2" result="$3" now
+	now="$(date +%s)"
+	publish_status "$job" \
+		"{\"success\":true,\"async\":true,\"accepted\":true,\"job_id\":\"$job\",\"state\":\"done\",\"phase\":\"done\",\"message\":\"特征库操作完成\",\"started\":$started,\"updated\":$now,\"result\":$result}"
+}
+
+read_current()
+{
+	local job=""
+	[ -r "$CURRENT_FILE" ] && IFS= read -r job < "$CURRENT_FILE" || true
+	valid_job_id "$job" && printf '%s\n' "$job"
+}
+
+status_state()
+{
+	local file="$1"
+	[ -r "$file" ] || return 0
+	sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$file" | head -n 1
+}
+
+status_started()
+{
+	local file="$1"
+	[ -r "$file" ] || return 0
+	sed -n 's/.*"started":\([0-9][0-9]*\).*/\1/p' "$file" | head -n 1
+}
+
+cleanup_job_payload()
+{
+	local job="$1"
+	rm -f "$(upload_file "$job")" "$(result_file "$job")" "$(error_file "$job")"
+}
+
+failure_message()
+{
+	local file="$1" fallback="$2" message=""
+	if [ -s "$file" ]; then
+		message="$(tail -n 8 "$file" 2>/dev/null | tr '\r\n\t' '   ' | cut -c 1-1200)"
+	fi
+	[ -n "$message" ] || message="$fallback"
+	printf '%s\n' "$message"
+}
+
+recover_interrupted()
+{
+	local job file state started
+	job="$(read_current)"
+	[ -n "$job" ] || return 0
+	file="$(status_file "$job")"
+	state="$(status_state "$file")"
+	case "$state" in queued|running) ;; *) return 0 ;; esac
+	started="$(status_started "$file")"
+	is_uint "$started" || started="$(date +%s)"
+	publish_failed "$job" "$started" "特征库操作任务被中断，请重试。" || true
+	cleanup_job_payload "$job"
+}
+
+run_worker()
+{
+	local job="$1" started="$2" action="$3" argument="$4"
+	local upload result error output message invalid_message failure_fallback worker_rc
+	# EXIT traps run after this function returns, when ash has already discarded
+	# function-local variables.  Keep the trap context in process globals so a
+	# successful detached worker cannot finish with a set -u error afterwards.
+	WORKER_JOB="$job"
+	WORKER_STARTED="$started"
+	upload="$(upload_file "$job")"
+	result="$(result_file "$job")"
+	error="$(error_file "$job")"
+
+	worker_cleanup()
+	{
+		cleanup_job_payload "$WORKER_JOB"
+	}
+	worker_interrupted()
+	{
+		cleanup_job_payload "$WORKER_JOB"
+		publish_failed "$WORKER_JOB" "$WORKER_STARTED" "特征库操作任务被中断，请重试。" || true
+		exit 1
+	}
+	trap worker_cleanup EXIT
+	trap worker_interrupted HUP INT TERM
+
+	: > "$error"
+	case "$action" in
+	install)
+		publish_running "$job" "$started" migrate "正在整理旧规则库的审计记录…" || exit 1
+		if [ -x "$TRAFFIC_BIN" ] && ! "$TRAFFIC_BIN" audit-migrate >/dev/null 2> "$error"; then
+			message="$(failure_message "$error" "整理旧规则库审计记录失败")"
+			cleanup_job_payload "$job"
+			publish_failed "$job" "$started" "$message" || true
+			return 1
+		fi
+		publish_running "$job" "$started" install "正在校验、编译并切换特征库，请保持路由器通电…" || exit 1
+		invalid_message="特征库安装器没有返回有效结果"
+		failure_fallback="特征库安装失败"
+		"$INSTALLER" "$upload" > "$result" 2> "$error"
+		worker_rc=$?
+		;;
+	activate)
+		publish_running "$job" "$started" activate "正在切换并重载选中的特征库，请保持路由器通电…" || exit 1
+		invalid_message="特征库管理器没有返回有效切换结果"
+		failure_fallback="特征库切换失败"
+		"$MANAGER" activate "$argument" > "$result" 2> "$error"
+		worker_rc=$?
+		;;
+	rollback)
+		publish_running "$job" "$started" rollback "正在回退并重载上一个特征库，请保持路由器通电…" || exit 1
+		invalid_message="特征库管理器没有返回有效回退结果"
+		failure_fallback="特征库回退失败"
+		"$MANAGER" rollback > "$result" 2> "$error"
+		worker_rc=$?
+		;;
+	*)
+		cleanup_job_payload "$job"
+		publish_failed "$job" "$started" "后台任务动作无效" || true
+		return 1
+		;;
+	esac
+	if [ "$worker_rc" -eq 0 ]; then
+		output="$(tail -n 1 "$result" 2>/dev/null | tr -d '\r\n')"
+		case "$output" in
+			\{*'"success":true'*\})
+				cleanup_job_payload "$job"
+				publish_done "$job" "$started" "$output" || exit 1
+				return 0
+				;;
+		esac
+		message="$invalid_message"
+	else
+		message="$(failure_message "$error" "$failure_fallback")"
+	fi
+	cleanup_job_payload "$job"
+	publish_failed "$job" "$started" "$message" || true
+	return 1
+}
+
+start_job()
+{
+	local action="$1" argument="${2:-}" source="" worker_argument=""
+	local size random job started file tmp current state worker queued_message
+
+	case "$action" in
+	install)
+		source="${argument:-$DEFAULT_UPLOAD}"
+		safe_path "$source" || {
+			printf '%s\n' '{"success":false,"state":"failed","message":"上传文件路径不安全"}'
+			return 1
+		}
+		queued_message="上传完成，等待后台处理…"
+		;;
+	activate)
+		is_sha256 "$argument" || {
+			printf '%s\n' '{"success":false,"state":"failed","message":"特征库 ID 格式无效"}'
+			return 1
+		}
+		worker_argument="$argument"
+		queued_message="切换任务已提交，等待后台处理…"
+		;;
+	rollback)
+		[ -z "$argument" ] || return 2
+		queued_message="回退任务已提交，等待后台处理…"
+		;;
+	*)
+		printf '%s\n' '{"success":false,"state":"failed","message":"不支持的特征库任务动作"}'
+		return 1
+		;;
+	esac
+	ensure_state_dir || {
+		printf '%s\n' '{"success":false,"state":"failed","message":"无法创建特征库任务目录"}'
+		return 1
+	}
+	exec 9> "$ACTIVE_LOCK" || {
+		printf '%s\n' '{"success":false,"state":"failed","message":"无法打开特征库任务锁"}'
+		return 1
+	}
+	if ! flock -n 9; then
+		current="$(read_current)"
+		state="running"
+		[ -z "$current" ] || state="$(status_state "$(status_file "$current")")"
+		[ -n "$state" ] || state=running
+		[ "$action" != install ] || rm -f "$source"
+		printf '{"success":false,"async":true,"accepted":false,"busy":true,"job_id":"%s","state":"%s","message":"已有特征库操作任务正在运行，请等待其完成。"}\n' \
+			"$current" "$state"
+		return 1
+	fi
+
+	# A free activity lock proves that any queued/running predecessor has lost
+	# its worker (rpcd restarts do not matter: the detached worker keeps it).
+	recover_interrupted
+	for file in "$STATE_DIR"/*.upload "$STATE_DIR"/*.result "$STATE_DIR"/*.error; do
+		[ ! -e "$file" ] || rm -f "$file"
+	done
+
+	if [ "$action" = install ]; then
+		if [ ! -f "$source" ] || [ -L "$source" ]; then
+			rm -f "$source"
+			printf '%s\n' '{"success":false,"state":"failed","message":"上传文件不存在或类型不安全"}'
+			return 1
+		fi
+		size="$(stat -c '%s' "$source" 2>/dev/null || wc -c < "$source")"
+		if ! is_uint "$size" || [ "$size" -le 0 ] || [ "$size" -gt "$MAX_UPLOAD" ]; then
+			rm -f "$source"
+			printf '%s\n' '{"success":false,"state":"failed","message":"上传文件为空或超过配置限制"}'
+			return 1
+		fi
+	fi
+
+	random="$(od -An -tx1 -N8 /dev/urandom 2>/dev/null | tr -d ' \n')"
+	case "$random" in ????????) random="${random}${random}" ;; esac
+	case "$random" in
+		????????????????) ;;
+		*) random="0000000000000000" ;;
+	esac
+	started="$(date +%s)"
+	job="${started}-$$-${random}"
+	valid_job_id "$job" || {
+		[ "$action" != install ] || rm -f "$source"
+		printf '%s\n' '{"success":false,"state":"failed","message":"无法生成安全的任务编号"}'
+		return 1
+	}
+	if [ "$action" = install ]; then
+		mv -f "$source" "$(upload_file "$job")" || {
+			rm -f "$source"
+			printf '%s\n' '{"success":false,"state":"failed","message":"无法接管上传文件"}'
+			return 1
+		}
+		chmod 0600 "$(upload_file "$job")"
+	fi
+	publish_status "$job" \
+		"{\"success\":true,\"async\":true,\"accepted\":true,\"job_id\":\"$job\",\"action\":\"$action\",\"state\":\"queued\",\"phase\":\"queued\",\"message\":\"$queued_message\",\"started\":$started,\"updated\":$started}" || {
+		cleanup_job_payload "$job"
+		printf '%s\n' '{"success":false,"state":"failed","message":"无法创建特征库任务状态"}'
+		return 1
+	}
+	tmp="${CURRENT_FILE}.new.$$"
+	printf '%s\n' "$job" > "$tmp" && chmod 0600 "$tmp" && mv -f "$tmp" "$CURRENT_FILE" || {
+		rm -f "$tmp" "$(status_file "$job")"
+		cleanup_job_payload "$job"
+		printf '%s\n' '{"success":false,"state":"failed","message":"无法发布特征库任务"}'
+		return 1
+	}
+
+	# Inherit fd 9 into a fresh shell.  Once this RPC process exits, the worker
+	# remains the sole owner of the activity lock and all RPC pipes are closed.
+	"$SELF" _run "$job" "$started" "$action" "$worker_argument" </dev/null >/dev/null 2>&1 9>&9 &
+	worker=$!
+	if ! kill -0 "$worker" 2>/dev/null; then
+		# A tiny/deduplicated library may finish before this parent gets one
+		# scheduling slice.  Never overwrite a terminal status with a false
+		# spawn failure merely because the successful worker already exited.
+		state="$(status_state "$(status_file "$job")")"
+		case "$state" in
+			done|failed) ;;
+			*)
+				cleanup_job_payload "$job"
+				publish_failed "$job" "$started" "无法启动特征库后台任务" || true
+				;;
+		esac
+		cat "$(status_file "$job")"
+		[ "$state" = done ] && return 0
+		return 1
+	fi
+	cat "$(status_file "$job")"
+}
+
+show_status()
+{
+	local job="${1:-}" file state started
+	ensure_state_dir || {
+		printf '%s\n' '{"success":false,"state":"failed","message":"无法读取特征库任务目录"}'
+		return 1
+	}
+	[ -n "$job" ] || job="$(read_current)"
+	if ! valid_job_id "$job"; then
+		printf '%s\n' '{"success":false,"state":"idle","message":"没有正在运行的特征库操作任务"}'
+		return 0
+	fi
+	file="$(status_file "$job")"
+	if [ ! -r "$file" ]; then
+		printf '{"success":false,"job_id":"%s","state":"missing","message":"找不到指定的特征库操作任务"}\n' "$job"
+		return 1
+	fi
+	state="$(status_state "$file")"
+	case "$state" in
+	queued|running)
+		if exec 8> "$ACTIVE_LOCK" && flock -n 8 2>/dev/null; then
+			started="$(status_started "$file")"
+			is_uint "$started" || started="$(date +%s)"
+			publish_failed "$job" "$started" "特征库操作任务被中断，请重试。" || true
+			cleanup_job_payload "$job"
+		fi
+		;;
+	esac
+	cat "$file"
+}
+
+safe_path "$STATE_DIR" && safe_path "$ACTIVE_LOCK" && safe_path "$CURRENT_FILE" &&
+	safe_path "$DEFAULT_UPLOAD" && safe_path "$INSTALLER" && safe_path "$MANAGER" &&
+	safe_path "$TRAFFIC_BIN" || {
+	printf '%s\n' '{"success":false,"state":"failed","message":"特征库任务路径配置不安全"}'
+	exit 1
+}
+is_uint "$MAX_UPLOAD" && [ "$MAX_UPLOAD" -gt 0 ] || {
+	printf '%s\n' '{"success":false,"state":"failed","message":"特征库上传限制配置无效"}'
+	exit 1
+}
+
+case "${1:-}" in
+start)
+	shift
+	[ "$#" -le 1 ] || exit 2
+	start_job install "${1:-$DEFAULT_UPLOAD}"
+	;;
+activate)
+	shift
+	[ "$#" -eq 1 ] || exit 2
+	start_job activate "$1"
+	;;
+rollback)
+	shift
+	[ "$#" -eq 0 ] || exit 2
+	start_job rollback ""
+	;;
+status)
+	shift
+	[ "$#" -le 1 ] || exit 2
+	show_status "${1:-}"
+	;;
+_run)
+	shift
+	[ "$#" -eq 4 ] && valid_job_id "$1" && is_uint "$2" || exit 2
+	case "$3" in
+		install|rollback) [ -z "$4" ] || exit 2 ;;
+		activate) is_sha256 "$4" || exit 2 ;;
+		*) exit 2 ;;
+	esac
+	run_worker "$1" "$2" "$3" "$4"
+	;;
+*)
+	echo "Usage: $0 start [upload] | activate <profile-sha256> | rollback | status [job-id]" >&2
+	exit 2
+	;;
+esac

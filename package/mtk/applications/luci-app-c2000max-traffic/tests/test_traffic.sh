@@ -20,7 +20,32 @@ export C2000_TRAFFIC_PERSIST_DIR="$TMP/persist"
 export C2000_FEATURE_FILE="$ROOT/../c2000max-appfilter/files/feature.cfg"
 . "$TRAFFIC"
 
+# Large audit logs must use stat's O(1) metadata path instead of making every
+# sampler/status call stream the file through BusyBox wc.
+grep -q '+coreutils-stat' "$ROOT/Makefile" ||
+	fail "traffic package does not depend on coreutils-stat"
+grep -q "stat -c '%s'" "$TRAFFIC" ||
+	fail "file_size no longer uses the stat fast path"
+truncate -s 10485761 "$TMP/file-size.sparse"
+[ "$(file_size "$TMP/file-size.sparse")" = 10485761 ] ||
+	fail "file_size stat fast path returned the wrong size"
+
 mkdir -p "$C2000_TRAFFIC_RUNTIME" "$C2000_TRAFFIC_PERSIST_DIR"
+
+# Only a collector-locked caller may rebuild/publish the recent cache.  Generic
+# status/catalog initialization must not race a sampler and overwrite its newer
+# cache with a snapshot of the old audit inode.
+(
+	marker="$TMP/recent-ensure.calls"
+	ensure_recent_audit_cache() { printf 'called\n' >> "$marker"; }
+	AUDIT_LOCK_HELD=0
+	ensure_runtime
+	[ ! -e "$marker" ] || fail "unlocked ensure_runtime rebuilt the recent cache"
+	AUDIT_LOCK_HELD=1
+	ensure_runtime
+	[ "$(wc -l < "$marker")" -eq 1 ] ||
+		fail "collector-locked ensure_runtime did not initialize the recent cache"
+)
 
 cat > "$TMP/hosts.tsv" <<'EOF'
 192.168.66.10	aa:bb:cc:dd:ee:01	phone
@@ -78,6 +103,7 @@ uci() {
 		*history_points) echo 10 ;;
 		*audit.enabled) echo "${AUDIT_SWITCH:-0}" ;;
 		*audit.retention_days) echo 30 ;;
+		*audit.ruleset) echo "${AUDIT_RULESET:-}" ;;
 	esac
 }
 append_history 1700000000
@@ -119,6 +145,549 @@ build_feature_catalog "$CATALOG"
 awk -F '\t' '$1==1003 && $2=="微博" && $3==1 {found=1} END{exit !found}' "$CATALOG" ||
 	fail "OAF v3.0 feature classes/applications were not parsed"
 
+# Native IK catalogs carry both a semantic leaf category and an internal OAF
+# storage shard.  The UI must use the former, otherwise users see categories
+# such as “其它应用1..4” from the old adapter.
+cat > "$TMP/native-catalog.tsv" <<'EOF'
+oaf_appid	name	category_id	category_name	source_appid	compiled	runtime_class_id	runtime_class_name
+9001	测试游戏	28	手机游戏	6000001	1	9	其它应用1
+9002	未编译应用	28	手机游戏	6000002	0	9	其它应用1
+EOF
+build_native_profile_catalog "$TMP/native-built.tsv" "$TMP/native-catalog.tsv"
+awk -F '\t' '$1==9001 && $2=="测试游戏" && $3==28 && $4=="手机游戏" {ok=1}
+	END {exit !(ok && NR==1)}' "$TMP/native-built.tsv" ||
+	fail "native IK catalog leaked runtime storage shards into semantic categories"
+grep -Fq 'semantic-v${CATALOG_CACHE_SCHEMA}.tsv' "$TRAFFIC" ||
+	fail "native catalog cache has no schema key to invalidate the old category layout"
+
+# Profile-aware catalogs stay lazy: metadata is cheap, search returns at most
+# one page, and lookup resolves only the selected APPIDs.  Two libraries reuse
+# APPID 1001 deliberately so history isolation also catches cross-library names.
+PROFILE_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+PROFILE_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+PROFILE_ROOT="$TMP/profiles"
+mkdir -p "$PROFILE_ROOT/$PROFILE_A" "$PROFILE_ROOT/$PROFILE_B"
+cat > "$PROFILE_ROOT/$PROFILE_A/feature.cfg" <<'EOF'
+#version v1.0-old
+#format v3.0
+#class old 1 旧分类
+1001 旧应用:[tcp;;;old.example;;]
+EOF
+{
+	printf '%s\n' '#version v8.8-fallback' '#format v3.0' '#class new 2 新分类'
+	i=1
+	while [ "$i" -le 60 ]; do
+		appid=$((1000 + i))
+		[ "$appid" -ne 1001 ] || name=新应用
+		[ "$appid" -eq 1001 ] || name="应用${i}"
+		printf '%s %s:[tcp;;;%s.example;;]\n' "$appid" "$name" "$i"
+		i=$((i + 1))
+	done
+} > "$PROFILE_ROOT/$PROFILE_B/feature.cfg"
+cat > "$PROFILE_ROOT/$PROFILE_A/profile.meta" <<EOF
+version=v1.0-old
+format=v3.0
+apps=1
+sha256=$PROFILE_A
+EOF
+cat > "$PROFILE_ROOT/$PROFILE_B/profile.meta" <<EOF
+version=v9.9-meta
+format=v3.0
+apps=60
+sha256=$PROFILE_B
+EOF
+printf '%s\n' "$PROFILE_B" > "$TMP/profile-active"
+
+FEATURE_LIBRARIES_DIR="$PROFILE_ROOT"
+FEATURE_ACTIVE_FILE="$TMP/profile-active"
+FEATURE_PROFILE_OVERRIDE=""
+FEATURE_FILE="$PROFILE_ROOT/$PROFILE_B/feature.cfg"
+
+# A valid matching profile.meta is the status fast path.  A mismatched sha256
+# must distrust it and fall back to parsing feature.cfg.
+load_status_feature_metadata
+[ "$FEATURE_STATUS_META" -eq 1 ] &&
+	[ "$FEATURE_STATUS_VERSION" = v9.9-meta ] &&
+	[ "$FEATURE_STATUS_FORMAT" = v3.0 ] &&
+	[ "$FEATURE_STATUS_APPS" -eq 60 ] ||
+	fail "status did not use the trusted active profile metadata"
+# Native IK profiles use v4.2 metadata and must use the same O(1) fast path;
+# otherwise every five-second status poll rescans a 3000+ application file.
+sed 's/^format=.*/format=v4.2/' "$PROFILE_ROOT/$PROFILE_B/profile.meta" > "$TMP/profile.meta.v4"
+mv "$TMP/profile.meta.v4" "$PROFILE_ROOT/$PROFILE_B/profile.meta"
+load_status_feature_metadata
+[ "$FEATURE_STATUS_META" -eq 1 ] &&
+	[ "$FEATURE_STATUS_VERSION" = v9.9-meta ] &&
+	[ "$FEATURE_STATUS_FORMAT" = v4.2 ] &&
+	[ "$FEATURE_STATUS_APPS" -eq 60 ] ||
+	fail "status did not trust valid native-v4.2 profile metadata"
+sed 's/^sha256=.*/sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/' \
+	"$PROFILE_ROOT/$PROFILE_B/profile.meta" > "$TMP/profile.meta.bad"
+mv "$TMP/profile.meta.bad" "$PROFILE_ROOT/$PROFILE_B/profile.meta"
+load_status_feature_metadata
+[ "$FEATURE_STATUS_META" -eq 0 ] &&
+	[ "$FEATURE_STATUS_VERSION" = v8.8-fallback ] &&
+	[ "$FEATURE_STATUS_FORMAT" = v3.0 ] &&
+	[ "$FEATURE_STATUS_APPS" -eq 60 ] ||
+	fail "status trusted mismatched metadata instead of feature.cfg"
+
+cat > "$TMP/jshn-mock.sh" <<'EOF'
+json_init() { :; }
+json_add_boolean() { printf 'bool\t%s\t%s\n' "$1" "$2"; }
+json_add_string() { printf 'string\t%s\t%s\n' "$1" "$2"; }
+json_add_int() { printf 'int\t%s\t%s\n' "$1" "$2"; }
+json_add_array() { printf 'array\t%s\n' "$1"; }
+json_add_object() { :; }
+json_close_object() { :; }
+json_close_array() { :; }
+json_dump() { :; }
+EOF
+JSHN_LIB="$TMP/jshn-mock.sh"
+
+catalog_search_json "$PROFILE_B" "" 0 0 "" > "$TMP/catalog-page-1.events"
+catalog_search_json "$PROFILE_B" "" 0 50 50 > "$TMP/catalog-page-2.events"
+grep -q '^int	total	60$' "$TMP/catalog-page-1.events" &&
+	grep -q '^int	limit	50$' "$TMP/catalog-page-1.events" &&
+	[ "$(grep -c '^int	id	' "$TMP/catalog-page-1.events")" -eq 50 ] &&
+	[ "$(grep -c '^int	id	' "$TMP/catalog-page-2.events")" -eq 10 ] ||
+	fail "lazy catalog search did not enforce 50-item pagination"
+catalog_lookup_json "$PROFILE_B" '1001,1060,1512' > "$TMP/catalog-lookup.events"
+grep -q '^string	name	新应用$' "$TMP/catalog-lookup.events" &&
+	grep -q '^string	name	应用60$' "$TMP/catalog-lookup.events" &&
+	grep -q '^string	name	未知应用 1512$' "$TMP/catalog-lookup.events" &&
+	grep -q '^bool	missing	1$' "$TMP/catalog-lookup.events" ||
+	fail "catalog lookup did not resolve selected and missing APPIDs"
+
+# Upgrade legacy rows under the old audit.ruleset before a feature switch and
+# persist the new 13th profile column.
+AUDIT_FILE="$TMP/profile-legacy.tsv"
+AUDIT_PROFILED_FILE="$TMP/profile-legacy.done"
+AUDIT_PERSIST_FILE="$TMP/profile-legacy.persist"
+LOCK_FILE="$TMP/profile-legacy.lock"
+AUDIT_RULESET="$PROFILE_A"
+printf '1700000000\tdevice\t192.0.2.1\tclient\t1001\t1\t2\t3\t4\t5\t6\t1700000000\n' > "$AUDIT_FILE"
+persist_audit_profiles > "$TMP/profile-migrate.json"
+awk -F '\t' -v profile="$PROFILE_A" 'NF==13 && $13==profile {found=1} END{exit !found}' \
+	"$AUDIT_FILE" &&
+	awk -F '\t' -v profile="$PROFILE_A" 'NF==13 && $13==profile {found=1} END{exit !found}' \
+		"$AUDIT_PERSIST_FILE" ||
+	fail "legacy audit rows were not persistently bound to their old profile"
+
+# The same numeric APPID from different profiles must remain two named rows.
+AUDIT_FILE="$TMP/profile-history.tsv"
+AUDIT_PROFILED_FILE="$TMP/profile-history.done"
+printf '1700000000\tdevice\t192.0.2.1\tclient\t1001\t1\t2\t0\t0\t0\t0\t1700000000\t%s\n' \
+	"$PROFILE_A" > "$AUDIT_FILE"
+printf '1700003600\tdevice\t192.0.2.1\tclient\t1001\t3\t4\t0\t0\t0\t0\t1700003600\t%s\n' \
+	"$PROFILE_B" >> "$AUDIT_FILE"
+: > "$AUDIT_PROFILED_FILE"
+audit_json device 1699999999 1700004000 > "$TMP/profile-history.events"
+grep -q '^string	name	旧应用$' "$TMP/profile-history.events" &&
+	grep -q '^string	name	新应用$' "$TMP/profile-history.events" &&
+	grep -q "^string	profile_id	$PROFILE_A$" "$TMP/profile-history.events" &&
+	grep -q "^string	profile_id	$PROFILE_B$" "$TMP/profile-history.events" &&
+	grep -q '^string	profile_version	v1.0-old$' "$TMP/profile-history.events" &&
+	grep -q '^string	profile_version	v8.8-fallback$' "$TMP/profile-history.events" ||
+	fail "audit history was not isolated by feature profile"
+
+# The polling endpoint reads a bounded 150-row cache rather than rescanning
+# audit.tsv. It excludes application 0, preserves immutable profile naming,
+# falls back from unsafe DHCP hostnames, and paginates newest-first.
+AUDIT_FILE="$TMP/recent-history.tsv"
+AUDIT_PROFILED_FILE="$TMP/recent-history.done"
+AUDIT_PERSIST_FILE="$TMP/recent-history.persist"
+RECENT_AUDIT_FILE="$TMP/recent-audit.tsv"
+RECENT_AUDIT_READY_FILE="$TMP/recent-audit.ready"
+RECENT_BASE="$(date +%s)"
+printf '%s\tdevice-new\t192.0.2.21\t新设备\t1001\t1\t1\t0\t0\t0\t0\t%s\t%s\n' \
+	"$((RECENT_BASE - 3))" "$((RECENT_BASE - 3))" "$PROFILE_B" > "$AUDIT_FILE"
+printf '%s\tdevice-old\t192.0.2.20\t旧设备\t1001\t1\t1\t0\t0\t0\t0\t%s\t%s\n' \
+	"$((RECENT_BASE - 2))" "$((RECENT_BASE - 2))" "$PROFILE_A" >> "$AUDIT_FILE"
+printf '%s\tdevice-bad\t192.0.2.22\tbad\rname\t1002\t1\t1\t0\t0\t0\t0\t%s\t%s\n' \
+	"$((RECENT_BASE - 1))" "$((RECENT_BASE - 1))" "$PROFILE_B" >> "$AUDIT_FILE"
+printf '%s\tdevice-unknown\t192.0.2.23\tunknown\t0\t1\t1\t0\t0\t0\t0\t%s\t%s\n' \
+	"$RECENT_BASE" "$RECENT_BASE" "$PROFILE_B" >> "$AUDIT_FILE"
+: > "$AUDIT_PROFILED_FILE"
+rm -f "$RECENT_AUDIT_FILE" "$RECENT_AUDIT_READY_FILE"
+rebuild_recent_audit_cache
+[ "$(wc -l < "$RECENT_AUDIT_FILE")" -eq 3 ] &&
+	[ "$(head -n 1 "$RECENT_AUDIT_FILE" | cut -f1)" -eq $((RECENT_BASE - 1)) ] &&
+	! awk -F '\t' '$6==0 {found=1} END{exit !found}' "$RECENT_AUDIT_FILE" ||
+	fail "recent audit cache ordering or unknown filtering is wrong"
+recent_audit_json "" "" > "$TMP/recent-profile.events"
+grep -q '^int[[:space:]]total[[:space:]]3$' "$TMP/recent-profile.events" &&
+	grep -q '^int[[:space:]]limit[[:space:]]50$' "$TMP/recent-profile.events" &&
+	grep -q '^string[[:space:]]name[[:space:]]旧应用$' "$TMP/recent-profile.events" &&
+	grep -q '^string[[:space:]]name[[:space:]]新应用$' "$TMP/recent-profile.events" &&
+	grep -q '^string[[:space:]]device_name[[:space:]]192.0.2.22$' "$TMP/recent-profile.events" &&
+	grep -q "^string[[:space:]]profile_id[[:space:]]$PROFILE_A$" "$TMP/recent-profile.events" &&
+	grep -q "^string[[:space:]]profile_id[[:space:]]$PROFILE_B$" "$TMP/recent-profile.events" ||
+	fail "recent audit RPC lost device or feature-profile semantics"
+if recent_audit_json 151 50 > "$TMP/recent-invalid-offset.events"; then
+	fail "recent audit accepted an offset outside its 150-row window"
+fi
+grep -q '"error":"invalid offset"' "$TMP/recent-invalid-offset.events" ||
+	fail "recent audit offset error is not structured"
+if recent_audit_json 0 0 > "$TMP/recent-invalid-limit.events"; then
+	fail "recent audit accepted a zero page size"
+fi
+
+: > "$AUDIT_FILE"
+i=1
+while [ "$i" -le 170 ]; do
+	stamp=$((RECENT_BASE - 170 + i))
+	appid=$((1000 + (i - 1) % 60 + 1))
+	printf '%s\tdevice-%03d\t192.0.2.%s\t设备%03d\t%s\t1\t1\t0\t0\t0\t0\t%s\t%s\n' \
+		"$stamp" "$i" "$((i % 250 + 1))" "$i" "$appid" "$stamp" "$PROFILE_B" \
+		>> "$AUDIT_FILE"
+	i=$((i + 1))
+done
+rm -f "$RECENT_AUDIT_FILE" "$RECENT_AUDIT_READY_FILE"
+rebuild_recent_audit_cache
+[ "$(wc -l < "$RECENT_AUDIT_FILE")" -eq 150 ] &&
+	[ "$(head -n 1 "$RECENT_AUDIT_FILE" | cut -f1)" -eq "$RECENT_BASE" ] &&
+	[ "$(tail -n 1 "$RECENT_AUDIT_FILE" | cut -f1)" -eq $((RECENT_BASE - 149)) ] ||
+	fail "recent audit did not retain exactly the newest 150 identified rows"
+recent_audit_json 50 50 > "$TMP/recent-page.events"
+[ "$(grep -c '^int[[:space:]]timestamp[[:space:]]' "$TMP/recent-page.events")" -eq 50 ] &&
+	grep -q '^bool[[:space:]]has_more[[:space:]]1$' "$TMP/recent-page.events" ||
+	fail "recent audit did not return a stable 50-row middle page"
+recent_audit_json 0 999 > "$TMP/recent-limit.events"
+grep -q '^int[[:space:]]limit[[:space:]]100$' "$TMP/recent-limit.events" &&
+	[ "$(grep -c '^int[[:space:]]timestamp[[:space:]]' "$TMP/recent-limit.events")" -eq 100 ] ||
+	fail "recent audit did not cap oversized pages at 100 rows"
+
+printf 'device-live\t192.0.2.250\t实时设备\tfiveg\t1\t2\t%s\t1001\n' \
+	"$((RECENT_BASE + 1))" > "$TMP/recent.delta"
+printf 'device-unknown\t192.0.2.251\t未知设备\tfiveg\t1\t2\t%s\t0\n' \
+	"$((RECENT_BASE + 2))" >> "$TMP/recent.delta"
+update_recent_audit_cache "$TMP/recent.delta" "$PROFILE_B" "$((RECENT_BASE + 2))" \
+	"$((RECENT_BASE - 86400))" 0
+[ "$(head -n 1 "$RECENT_AUDIT_FILE" | cut -f3)" = device-live ] &&
+	! awk -F '\t' '$6==0 {found=1} END{exit !found}' "$RECENT_AUDIT_FILE" ||
+	fail "incremental recent audit cache admitted unknown traffic or lost newest activity"
+
+# The page-load endpoint must not wait behind a sampler that is merging a
+# potentially 100 MB audit.tsv under collector.lock.  During that transaction
+# the ready marker is absent, but the rename-published old 150-row cache is a
+# safe at-most-one-sample-stale response.
+LOCK_FILE="$TMP/recent-busy-collector.lock"
+rm -f "$RECENT_AUDIT_READY_FILE" "$TMP/recent-lock-held" \
+	"$TMP/recent-lock-release" "$TMP/recent-rpc-done"
+(
+	exec 8> "$LOCK_FILE"
+	flock -x 8
+	: > "$TMP/recent-lock-held"
+	while [ ! -f "$TMP/recent-lock-release" ]; do sleep 0.01; done
+) &
+recent_lock_pid=$!
+tries=0
+while [ ! -f "$TMP/recent-lock-held" ]; do
+	tries=$((tries + 1))
+	[ "$tries" -lt 200 ] || fail "timed out taking the recent-audit test lock"
+	sleep 0.01
+done
+(
+	recent_audit_json 0 50 > "$TMP/recent-busy.events"
+	: > "$TMP/recent-rpc-done"
+) &
+recent_rpc_pid=$!
+tries=0
+while [ ! -f "$TMP/recent-rpc-done" ]; do
+	tries=$((tries + 1))
+	if [ "$tries" -ge 100 ]; then
+		: > "$TMP/recent-lock-release"
+		kill "$recent_rpc_pid" 2>/dev/null || true
+		wait "$recent_rpc_pid" 2>/dev/null || true
+		wait "$recent_lock_pid" 2>/dev/null || true
+		fail "recent audit blocked behind the busy collector"
+	fi
+	sleep 0.01
+done
+wait "$recent_rpc_pid"
+grep -q '^bool[[:space:]]stale[[:space:]]1$' "$TMP/recent-busy.events" &&
+	[ "$(grep -c '^int[[:space:]]timestamp[[:space:]]' "$TMP/recent-busy.events")" -eq 50 ] || {
+		: > "$TMP/recent-lock-release"
+		wait "$recent_lock_pid" 2>/dev/null || true
+		fail "recent audit did not serve the bounded stale cache while sampling"
+	}
+: > "$TMP/recent-lock-release"
+wait "$recent_lock_pid"
+file_size "$AUDIT_FILE" > "$RECENT_AUDIT_READY_FILE"
+
+# A pipeline producer failure must not be hidden by ash's lack of pipefail or
+# publish a partial cache.  Exercise the checked sort stage independently.
+(
+	RECENT_AUDIT_FILE="$TMP/recent-sort-failure.tsv"
+	RECENT_AUDIT_READY_FILE="$TMP/recent-sort-failure.ready"
+	rm -f "$RECENT_AUDIT_FILE" "$RECENT_AUDIT_READY_FILE"
+	sort() { return 1; }
+	if rebuild_recent_audit_cache; then
+		fail "recent cache rebuild hid a sort failure"
+	fi
+	[ ! -e "$RECENT_AUDIT_FILE" ] && [ ! -e "$RECENT_AUDIT_READY_FILE" ] ||
+		fail "failed recent cache rebuild published partial state"
+)
+
+# Once audit.tsv is committed, a disposable-cache failure must remain success
+# so sample_once_locked advances its conntrack snapshot instead of counting the
+# same delta again.  The invalidated cache must be recoverable from audit.tsv.
+(
+	CACHE_FAIL_NOW="$(date +%s)"
+	AUDIT_FILE="$TMP/cache-failure-audit.tsv"
+	TOTALS_FILE="$TMP/cache-failure-totals.tsv"
+	RECENT_AUDIT_FILE="$TMP/cache-failure-recent.tsv"
+	RECENT_AUDIT_READY_FILE="$TMP/cache-failure-recent.ready"
+	: > "$AUDIT_FILE"
+	: > "$TOTALS_FILE"
+	printf 'stale\n' > "$RECENT_AUDIT_FILE"
+	printf '1\n' > "$RECENT_AUDIT_READY_FILE"
+	printf 'cache-device\t192.0.2.44\t缓存设备\tfiveg\t7\t9\t%s\t1001\n' \
+		"$CACHE_FAIL_NOW" > "$TMP/cache-failure.delta"
+	update_recent_audit_cache() { return 1; }
+	merge_audit "$TMP/cache-failure.delta" "$CACHE_FAIL_NOW" ||
+		fail "durable audit merge failed with only its derivative cache unavailable"
+	awk -F '\t' '$2=="cache-device" && $5==1001 {n++; up+=$6; down+=$7}
+		END {exit !(n==1 && up==7 && down==9)}' "$AUDIT_FILE" ||
+		fail "cache failure duplicated or lost committed audit accounting"
+	[ ! -e "$RECENT_AUDIT_FILE" ] && [ ! -e "$RECENT_AUDIT_READY_FILE" ] ||
+		fail "cache failure did not invalidate its disposable files"
+	rebuild_recent_audit_cache || fail "invalidated recent cache could not be rebuilt"
+	[ -s "$RECENT_AUDIT_FILE" ] && [ -r "$RECENT_AUDIT_READY_FILE" ] &&
+		grep -q 'cache-device' "$RECENT_AUDIT_FILE" ||
+		fail "rebuilt recent cache lost committed audit data"
+)
+grep -q '"recent_audit"' "$ROOT/root/usr/libexec/rpcd/c2000max.traffic" &&
+	grep -q '"recent_audit"' "$ROOT/root/usr/share/rpcd/acl.d/luci-app-c2000max-traffic.json" ||
+	fail "recent audit RPC is not exposed through the read ACL"
+grep -q '"feature_install_status"' "$ROOT/root/usr/libexec/rpcd/c2000max.traffic" &&
+	grep -q '"feature_install_status"' "$ROOT/root/usr/share/rpcd/acl.d/luci-app-c2000max-traffic.json" &&
+	grep -Fq 'c2000max-feature-job start /tmp/c2000max-feature-upload' \
+		"$ROOT/root/usr/libexec/rpcd/c2000max.traffic" &&
+	grep -Fq 'c2000max-feature-job activate "$id"' \
+		"$ROOT/root/usr/libexec/rpcd/c2000max.traffic" &&
+	grep -Fq 'c2000max-feature-job rollback' \
+		"$ROOT/root/usr/libexec/rpcd/c2000max.traffic" ||
+	fail "asynchronous feature install/switch/status RPC is not exposed safely"
+
+# OAF APPIDs use type*1000+index, including the complete class-32 range.
+valid_app_id 32001 && valid_app_id 32512 &&
+	! valid_app_id 1999 && ! valid_app_id 32513 ||
+	fail "APPID type/index boundary validation is wrong"
+cat > "$TMP/class32-hosts.tsv" <<'EOF'
+192.0.2.10	aa:bb:cc:dd:ee:32	class32
+EOF
+cat > "$TMP/class32-conntrack.raw" <<'EOF'
+tcp src=192.0.2.10 dst=198.51.100.1 bytes=10 src=198.51.100.1 dst=192.0.2.10 bytes=20 mark=0 secmark=32512 id=32001
+tcp src=192.0.2.10 dst=198.51.100.2 bytes=30 src=198.51.100.2 dst=192.0.2.10 bytes=40 mark=0 secmark=32513 id=32002
+tcp src=192.0.2.10 dst=198.51.100.3 bytes=50 src=198.51.100.3 dst=192.0.2.10 bytes=60 mark=0 secmark=1999 id=32003
+EOF
+parse_conntrack "$TMP/class32-hosts.tsv" "$TMP/class32-conntrack.raw" "$TMP/class32-current.tsv"
+awk -F '\t' '$1==32001 && $8==32512 {upper=1} $1==32002 && $8==0 {overflow=1} \
+	$1==32003 && $8==0 {gap=1} END {exit !(upper && overflow && gap)}' \
+	"$TMP/class32-current.tsv" || fail "conntrack APPID class-32 normalization regressed"
+
+# A numeric APPID is catalog-specific.  The upper secmark epoch must agree
+# with the currently committed OAF generation; otherwise a profile switch can
+# rename an old flow as an unrelated application in the new library.
+OLD_OAF_SYSCTL_DIR="$OAF_SYSCTL_DIR"
+OAF_SYSCTL_DIR="$TMP/oaf-profile-epoch"
+mkdir -p "$OAF_SYSCTL_DIR"
+printf '4660\n' > "$OAF_SYSCTL_DIR/feature_generation"
+cat > "$TMP/epoch-conntrack.raw" <<'EOF'
+tcp src=192.0.2.10 dst=198.51.100.10 bytes=10 src=198.51.100.10 dst=192.0.2.10 bytes=20 mark=0 secmark=0x123403ea id=33001
+tcp src=192.0.2.10 dst=198.51.100.11 bytes=30 src=198.51.100.11 dst=192.0.2.10 bytes=40 mark=0 secmark=0x123503ea id=33002
+tcp src=192.0.2.10 dst=198.51.100.12 bytes=50 src=198.51.100.12 dst=192.0.2.10 bytes=60 mark=1002 secmark=0 id=33003
+EOF
+parse_conntrack "$TMP/class32-hosts.tsv" "$TMP/epoch-conntrack.raw" "$TMP/epoch-current.tsv"
+awk -F '\t' '$1==33001 && $8==1002 {current=1} $1==33002 && $8==0 {stale=1} \
+	$1==33003 && $8==0 {legacy_mark_ignored=1} \
+	END {exit !(current && stale && legacy_mark_ignored)}' "$TMP/epoch-current.tsv" ||
+	fail "profile-generation APPID isolation regressed"
+OAF_SYSCTL_DIR="$OLD_OAF_SYSCTL_DIR"
+
+# A schedule from another profile compiles nothing.  The active schedule uses
+# one anonymous nft set instead of one sequential rule per application.
+SCHEDULE_APPS="$(awk '/^[0-9]+[[:space:]]+[^:]+:\[/ {printf "%s ",$1}' \
+	"$PROFILE_ROOT/$PROFILE_B/feature.cfg")"
+SCHEDULE_RULESET="$PROFILE_A"
+config_get()
+{
+	local value="${4:-}"
+	case "$3" in
+		ruleset) value="$SCHEDULE_RULESET" ;;
+		target) value=all ;;
+		apps) value="$SCHEDULE_APPS" ;;
+		categories|whitelist) value="" ;;
+		days) value='0 1 2 3 4 5 6' ;;
+		start|end) value=00:00 ;;
+	esac
+	eval "$1=\"\$value\""
+}
+config_get_bool() { eval "$1=1"; }
+POLICY_ACTIVE_PROFILE="$PROFILE_B"
+POLICY_FEATURE_FILE="$PROFILE_ROOT/$PROFILE_B/feature.cfg"
+POLICY_RULE_FILE="$TMP/profile-policy.nft"
+POLICY_ACTIVE_COUNT=0
+POLICY_TRUNCATED=0
+POLICY_ACTIVE_EPOCH_HEX=0x12340000
+: > "$POLICY_RULE_FILE"
+compile_schedule regression
+[ ! -s "$POLICY_RULE_FILE" ] || fail "a schedule from an inactive profile was compiled"
+SCHEDULE_RULESET="$PROFILE_B"
+compile_schedule regression
+	[ "$(wc -l < "$POLICY_RULE_FILE")" -eq 1 ] &&
+	[ "$POLICY_ACTIVE_COUNT" -eq 60 ] &&
+	grep -q 'ct secmark & 0x1fff0000 == 0x12340000' "$POLICY_RULE_FILE" &&
+	grep -q 'ct secmark & 0x0000ffff { 1001, 1002,' "$POLICY_RULE_FILE" &&
+	grep -Fq '[ "$POLICY_ACTIVE_PROFILE" = "$current_profile_sha" ]' "$TRAFFIC" &&
+	grep -Fq '[ "$ruleset" = "$POLICY_ACTIVE_PROFILE" ]' "$TRAFFIC" ||
+	fail "application policy is not one set bound to active profile and feature SHA"
+
+# Deterministic switch concurrency: an old-profile sample holds a shared
+# profile lock through merge/snapshot.  The manager's exclusive transaction
+# waits for it, then blocks a new-profile sample until pointer switch and reset
+# finish.  This exercises real merge_audit() profile capture on both sides.
+wait_for_file()
+{
+	local file="$1" tries=0
+	while [ ! -f "$file" ]; do
+		tries=$((tries + 1))
+		[ "$tries" -lt 500 ] || fail "timed out waiting for ${file##*/}"
+		sleep 0.01
+	done
+}
+
+CONCURRENCY_DIR="$TMP/profile-concurrency"
+mkdir -p "$CONCURRENCY_DIR"
+PROFILE_LOCK_FILE="$CONCURRENCY_DIR/profile.lock"
+LOCK_FILE="$CONCURRENCY_DIR/collector.lock"
+AUDIT_FILE="$CONCURRENCY_DIR/audit.tsv"
+AUDIT_PROFILED_FILE="$CONCURRENCY_DIR/audit.profiled"
+TOTALS_FILE="$CONCURRENCY_DIR/totals.tsv"
+SNAPSHOT_FILE="$CONCURRENCY_DIR/snapshot.tsv"
+FEATURE_ACTIVE_FILE="$CONCURRENCY_DIR/active"
+: > "$AUDIT_FILE"
+: > "$AUDIT_PROFILED_FILE"
+: > "$TOTALS_FILE"
+: > "$SNAPSHOT_FILE"
+printf '%s\n' "$PROFILE_A" > "$FEATURE_ACTIVE_FILE"
+printf 'device\t192.0.2.1\tclient\tfiveg\t10\t20\t1700010000\t1001\n' \
+	> "$CONCURRENCY_DIR/old.delta"
+printf 'device\t192.0.2.1\tclient\tfiveg\t30\t40\t1700013600\t1002\n' \
+	> "$CONCURRENCY_DIR/new.delta"
+
+(
+	profile_owned=0
+	collector_owned=0
+	profile_lock_acquire shared profile_owned
+	collector_lock_acquire blocking collector_owned
+	: > "$CONCURRENCY_DIR/old-held"
+	wait_for_file "$CONCURRENCY_DIR/release-old"
+	merge_audit "$CONCURRENCY_DIR/old.delta" 1700010060
+	printf 'old\n' > "$SNAPSHOT_FILE"
+	collector_lock_release collector_owned
+	profile_lock_release profile_owned
+	: > "$CONCURRENCY_DIR/old-done"
+) &
+old_pid=$!
+wait_for_file "$CONCURRENCY_DIR/old-held"
+
+# Daemon sampling keeps its historical nonblocking collector behavior, while
+# an explicit/manager sample waits instead of returning false success.
+probe_profile_owned=0
+probe_collector_owned=0
+profile_lock_acquire shared probe_profile_owned
+if collector_lock_acquire nonblocking probe_collector_owned; then
+	collector_lock_release probe_collector_owned
+	profile_lock_release probe_profile_owned
+	: > "$CONCURRENCY_DIR/release-old"
+	wait "$old_pid" 2>/dev/null || true
+	fail "daemon collector probe unexpectedly entered a busy sample"
+else
+	probe_rc=$?
+fi
+profile_lock_release probe_profile_owned
+[ "$probe_rc" -eq 2 ] || fail "nonblocking collector did not report a busy sample"
+
+(
+	profile_owned=0
+	collector_owned=0
+	profile_lock_acquire shared profile_owned
+	: > "$CONCURRENCY_DIR/blocking-sample-trying"
+	collector_lock_acquire blocking collector_owned
+	: > "$CONCURRENCY_DIR/blocking-sample-acquired"
+	collector_lock_release collector_owned
+	profile_lock_release profile_owned
+) &
+blocking_sample_pid=$!
+wait_for_file "$CONCURRENCY_DIR/blocking-sample-trying"
+[ ! -f "$CONCURRENCY_DIR/blocking-sample-acquired" ] || {
+	: > "$CONCURRENCY_DIR/release-old"
+	wait "$old_pid" 2>/dev/null || true
+	wait "$blocking_sample_pid" 2>/dev/null || true
+	fail "explicit sample did not block on the busy collector"
+}
+
+(
+	profile_owned=0
+	: > "$CONCURRENCY_DIR/manager-trying"
+	profile_lock_acquire exclusive profile_owned
+	: > "$CONCURRENCY_DIR/manager-held"
+	printf '%s\n' "$PROFILE_B" > "$FEATURE_ACTIVE_FILE"
+	: > "$SNAPSHOT_FILE"
+	: > "$CONCURRENCY_DIR/manager-reset"
+	wait_for_file "$CONCURRENCY_DIR/release-manager"
+	profile_lock_release profile_owned
+) &
+manager_pid=$!
+wait_for_file "$CONCURRENCY_DIR/manager-trying"
+if [ -f "$CONCURRENCY_DIR/manager-held" ]; then
+	: > "$CONCURRENCY_DIR/release-old"
+	wait "$old_pid" 2>/dev/null || true
+	wait "$manager_pid" 2>/dev/null || true
+	fail "profile switch did not wait for the old sample"
+fi
+: > "$CONCURRENCY_DIR/release-old"
+wait "$old_pid"
+wait "$blocking_sample_pid"
+wait_for_file "$CONCURRENCY_DIR/blocking-sample-acquired"
+wait_for_file "$CONCURRENCY_DIR/manager-held"
+wait_for_file "$CONCURRENCY_DIR/manager-reset"
+[ -f "$CONCURRENCY_DIR/old-done" ] && [ -f "$CONCURRENCY_DIR/manager-reset" ] ||
+	fail "manager entered the switch before old merge/reset ordering completed"
+
+(
+	profile_owned=0
+	collector_owned=0
+	: > "$CONCURRENCY_DIR/new-trying"
+	profile_lock_acquire shared profile_owned
+	collector_lock_acquire blocking collector_owned
+	: > "$CONCURRENCY_DIR/new-held"
+	merge_audit "$CONCURRENCY_DIR/new.delta" 1700013660
+	printf 'new\n' > "$SNAPSHOT_FILE"
+	collector_lock_release collector_owned
+	profile_lock_release profile_owned
+) &
+new_pid=$!
+wait_for_file "$CONCURRENCY_DIR/new-trying"
+if [ -f "$CONCURRENCY_DIR/new-held" ]; then
+	: > "$CONCURRENCY_DIR/release-manager"
+	wait "$manager_pid" 2>/dev/null || true
+	wait "$new_pid" 2>/dev/null || true
+	fail "new sample entered while the profile transaction was exclusive"
+fi
+: > "$CONCURRENCY_DIR/release-manager"
+wait "$manager_pid"
+wait "$new_pid"
+
+awk -F '\t' -v old="$PROFILE_A" -v new="$PROFILE_B" '
+	$5==1001 && $13==old { old_ok=1 }
+	$5==1002 && $13==new { new_ok=1 }
+	END { exit !(old_ok && new_ok) }
+' "$AUDIT_FILE" && [ "$(cat "$SNAPSHOT_FILE")" = new ] ||
+	fail "profile switch mixed audit identities or let reset overwrite the new snapshot"
+
 # Exercise the same direct gzip/tar payload carried by official feature ZIPs.
 # This keeps archive validation covered without checking a proprietary/current
 # feature database into the source tree.
@@ -140,9 +709,433 @@ grep -q '"success":true' "$TMP/feature-result.json" ||
 grep -q '^1001 测试应用:' "$TMP/feature-install/feature.cfg" ||
 	fail "validated feature.cfg was not installed"
 
+# A second, IKprotocol-shaped upload exercises the complete multi-profile
+# lifecycle without redistributing any third-party feature data.  Six full
+# 512-entry classes prove that a 3000+ application catalog is accepted, while
+# conversion metadata preserves the distinction between source and converted
+# application counts.
+SMALL_PROFILE="$(sed -n 's/.*"sha256":"\([0-9a-f]*\)".*/\1/p' "$TMP/feature-result.json")"
+[ "${#SMALL_PROFILE}" -eq 64 ] || fail "initial feature profile id is invalid"
+mkdir -p "$TMP/large-feature/app_icons"
+{
+	printf '%s\n' '#version v2.0.476-ikuai' '#format v3.0'
+	class=1
+	while [ "$class" -le 6 ]; do
+		printf '#class class%s %s 分类%s\n' "$class" "$class" "$class"
+		seq=1
+		while [ "$seq" -le 512 ]; do
+			appid=$((class * 1000 + seq))
+			printf '%s 应用%s_%s:[tcp;;;a%s.example;;]\n' \
+				"$appid" "$class" "$seq" "$appid"
+			seq=$((seq + 1))
+		done
+		class=$((class + 1))
+	done
+} > "$TMP/large-feature/feature.cfg"
+printf '%s\n' 'Synthetic compatibility fixture; no third-party rules.' > \
+	"$TMP/large-feature/README.txt"
+printf '%s\n' 'source_appid,oaf_appid' > "$TMP/large-feature/appid-map.csv"
+printf '%s\n' '{}' > "$TMP/large-feature/appid-map.json"
+printf '%s\n' '{"source_apps":3329,"skipped_apps":257}' > \
+	"$TMP/large-feature/conversion-report.json"
+tar -czf "$TMP/large-feature.bin" -C "$TMP/large-feature" \
+	feature.cfg README.txt appid-map.csv appid-map.json conversion-report.json app_icons
+C2000_FEATURE_DIR="$TMP/feature-install" \
+C2000_FEATURE_ICON_DIR="$TMP/feature-icons" \
+C2000_FEATURE_META="$TMP/feature.meta" \
+	"$ROOT/root/usr/sbin/c2000max-feature-install" "$TMP/large-feature.bin" \
+	> "$TMP/large-feature-result.json"
+grep -q '"success":true' "$TMP/large-feature-result.json" &&
+	grep -q '"apps":3072' "$TMP/large-feature-result.json" &&
+	grep -q '"source_apps":3329' "$TMP/large-feature-result.json" &&
+	grep -q '"skipped_apps":257' "$TMP/large-feature-result.json" ||
+	fail "3000+ IKprotocol-shaped feature profile was not imported correctly"
+LARGE_PROFILE="$(sed -n 's/.*"sha256":"\([0-9a-f]*\)".*/\1/p' "$TMP/large-feature-result.json")"
+[ "${#LARGE_PROFILE}" -eq 64 ] && [ "$LARGE_PROFILE" != "$SMALL_PROFILE" ] ||
+	fail "large feature profile id is invalid"
+
+FEATURE_MANAGER="$ROOT/root/usr/sbin/c2000max-feature-manager"
+feature_manager()
+{
+	C2000_FEATURE_DIR="$TMP/feature-install" \
+	C2000_FEATURE_FILE="$TMP/feature-install/feature.cfg" \
+	C2000_FEATURE_ICON_DIR="$TMP/feature-icons" \
+	C2000_FEATURE_META="$TMP/feature.meta" \
+	C2000_FEATURE_NO_RUNTIME=1 "$FEATURE_MANAGER" "$@"
+}
+feature_manager rollback > "$TMP/feature-rollback.json"
+[ "$(cat "$TMP/feature-install/.c2000max-features/active")" = "$SMALL_PROFILE" ] &&
+	grep -q '^1001 测试应用:' "$TMP/feature-install/feature.cfg" ||
+	fail "feature profile rollback did not restore the original library"
+mkdir "$TMP/feature-install/.c2000max-features/libraries/.incoming.interrupted"
+feature_manager list > "$TMP/feature-list.json"
+[ ! -e "$TMP/feature-install/.c2000max-features/libraries/.incoming.interrupted" ] ||
+	fail "an interrupted profile staging directory was not reaped under the manager lock"
+grep -q "\"active\":\"$SMALL_PROFILE\"" "$TMP/feature-list.json" &&
+	grep -q "\"previous\":\"$LARGE_PROFILE\"" "$TMP/feature-list.json" &&
+	[ "$(grep -o '"sha256"' "$TMP/feature-list.json" | wc -l)" -eq 2 ] ||
+	fail "feature profile list did not preserve both switchable libraries"
+
+# LuCI loads this list in its initial Promise.all.  It must not wait behind a
+# long archive compilation/runtime reload, and immutable profile metadata must
+# avoid re-hashing every 3000+ application feature.cfg just to render the list.
+list_profiles_block="$(sed -n '/^list_profiles()/,/^}/p' "$FEATURE_MANAGER")"
+if printf '%s\n' "$list_profiles_block" | grep -q 'sha256sum'; then
+	fail "feature profile list still re-hashes complete feature libraries"
+fi
+MANAGER_LOCK="$TMP/feature-install/.c2000max-features/manager.lock"
+rm -f "$TMP/manager-list-held" "$TMP/manager-list-release" "$TMP/manager-list-done"
+(
+	exec 7> "$MANAGER_LOCK"
+	flock -x 7
+	: > "$TMP/manager-list-held"
+	while [ ! -f "$TMP/manager-list-release" ]; do sleep 0.01; done
+) &
+manager_list_lock_pid=$!
+wait_for_file "$TMP/manager-list-held"
+(
+	feature_manager list > "$TMP/feature-list-busy.json"
+	: > "$TMP/manager-list-done"
+) &
+manager_list_rpc_pid=$!
+tries=0
+while [ ! -f "$TMP/manager-list-done" ]; do
+	tries=$((tries + 1))
+	if [ "$tries" -ge 100 ]; then
+		: > "$TMP/manager-list-release"
+		kill "$manager_list_rpc_pid" 2>/dev/null || true
+		wait "$manager_list_rpc_pid" 2>/dev/null || true
+		wait "$manager_list_lock_pid" 2>/dev/null || true
+		fail "feature profile list blocked behind the manager lock"
+	fi
+	sleep 0.01
+done
+wait "$manager_list_rpc_pid"
+grep -q "\"active\":\"$SMALL_PROFILE\"" "$TMP/feature-list-busy.json" || {
+	: > "$TMP/manager-list-release"
+	wait "$manager_list_lock_pid" 2>/dev/null || true
+	fail "nonblocking feature profile list lost the active profile"
+}
+: > "$TMP/manager-list-release"
+wait "$manager_list_lock_pid"
+
+# Simulate power loss after the active pointer commit but before feature.cfg
+# replacement.  Boot-time init must adopt the material actually on disk under
+# the exclusive profile lock, so the kernel and traffic identity agree again.
+printf '%s\n' "$LARGE_PROFILE" > "$TMP/feature-install/.c2000max-features/active"
+feature_manager init > "$TMP/feature-reconcile.json"
+[ "$(cat "$TMP/feature-install/.c2000max-features/active")" = "$SMALL_PROFILE" ] &&
+	[ "$(cat "$TMP/feature-install/.c2000max-features/previous")" = "$LARGE_PROFILE" ] &&
+	grep -q "\"sha256\":\"$SMALL_PROFILE\"" "$TMP/feature-reconcile.json" ||
+	fail "boot-time reconciliation left the pointer and active feature material mismatched"
+
+# Failures after the pointer commit point must restore pointers, material and
+# policy identity rather than leave a cross-library state.
+for failpoint in pointer reload policy; do
+	if C2000_FEATURE_TEST_FAIL="$failpoint" feature_manager activate "$LARGE_PROFILE" \
+		> "$TMP/feature-fail-$failpoint.out" 2>&1; then
+		fail "feature activation failpoint $failpoint unexpectedly succeeded"
+	fi
+	[ "$(cat "$TMP/feature-install/.c2000max-features/active")" = "$SMALL_PROFILE" ] &&
+		grep -q '^1001 测试应用:' "$TMP/feature-install/feature.cfg" ||
+		fail "feature activation failpoint $failpoint did not roll back"
+done
+if find "$TMP/feature-install/.c2000max-features" "$TMP/feature-install" \
+	-name '*.new.*' -o -name '*.rollback.*' | grep -q .; then
+	fail "feature activation left transaction staging files behind"
+fi
+
+# If both the new reload and rollback reload fail, disk state must still be
+# restored, blocking policy must stay fail-open, and the operator must receive
+# an explicit reboot warning rather than a false "previous profile restored".
+mkdir -p "$TMP/fake-bin" "$TMP/fake-sysctl"
+cat > "$TMP/fake-bin/pidof" <<'EOF'
+#!/bin/sh
+printf '%s\n' 999999
+EOF
+cat > "$TMP/fake-traffic" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >> "$C2000_TEST_TRAFFIC_LOG"
+EOF
+chmod 0755 "$TMP/fake-bin/pidof" "$TMP/fake-traffic"
+printf '1\n' > "$TMP/fake-sysctl/feature_init"
+: > "$TMP/fake-traffic.log"
+if PATH="$TMP/fake-bin:$PATH" \
+	C2000_FEATURE_DIR="$TMP/feature-install" \
+	C2000_FEATURE_FILE="$TMP/feature-install/feature.cfg" \
+	C2000_FEATURE_ICON_DIR="$TMP/feature-icons" \
+	C2000_FEATURE_META="$TMP/feature.meta" \
+	C2000_FEATURE_NO_RUNTIME=0 \
+	C2000_FEATURE_TRAFFIC="$TMP/fake-traffic" \
+	C2000_FEATURE_SYSCTL_DIR="$TMP/fake-sysctl" \
+	C2000_FEATURE_DAEMON=fake-oafd \
+	C2000_TEST_TRAFFIC_LOG="$TMP/fake-traffic.log" \
+	"$FEATURE_MANAGER" activate "$LARGE_PROFILE" \
+	> "$TMP/double-reload-failure.out" 2>&1; then
+	fail "activation succeeded after both runtime reloads failed"
+fi
+[ "$(cat "$TMP/feature-install/.c2000max-features/active")" = "$SMALL_PROFILE" ] &&
+	grep -q '^1001 测试应用:' "$TMP/feature-install/feature.cfg" &&
+	grep -q 'OAF runtime recovery failed' "$TMP/double-reload-failure.out" &&
+	[ "$(tail -n 1 "$TMP/fake-traffic.log")" = audit-policy-clear ] ||
+	fail "double reload failure did not restore disk, disable policy and require reboot"
+
+# Raw/proprietary libraries and malformed match dictionaries are rejected;
+# neither failure may alter the active profile.
+printf '%s\n' 'not-a-converted-oaf-library' > "$TMP/raw.lib"
+if feature_manager install "$TMP/raw.lib" > "$TMP/raw-lib.out" 2>&1; then
+	fail "an unconverted raw library was accepted"
+fi
+mkdir -p "$TMP/bad-feature/app_icons"
+cat > "$TMP/bad-feature/feature.cfg" <<'EOF'
+#version v2.0.476-ikuai
+#format v3.0
+#class bad 1 错误
+1001 错误应用:[tcp;;;bad.example;;00:73:01]
+EOF
+tar -czf "$TMP/bad-feature.bin" -C "$TMP/bad-feature" feature.cfg app_icons
+if feature_manager install "$TMP/bad-feature.bin" > "$TMP/bad-feature.out" 2>&1; then
+	fail "an unsafe feature dictionary was accepted"
+fi
+cat > "$TMP/bad-feature/feature.cfg" <<'EOF'
+#version v2.0.476-ikuai
+#format v3.0
+#class bad 1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+1001 错误应用:[tcp;;;bad.example;;]
+EOF
+tar -czf "$TMP/bad-class-name.bin" -C "$TMP/bad-feature" feature.cfg app_icons
+if feature_manager install "$TMP/bad-class-name.bin" > "$TMP/bad-class-name.out" 2>&1; then
+	fail "a class display name wider than the oafd table was accepted"
+fi
+[ "$(cat "$TMP/feature-install/.c2000max-features/active")" = "$SMALL_PROFILE" ] ||
+	fail "a rejected upload changed the active profile"
+
+# Feature imports must outlive the short ubus/XHR request.  Exercise the real
+# detached-job front end with a deliberately slow installer, including its
+# single-instance lease, atomic terminal result and temporary-file cleanup.
+FEATURE_JOB="$ROOT/root/usr/sbin/c2000max-feature-job"
+FEATURE_JOB_DIR="$TMP/feature-jobs"
+cat > "$TMP/feature-job-traffic" <<'EOF'
+#!/bin/sh
+[ "$1" = audit-migrate ] || exit 1
+printf '%s\n' "$1" >> "$C2000_FEATURE_JOB_TEST_LOG"
+EOF
+cat > "$TMP/feature-job-installer" <<'EOF'
+#!/bin/sh
+case "${C2000_FEATURE_JOB_TEST_MODE:-success}" in
+	slow) sleep 1 ;;
+	fail)
+		printf '%s\n' 'fake "install" rejected \\ input' >&2
+		exit 1
+		;;
+esac
+printf '%s\n' '{"success":true,"version":"v9.9.9","apps":3218,"features":12073}'
+EOF
+cat > "$TMP/feature-job-manager" <<'EOF'
+#!/bin/sh
+case "$1" in
+	activate)
+		[ "$#" -eq 2 ] || exit 2
+		printf 'activate\t%s\n' "$2" >> "$C2000_FEATURE_JOB_MANAGER_LOG"
+		;;
+	rollback)
+		[ "$#" -eq 1 ] || exit 2
+		printf '%s\n' rollback >> "$C2000_FEATURE_JOB_MANAGER_LOG"
+		;;
+	*) exit 2 ;;
+esac
+case "${C2000_FEATURE_JOB_TEST_MODE:-success}" in
+	manager-slow) sleep 1 ;;
+	manager-fail)
+		printf '%s\n' 'fake manager failure' >&2
+		exit 1
+		;;
+esac
+printf '%s\n' '{"success":true,"version":"v8.8.8","apps":3072,"features":10000}'
+EOF
+chmod 0755 "$TMP/feature-job-traffic" "$TMP/feature-job-installer" \
+	"$TMP/feature-job-manager"
+: > "$TMP/feature-job-traffic.log"
+: > "$TMP/feature-job-manager.log"
+C2000_FEATURE_JOB_DIR="$FEATURE_JOB_DIR"
+C2000_FEATURE_JOB_LOCK="$FEATURE_JOB_DIR/active.lock"
+C2000_FEATURE_JOB_CURRENT="$FEATURE_JOB_DIR/current"
+C2000_FEATURE_JOB_INSTALLER="$TMP/feature-job-installer"
+C2000_FEATURE_JOB_MANAGER="$TMP/feature-job-manager"
+C2000_FEATURE_JOB_TRAFFIC="$TMP/feature-job-traffic"
+C2000_FEATURE_JOB_TEST_LOG="$TMP/feature-job-traffic.log"
+C2000_FEATURE_JOB_MANAGER_LOG="$TMP/feature-job-manager.log"
+export C2000_FEATURE_JOB_DIR C2000_FEATURE_JOB_LOCK C2000_FEATURE_JOB_CURRENT
+export C2000_FEATURE_JOB_INSTALLER C2000_FEATURE_JOB_MANAGER C2000_FEATURE_JOB_TRAFFIC
+export C2000_FEATURE_JOB_TEST_LOG C2000_FEATURE_JOB_MANAGER_LOG
+feature_job()
+{
+	"$FEATURE_JOB" "$@"
+}
+
+printf '%s\n' slow-upload > "$TMP/feature-job-upload-one"
+C2000_FEATURE_JOB_TEST_MODE=slow
+export C2000_FEATURE_JOB_TEST_MODE
+feature_job start "$TMP/feature-job-upload-one" > "$TMP/feature-job-start.json"
+grep -q '"accepted":true' "$TMP/feature-job-start.json" &&
+	grep -Eq '"state":"(queued|running)"' "$TMP/feature-job-start.json" ||
+	fail "feature import RPC did not return an immediate asynchronous job"
+FEATURE_JOB_ID="$(sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p' "$TMP/feature-job-start.json")"
+[ -n "$FEATURE_JOB_ID" ] && [ ! -e "$TMP/feature-job-upload-one" ] ||
+	fail "feature job did not atomically take ownership of the upload"
+
+printf '%s\n' competing-upload > "$TMP/feature-job-upload-two"
+feature_job start "$TMP/feature-job-upload-two" > "$TMP/feature-job-busy.json" || true
+grep -q '"busy":true' "$TMP/feature-job-busy.json" &&
+	grep -q '"accepted":false' "$TMP/feature-job-busy.json" &&
+	[ ! -e "$TMP/feature-job-upload-two" ] ||
+	fail "feature jobs were not single-instance or left a competing upload behind"
+
+tries=0
+while :; do
+	feature_job status "$FEATURE_JOB_ID" > "$TMP/feature-job-status.json"
+	FEATURE_JOB_STATE="$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$TMP/feature-job-status.json")"
+	[ "$FEATURE_JOB_STATE" != done ] || break
+	tries=$((tries + 1))
+	[ "$tries" -lt 200 ] || fail "detached feature import did not complete"
+	sleep 0.02
+done
+grep -q '"result":{"success":true' "$TMP/feature-job-status.json" &&
+	grep -q '"apps":3218' "$TMP/feature-job-status.json" &&
+	grep -q '^audit-migrate$' "$TMP/feature-job-traffic.log" ||
+	fail "detached feature job lost the install result or audit migration"
+if find "$FEATURE_JOB_DIR" -type f \( -name '*.upload' -o -name '*.result' -o -name '*.error' \) |
+	grep -q .; then
+	fail "completed feature job left uploaded content or worker logs behind"
+fi
+
+# The worker may complete before start_job() performs its kill -0 probe.  An
+# immediate successful installer must never have its done state overwritten by
+# a false "worker did not start" failure.
+sleep 0.1
+printf '%s\n' immediate-upload > "$TMP/feature-job-upload-fast"
+C2000_FEATURE_JOB_TEST_MODE=success
+export C2000_FEATURE_JOB_TEST_MODE
+feature_job start "$TMP/feature-job-upload-fast" > "$TMP/feature-job-fast-start.json"
+FEATURE_JOB_FAST_ID="$(sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p' "$TMP/feature-job-fast-start.json")"
+tries=0
+while :; do
+	feature_job status "$FEATURE_JOB_FAST_ID" > "$TMP/feature-job-fast-status.json"
+	FEATURE_JOB_STATE="$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$TMP/feature-job-fast-status.json")"
+	[ "$FEATURE_JOB_STATE" != done ] || break
+	[ "$FEATURE_JOB_STATE" != failed ] || fail "an immediate successful worker was reported as failed"
+	tries=$((tries + 1))
+	[ "$tries" -lt 100 ] || fail "immediate feature import did not complete"
+	sleep 0.01
+done
+grep -q '"result":{"success":true' "$TMP/feature-job-fast-status.json" ||
+	fail "immediate feature import lost its terminal result"
+
+# Exercise the worker entry point synchronously as well.  Its EXIT trap runs
+# after run_worker() locals leave scope; set -u must not turn a successful job
+# into a nonzero process exit at that boundary.
+FEATURE_DIRECT_ID=1700000001-1-fedcba9876543210
+printf '%s\n' direct-upload > "$FEATURE_JOB_DIR/$FEATURE_DIRECT_ID.upload"
+feature_job _run "$FEATURE_DIRECT_ID" 1700000001 install ""
+grep -q '"state":"done"' "$FEATURE_JOB_DIR/$FEATURE_DIRECT_ID.json" &&
+	[ ! -e "$FEATURE_JOB_DIR/$FEATURE_DIRECT_ID.upload" ] ||
+	fail "feature worker EXIT cleanup lost its terminal state"
+
+# Switching and rollback share the exact same detached worker and activity
+# lock as imports.  They must return immediately, reject a competing action,
+# call the manager with an exact validated target, and avoid duplicating the
+# manager's own pre-switch audit transaction.
+sleep 0.1
+FEATURE_MIGRATIONS_BEFORE="$(wc -l < "$TMP/feature-job-traffic.log")"
+C2000_FEATURE_JOB_TEST_MODE=manager-slow
+export C2000_FEATURE_JOB_TEST_MODE
+feature_job activate "$PROFILE_A" > "$TMP/feature-job-activate-start.json"
+grep -q '"accepted":true' "$TMP/feature-job-activate-start.json" &&
+	grep -q '"action":"activate"' "$TMP/feature-job-activate-start.json" &&
+	grep -Eq '"state":"(queued|running)"' "$TMP/feature-job-activate-start.json" ||
+	fail "feature activation did not return an immediate asynchronous job"
+FEATURE_ACTIVATE_JOB_ID="$(sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p' \
+	"$TMP/feature-job-activate-start.json")"
+feature_job rollback > "$TMP/feature-job-switch-busy.json" || true
+grep -q '"busy":true' "$TMP/feature-job-switch-busy.json" &&
+	grep -q '"accepted":false' "$TMP/feature-job-switch-busy.json" ||
+	fail "activation and rollback did not share the feature-job single-instance lock"
+tries=0
+while :; do
+	feature_job status "$FEATURE_ACTIVATE_JOB_ID" > "$TMP/feature-job-activate-status.json"
+	FEATURE_JOB_STATE="$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' \
+		"$TMP/feature-job-activate-status.json")"
+	[ "$FEATURE_JOB_STATE" != done ] || break
+	[ "$FEATURE_JOB_STATE" != failed ] || fail "asynchronous feature activation failed"
+	tries=$((tries + 1))
+	[ "$tries" -lt 200 ] || fail "asynchronous feature activation did not complete"
+	sleep 0.02
+done
+grep -Fxq "$(printf 'activate\t%s' "$PROFILE_A")" "$TMP/feature-job-manager.log" &&
+	grep -q '"result":{"success":true' "$TMP/feature-job-activate-status.json" ||
+	fail "feature activation lost its manager argument or terminal result"
+
+sleep 0.1
+C2000_FEATURE_JOB_TEST_MODE=success
+export C2000_FEATURE_JOB_TEST_MODE
+feature_job rollback > "$TMP/feature-job-rollback-start.json"
+FEATURE_ROLLBACK_JOB_ID="$(sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p' \
+	"$TMP/feature-job-rollback-start.json")"
+tries=0
+while :; do
+	feature_job status "$FEATURE_ROLLBACK_JOB_ID" > "$TMP/feature-job-rollback-status.json"
+	FEATURE_JOB_STATE="$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' \
+		"$TMP/feature-job-rollback-status.json")"
+	[ "$FEATURE_JOB_STATE" != done ] || break
+	[ "$FEATURE_JOB_STATE" != failed ] || fail "asynchronous feature rollback failed"
+	tries=$((tries + 1))
+	[ "$tries" -lt 100 ] || fail "asynchronous feature rollback did not complete"
+	sleep 0.01
+done
+grep -Fxq rollback "$TMP/feature-job-manager.log" &&
+	[ "$(wc -l < "$TMP/feature-job-traffic.log")" -eq "$FEATURE_MIGRATIONS_BEFORE" ] ||
+	fail "feature rollback did not use the manager transaction or duplicated audit migration"
+
+# Failed installers publish valid structured JSON and still delete the upload.
+sleep 0.1
+printf '%s\n' rejected-upload > "$TMP/feature-job-upload-fail"
+C2000_FEATURE_JOB_TEST_MODE=fail
+export C2000_FEATURE_JOB_TEST_MODE
+feature_job start "$TMP/feature-job-upload-fail" > "$TMP/feature-job-fail-start.json"
+FEATURE_JOB_FAIL_ID="$(sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p' "$TMP/feature-job-fail-start.json")"
+tries=0
+while :; do
+	feature_job status "$FEATURE_JOB_FAIL_ID" > "$TMP/feature-job-fail-status.json"
+	FEATURE_JOB_STATE="$(sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$TMP/feature-job-fail-status.json")"
+	[ "$FEATURE_JOB_STATE" != failed ] || break
+	tries=$((tries + 1))
+	[ "$tries" -lt 200 ] || fail "failed feature import never published terminal state"
+	sleep 0.02
+done
+python3 -m json.tool "$TMP/feature-job-fail-status.json" >/dev/null 2>&1 &&
+	grep -q 'fake \\"install\\" rejected' "$TMP/feature-job-fail-status.json" &&
+	[ ! -e "$TMP/feature-job-upload-fail" ] ||
+	fail "failed feature job emitted invalid JSON or leaked its upload"
+
+# A queued/running state without the activity lock is a killed worker, not a
+# task that should leave the UI polling forever after rpcd/service disruption.
+sleep 0.1
+FEATURE_STALE_ID=1700000000-1-0123456789abcdef
+printf '%s\n' "$FEATURE_STALE_ID" > "$FEATURE_JOB_DIR/current"
+printf '%s\n' '{"success":true,"job_id":"1700000000-1-0123456789abcdef","state":"running","started":1700000000}' \
+	> "$FEATURE_JOB_DIR/$FEATURE_STALE_ID.json"
+printf '%s\n' stale > "$FEATURE_JOB_DIR/$FEATURE_STALE_ID.upload"
+feature_job status "$FEATURE_STALE_ID" > "$TMP/feature-job-stale-status.json"
+grep -q '"state":"failed"' "$TMP/feature-job-stale-status.json" &&
+	grep -q '任务被中断' "$TMP/feature-job-stale-status.json" &&
+	[ ! -e "$FEATURE_JOB_DIR/$FEATURE_STALE_ID.upload" ] ||
+	fail "an interrupted feature job was not recovered as a terminal failure"
+
 sh -n "$TRAFFIC" "$EQOS_ROOT/root/usr/sbin/eqos" \
 	"$EQOS_ROOT/root/etc/init.d/eqos" "$ROOT/root/etc/init.d/c2000max-traffic" \
 	"$ROOT/root/usr/sbin/c2000max-feature-install" \
+	"$ROOT/root/usr/sbin/c2000max-feature-manager" \
+	"$ROOT/root/usr/sbin/c2000max-feature-job" \
 	"$ROOT/root/usr/libexec/rpcd/c2000max.traffic" \
 	"$EQOS_ROOT/root/usr/libexec/rpcd/c2000max.eqos" \
 	"$ROOT/../c2000max-appfilter/files/c2000max-appfilter.init"
@@ -175,8 +1168,131 @@ if grep -Fq "E('h4', {}, '该设备流量趋势')" "$TRAFFIC_VIEW"; then
 fi
 grep -Fq 'var pageSize = 20' "$TRAFFIC_VIEW" &&
 	grep -Fq "'traffic_desc', '流量：从大到小'" "$TRAFFIC_VIEW" &&
-	grep -Fq "'time_desc', '时间：最近优先'" "$TRAFFIC_VIEW" ||
+	grep -Fq "'time_desc', '时间：最近优先'" "$TRAFFIC_VIEW" &&
+	grep -Fq "renderAuditPage(1, 'time_desc')" "$TRAFFIC_VIEW" ||
 	fail "application details do not provide 20-row paging and traffic/time sorting"
+grep -Fq 'var pageSize = 50' "$TRAFFIC_VIEW" &&
+	grep -Fq 'callCatalogSearch(profile' "$TRAFFIC_VIEW" &&
+	grep -Fq 'var LazyAppSelector = form.MultiValue.extend' "$TRAFFIC_VIEW" &&
+	grep -Fq '单项软件最多选择 256 个' "$TRAFFIC_VIEW" ||
+	fail "large application catalogs are not searched and paged lazily"
+grep -Fq "children: Array.prototype.slice.call(parentModalNode.childNodes)" "$TRAFFIC_VIEW" &&
+	grep -Fq "parentModal.node.removeChild(child)" "$TRAFFIC_VIEW" &&
+	grep -Fq "L.dom.content(parentModal.node, parentModal.children)" "$TRAFFIC_VIEW" &&
+	grep -Fq "'type': 'button', 'click': closePicker" "$TRAFFIC_VIEW" ||
+	fail "application picker does not preserve and restore the parent rule modal"
+grep -Fq 'function safeText(value)' "$TRAFFIC_VIEW" &&
+	grep -Fq "E('strong', {}, safeText(app.name))" "$TRAFFIC_VIEW" &&
+	grep -Fq 'function safeChoice(value)' "$TRAFFIC_VIEW" &&
+	grep -Fq 'safeChoice(category.name)' "$TRAFFIC_VIEW" &&
+	grep -Fq "'应用流量审计 - %h'.format" "$TRAFFIC_VIEW" &&
+	grep -Fq "'<b>%h</b><br>%h" \
+		"$ROOT/htdocs/luci-static/resources/c2000max/traffic-chart.js" ||
+	fail "uploaded catalog and device labels are not rendered as escaped text"
+grep -Fq "addEventListener('c2000max-chart-destroy'" "$TRAFFIC_CHART" &&
+	grep -Fq 'observer.disconnect()' "$TRAFFIC_CHART" &&
+	grep -Fq 'destroyCharts(overview)' "$TRAFFIC_VIEW" ||
+	fail "polling chart replacement does not release resize observers"
+if grep -Fq 'callTrafficCatalog()' "$TRAFFIC_VIEW"; then
+	fail "traffic page still downloads the complete application catalog"
+fi
+grep -Fq "data-tab-title': '概览'" "$TRAFFIC_VIEW" &&
+	grep -Fq "data-tab-title': '设备流量'" "$TRAFFIC_VIEW" &&
+	grep -Fq "data-tab-title': '应用审计'" "$TRAFFIC_VIEW" &&
+	grep -Fq "data-tab-title': '实时应用'" "$TRAFFIC_VIEW" &&
+	grep -Fq "data-tab-title': '管控与设置'" "$TRAFFIC_VIEW" ||
+	fail "traffic statistics were not split into focused tabs"
+grep -Fq "method: 'recent_audit'" "$TRAFFIC_VIEW" &&
+	grep -Fq 'var pageSize = 50' "$TRAFFIC_VIEW" &&
+	grep -Fq 'Math.min(150' "$TRAFFIC_VIEW" &&
+	grep -Fq "'实时刷新'" "$TRAFFIC_VIEW" &&
+	grep -Fq "'每 5 秒'" "$TRAFFIC_VIEW" &&
+	grep -Fq '未知连接已过滤' "$TRAFFIC_VIEW" &&
+	grep -Fq 'var loading = false' "$TRAFFIC_VIEW" &&
+	grep -Fq "pane.getAttribute('data-tab-active') === 'true'" "$TRAFFIC_VIEW" &&
+	grep -Fq "pane.addEventListener('cbi-tab-active'" "$TRAFFIC_VIEW" ||
+	fail "real-time application tab is not bounded, paged or refreshable"
+if sed -n '/function renderRealtimeAudit/,/^}/p' "$TRAFFIC_VIEW" | grep -Fq 'setInterval('; then
+	fail "real-time application refresh can overlap slow RPC requests"
+fi
+grep -Fq 'var auditModalSequence = 0' "$TRAFFIC_VIEW" &&
+	grep -Fq 'requestSequence !== auditModalSequence' "$TRAFFIC_VIEW" &&
+	grep -Fq 'result.success !== true' "$TRAFFIC_VIEW" ||
+	fail "modal audit/search requests do not reject stale or failed responses"
+grep -Fq '最多检查 8 个有效载荷包' "$TRAFFIC_VIEW" &&
+	grep -Fq '最多检查 64 个有效载荷包' "$TRAFFIC_VIEW" &&
+	! grep -Fq '未知连接最多 %d 包' "$TRAFFIC_VIEW" ||
+	fail "recognition window UI does not describe payload-packet accounting"
+grep -Fq 'callFeatureActivate(id)' "$TRAFFIC_VIEW" &&
+	grep -Fq 'callFeatureRollback()' "$TRAFFIC_VIEW" &&
+	grep -Fq '爱快规则不会被打包到固件或自动下载' "$TRAFFIC_VIEW" ||
+	fail "LuCI does not expose safe user-controlled profile switching"
+grep -Fq "method: 'feature_install_status'" "$TRAFFIC_VIEW" &&
+	grep -Fq "'id': 'c2000max-feature-job-banner'" "$TRAFFIC_VIEW" &&
+	grep -Fq '任务正在路由器后台执行，请勿断电' "$TRAFFIC_VIEW" &&
+	grep -Fq '重新进入本页仍会显示任务进度' "$TRAFFIC_VIEW" &&
+	grep -Fq 'recoverFeatureJob(initialFeatureJob)' "$TRAFFIC_VIEW" &&
+	grep -Fq 'function waitFeatureInstall(jobId, progress, failures)' "$TRAFFIC_VIEW" &&
+	grep -Fq 'resolveWithin(callFeatureInstallStatus(jobId), null, 5000)' "$TRAFFIC_VIEW" &&
+	grep -Fq 'result.busy === true || result.accepted === false' "$TRAFFIC_VIEW" &&
+	grep -Fq "resolveFeatureJobStart(result, progress, '特征库切换失败')" "$TRAFFIC_VIEW" &&
+	grep -Fq "resolveFeatureJobStart(result, progress, '特征库回退失败')" "$TRAFFIC_VIEW" &&
+	grep -Fq 'return waitFeatureInstall(result.job_id, progress, 0)' "$TRAFFIC_VIEW" ||
+	fail "LuCI feature operations do not expose persistent bounded background progress"
+if ! awk '
+	/o = s\.option\(form\.Button, ._upload_feature./ { upload_block = 1 }
+	upload_block && /if \(rejectConcurrentFeatureJob\(\)\)/ && !guard { guard = NR }
+	upload_block && /ui\.uploadFile\(/ && !upload { upload = NR }
+	END { exit !(guard && upload && guard < upload) }
+' "$TRAFFIC_VIEW"; then
+	fail "feature upload can start before the shared single-flight UI guard"
+fi
+[ "$(grep -c 'if (rejectConcurrentFeatureJob())' "$TRAFFIC_VIEW")" -ge 5 ] &&
+	[ "$(grep -c 'releaseOnError = featureJobStartCanRelease(result)' "$TRAFFIC_VIEW")" -eq 3 ] &&
+	[ "$(grep -c 'var startResponseReceived = false' "$TRAFFIC_VIEW")" -eq 3 ] &&
+	grep -Fq 'if (!uploadCompleted || releaseOnError)' "$TRAFFIC_VIEW" &&
+	! grep -Fq 'if (!asyncAccepted)' "$TRAFFIC_VIEW" ||
+	fail "feature operation UI guard can be cleared by a competing or ambiguous start request"
+grep -Fq '特征库操作任务被中断，请重试。' "$ROOT/root/usr/sbin/c2000max-feature-job" &&
+	! grep -Fq '特征库安装任务被中断' "$ROOT/root/usr/sbin/c2000max-feature-job" ||
+	fail "stale feature jobs still report an install-only recovery action"
+grep -Fq 'var deferredStatus = { _deferred: true }' "$TRAFFIC_VIEW" &&
+	grep -Fq 'managementDeferred: !!(statusDeferred' "$TRAFFIC_VIEW" &&
+	grep -Fq 'var statusPollRequest = data.statusRequest || null' "$TRAFFIC_VIEW" &&
+	grep -Fq 'var rulesetOption = o = s.option' "$TRAFFIC_VIEW" &&
+	grep -Fq 'rulesetOption.default = currentProfileId' "$TRAFFIC_VIEW" ||
+	fail "bounded first paint does not safely hydrate status and rule-profile identity"
+	grep -Fq "callCatalogInfo('')" "$TRAFFIC_VIEW" &&
+	grep -Fq "var lookupProfile = String(info.profile || info.profile_id || '')" "$TRAFFIC_VIEW" &&
+	grep -Fq 'var ruleset = String(section.ruleset || active)' "$TRAFFIC_VIEW" &&
+	grep -Fq 'callCatalogLookup(lookupProfile, Object.keys(wanted)' "$TRAFFIC_VIEW" &&
+	grep -Fq 'currentProfileId = String(catalog.profile || catalog.profile_id ||' "$TRAFFIC_VIEW" &&
+	! grep -Fq 'callCatalogLookup(active,' "$TRAFFIC_VIEW" ||
+	fail "management choices can mix UCI and active-pointer feature generations"
+grep -Fq 'var featureInstallInProgress = false' "$TRAFFIC_VIEW" &&
+	grep -Fq 'featureInstallInProgress = true' "$TRAFFIC_VIEW" &&
+	grep -Fq 'var profileConsistencyRequest = null' "$TRAFFIC_VIEW" &&
+	grep -Fq "var request = L.resolveDefault(callCatalogInfo(''), {})" "$TRAFFIC_VIEW" &&
+	grep -Fq 'resolvedProfile === wantedProfile' "$TRAFFIC_VIEW" &&
+	grep -Fq 'pendingProfileId = String(nextStatus.feature_profile)' "$TRAFFIC_VIEW" ||
+	fail "an asynchronous feature switch can reload LuCI before reaching a terminal state"
+grep -Fq 'var managementOpened = false' "$TRAFFIC_VIEW" &&
+	grep -Fq "if (tabName === 'traffic-manage')" "$TRAFFIC_VIEW" &&
+	grep -Fq "managementPane.getAttribute('data-tab-active') === 'true'" "$TRAFFIC_VIEW" &&
+	grep -Fq 'if (!managementOpened || !managementReady || managementRenderStarted)' "$TRAFFIC_VIEW" ||
+	fail "the management form is still rendered before its tab is first opened"
+grep -Fq '+coreutils-od' "$ROOT/Makefile" &&
+	grep -Fq '+coreutils-sort' "$ROOT/Makefile" ||
+	fail "traffic package is missing its od/sort runtime dependencies"
+grep -Fxq '/etc/c2000max-traffic/features/' \
+	"$ROOT/root/lib/upgrade/keep.d/c2000max-traffic" ||
+	fail "uploaded feature profiles are not preserved by sysupgrade"
+grep -Fxq '/www/luci-static/resources/c2000max-app-icons/' \
+	"$ROOT/root/lib/upgrade/keep.d/c2000max-traffic" ||
+	fail "the active profile icon set is not preserved by sysupgrade"
+if find "$ROOT" -type f \( -name 'IKprotocol-*.bin' -o -name '*ikuai*.bin' \) | grep -q .; then
+	fail "a third-party IKprotocol feature archive was bundled in the image"
+fi
 grep -Fq 'json_add_int last_seen' "$TRAFFIC" ||
 	fail "application audit API does not expose the last activity time"
 grep -q "option storage_limit_mb '100'" "$ROOT/root/etc/config/c2000max_traffic" &&
@@ -186,8 +1302,9 @@ grep -q "option control_mode 'seamless'" "$ROOT/root/etc/config/c2000max_traffic
 	grep -Fq "o.value('force', '强力管控" "$TRAFFIC_VIEW" &&
 	grep -Fq '[ "$control_mode" != force ] || invalidate_acceleration_cache' "$TRAFFIC" ||
 	fail "application control does not expose seamless and force enforcement"
-grep -q 'ct secmark & 0x0000ffff' "$TRAFFIC" ||
-	fail "application blocking is not keyed by the isolated OAF APP_ID"
+grep -q 'ct secmark & 0x1fff0000' "$TRAFFIC" &&
+	grep -q 'ct secmark & 0x0000ffff' "$TRAFFIC" ||
+	fail "application blocking is not keyed by the profile epoch and isolated OAF APP_ID"
 grep -q 'OAF_CT_TAG(ct) ((ct)->secmark)' \
 	"$ROOT/../c2000max-appfilter/src/oaf/app_filter.c" ||
 	fail "OAF still risks overwriting policy-routing conntrack marks"
@@ -207,26 +1324,81 @@ OAF_SOURCE="$ROOT/../c2000max-appfilter/src/oaf/app_filter.c"
 grep -q 'if (g_hold_acceleration)' "$OAF_SOURCE" &&
 	grep -q 'skb->mark |= OAF_ACCEL_BYPASS_MARK' "$OAF_SOURCE" ||
 	fail "OAF acceleration bypass is not controlled by the recognition profile"
-grep -q 'total_packets > g_max_dpi_packets' "$OAF_SOURCE" ||
+grep -q 'payload_count > g_max_dpi_packets' "$OAF_SOURCE" ||
 	fail "OAF DPI packet window is still compile-time only"
+grep -Fq 'af_dpi_global_try_enter()' "$OAF_SOURCE" &&
+	grep -Fq 'atomic_cmpxchg(&af_dpi_global_owner, 0, 1)' "$OAF_SOURCE" &&
+	grep -Fq 'af_dpi_global_leave()' "$OAF_SOURCE" ||
+	fail "large native DPI bursts can still monopolize both router CPUs"
 grep -Fq 'kzalloc(sizeof(char) * (size + 1), GFP_KERNEL)' "$OAF_SOURCE" ||
 	fail "OAF boot feature parser still reads beyond its exact-size buffer"
+grep -Fq 'if (!skb || !len || from > skb->len || len > skb->len - from)' "$OAF_SOURCE" &&
+	grep -Fq 'skb_copy_bits(skb, from, msg_buf, len)' "$OAF_SOURCE" ||
+	fail "OAF non-linear skb payload copies are not bounded to the allocated buffer"
+if grep -Fq 'skb_seq_read(consumed' "$OAF_SOURCE"; then
+	fail "OAF still copies whole skb fragments into a payload-sized buffer"
+fi
 grep -Fq 'load_feature_config() < 0 || g_feature_init == 0' "$OAF_SOURCE" ||
 	fail "OAF does not synchronously load the boot feature database"
-grep -Fq 'g_feature_init++' "$OAF_SOURCE" ||
-	fail "OAF does not expose the number of loaded kernel signatures"
+grep -Fq 'db->count++' "$OAF_SOURCE" &&
+	grep -Fq 'g_feature_init = new_db->count' "$OAF_SOURCE" ||
+	fail "OAF does not expose the committed number of kernel signatures"
+grep -Fq 'af_feature_active = new_db' "$OAF_SOURCE" &&
+	grep -Fq 'af_feature_staging = NULL' "$OAF_SOURCE" &&
+	grep -Fq 'g_feature_generation++' "$OAF_SOURCE" ||
+	fail "OAF feature reload does not atomically publish the staged database"
+grep -Fq 'left->fallback != right->fallback' "$OAF_SOURCE" &&
+	grep -Fq 'left->specificity != right->specificity' "$OAF_SOURCE" &&
+	grep -Fq 'iKuai stores port/IP/length, raw payload, SNI and HTTP rules' "$OAF_SOURCE" ||
+	fail "native iKuai rules are still globally ordered by numeric priority before evidence strength"
+feature_compare_block="$(sed -n '/^static int af_feature_node_compare(/,/^}/p' "$OAF_SOURCE")"
+printf '%s\n' "$feature_compare_block" | grep -Fq 'af_feature_precedes(left, right)' &&
+	printf '%s\n' "$feature_compare_block" | grep -Fq 'af_feature_precedes(right, left)' ||
+	fail "feature bucket sort and runtime merge use different iKuai evidence orders"
+grep -Fq 'list_add_tail(&node->head' "$OAF_SOURCE" &&
+	grep -Fq 'list_sort(NULL, &db->heads' "$OAF_SOURCE" &&
+	grep -Fq 'cond_resched()' "$OAF_SOURCE" ||
+	fail "large native libraries still use quadratic/non-yielding feature insertion"
+OAF_CLIENT_SOURCE="$ROOT/../c2000max-appfilter/src/oaf/af_client.c"
+grep -Fq 'alloc_ordered_workqueue("oaf_work", WQ_MEM_RECLAIM)' "$OAF_CLIENT_SOURCE" &&
+	grep -Fq 'INIT_DELAYED_WORK(&client->client_work, client_work_handler)' "$OAF_CLIENT_SOURCE" &&
+	grep -Fq 'cancel_delayed_work_sync(&client->client_work)' "$OAF_CLIENT_SOURCE" ||
+	fail "OAF client reports are not confined to a cancel-safe process-context queue"
+if grep -Eq 'timer_setup\(&client->client_timer|__af_visit_info_report\(client\).*timer' \
+	"$OAF_CLIENT_SOURCE"; then
+	fail "OAF client JSON reporting can still run from timer softirq context"
+fi
+OAFD_MAIN="$ROOT/../c2000max-appfilter/src/oafd/main.c"
+grep -Fq 'initialise_boot_feature_state() < 0' "$OAFD_MAIN" &&
+	grep -Fq 'kernel_count != expected_count' "$OAFD_MAIN" &&
+	grep -Fq 'reuse boot feature database' "$OAFD_MAIN" ||
+	fail "oafd still recompiles the complete native profile immediately after modprobe"
+boot_init_line="$(grep -n 'initialise_boot_feature_state() < 0' "$OAFD_MAIN" | tail -n1 | cut -d: -f1)"
+record_enable_line="$(grep -n '^[[:space:]]*update_oaf_record_status();' "$OAFD_MAIN" | tail -n1 | cut -d: -f1)"
+[ -n "$boot_init_line" ] && [ -n "$record_enable_line" ] &&
+	[ "$boot_init_line" -lt "$record_enable_line" ] ||
+	fail "OAF packet recording starts before the boot feature database is validated"
+grep -Fq 'INIT_DELAYED_WORK(&oaf_maintenance_work' "$OAF_SOURCE" &&
+	grep -Fq 'cancel_delayed_work_sync(&oaf_maintenance_work)' "$OAF_SOURCE" ||
+	fail "OAF periodic maintenance still runs from an unsafe timer context"
 APPFILTER_INIT="$ROOT/../c2000max-appfilter/files/c2000max-appfilter.init"
 TRAFFIC_INIT="$ROOT/root/etc/init.d/c2000max-traffic"
 acct_line="$(grep -n 'nf_conntrack_acct=1' "$APPFILTER_INIT" | cut -d: -f1)"
 module_line="$(grep -n '^[[:space:]]*modprobe oaf' "$APPFILTER_INIT" | cut -d: -f1)"
+[ "$(grep -n 'c2000max-feature-manager init' "$APPFILTER_INIT" | cut -d: -f1)" -lt "$module_line" ] ||
+	fail "OAF startup does not reconcile an interrupted profile transaction before module load"
 [ "$(grep -n 'ln -sf /etc/appfilter/feature.cfg' "$APPFILTER_INIT" | cut -d: -f1)" -lt "$module_line" ] ||
 	fail "OAF feature path is still created after the module loads"
 [ -n "$acct_line" ] && [ -n "$module_line" ] && [ "$acct_line" -lt "$module_line" ] ||
 	fail "application audit does not enable conntrack accounting before OAF"
 grep -q "auto_load_engine='0'" "$APPFILTER_INIT" ||
 	fail "OAF daemon can still race the init script by loading the module twice"
-grep -q 'c2000max-traffic audit-reset' "$APPFILTER_INIT" ||
-	fail "enabling audit does not reset old unclassifiable LAN sessions"
+if grep -q 'c2000max-traffic audit-reset' "$APPFILTER_INIT"; then
+	fail "enabling audit still destroys every LAN conntrack/PPE entry"
+fi
+grep -q 'c2000max-traffic sample' "$APPFILTER_INIT" &&
+	grep -q 'traffic_run audit-rebaseline' "$ROOT/root/usr/sbin/c2000max-feature-manager" ||
+	fail "audit startup/profile switching does not establish a non-destructive counter baseline"
 reload_block="$(sed -n '/^reload_service()/,/^}/p' "$APPFILTER_INIT")"
 printf '%s\n' "$reload_block" | grep -Fq 'pidof c2000max-oafd' &&
 	printf '%s\n' "$reload_block" | grep -Fq 'apply_recognition_profile' ||
@@ -274,13 +1446,16 @@ apply_recognition_profile
 [ "$(cat "$OAF_SYSCTL_DIR/hold_acceleration")" = 1 ] &&
 	[ "$(cat "$OAF_SYSCTL_DIR/max_dpi_packets")" = 64 ] ||
 	fail "precise profile does not retain the full DPI window"
-grep -q "option recognition_mode 'seamless'" \
+grep -q "option recognition_mode 'balanced'" \
 	"$ROOT/root/etc/config/c2000max_traffic" ||
-	fail "seamless recognition is not the default"
-grep -q "value('balanced'.*8 包" \
+	fail "balanced recognition is not the accuracy-safe default"
+grep -Fq "accuracy_default_v42" \
+	"$ROOT/root/etc/uci-defaults/luci-c2000max-traffic" ||
+	fail "the previous seamless default is not migrated once"
+grep -q "value('balanced'.*8 个有效载荷包后恢复硬件加速" \
 	"$ROOT/htdocs/luci-static/resources/view/c2000max/traffic.js" ||
 	fail "LuCI does not expose the balanced recognition profile"
-grep -q "value('precise'.*64 包" \
+grep -q "value('precise'.*最多检查 64 个有效载荷包" \
 	"$ROOT/htdocs/luci-static/resources/view/c2000max/traffic.js" ||
 	fail "LuCI does not expose the precise recognition profile"
 
@@ -509,8 +1684,19 @@ selector_result="$(add_inferred_rule hnat 1 1000 500 \
 	'2001:db8::1' 100 20)"
 [ "$selector_result" = '|2001:db8::1|' ] ||
 	fail "EQoS no longer classifies a real IPv6 selector: $selector_result"
-grep -q 'debugfs_create_file("mib_sync"' \
-	"$ROOT/../../../../target/linux/mediatek/files-6.12/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c" ||
-	fail "HNAT driver does not expose the lightweight MIB sync path"
+HNAT_PATCH="$ROOT/../../../../target/linux/mediatek/patches-6.12/999-zzz-5120-mtk-hnat-bound-audit-mib-sync.patch"
+grep -Fq 'debugfs_create_file("mib_sync"' "$HNAT_PATCH" ||
+	fail "HNAT final-layer patch does not expose the lightweight MIB sync path"
+grep -Fq 'struct mutex' "$HNAT_PATCH" &&
+	grep -Fq 'mutex_lock_interruptible(&h->mib_sync_lock)' "$HNAT_PATCH" &&
+	grep -Fq 'HNAT_MIB_SYNC_SCAN_BUDGET' "$HNAT_PATCH" &&
+	grep -Fq 'HNAT_MIB_SYNC_READ_BUDGET' "$HNAT_PATCH" &&
+	grep -Fq 'cond_resched()' "$HNAT_PATCH" ||
+	fail "HNAT MIB accounting is not serialized and incrementally scheduled"
+if grep -Eq '^\+.*!\(val & BIT_MIB_BUSY\), 20, 10000' "$HNAT_PATCH"; then
+	fail "HNAT can still atomically spin for 10ms per flow counter"
+fi
+grep -Eq '^\+.*!\(val & BIT_MIB_BUSY\), 20, 1000' "$HNAT_PATCH" ||
+	fail "HNAT final-layer patch does not cap each atomic MIB poll at 1ms"
 
 echo "PASS: acceleration-aware traffic accounting fixtures"

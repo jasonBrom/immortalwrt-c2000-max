@@ -16,6 +16,10 @@ apply_recognition_profile()
 
 	mode="$(uci -q get c2000max_traffic.audit.recognition_mode)"
 	case "$mode" in
+		seamless)
+			hold=0
+			packets=8
+			;;
 		balanced)
 			hold=1
 			packets=8
@@ -25,7 +29,7 @@ apply_recognition_profile()
 			packets=64
 			;;
 		*)
-			hold=0
+			hold=1
 			packets=8
 			;;
 	esac
@@ -36,6 +40,15 @@ apply_recognition_profile()
 
 start_service()
 {
+	# Complete or safely roll back the durable identity side of an interrupted
+	# profile switch before the kernel reads feature.cfg.  The manager is an
+	# optional companion package, so standalone appfilter installs still work.
+	if [ -x /usr/sbin/c2000max-feature-manager ]; then
+		/usr/sbin/c2000max-feature-manager init >/dev/null 2>&1 || {
+			logger -t c2000max-appfilter "cannot reconcile the active OAF feature profile"
+			return 1
+		}
+	fi
 	audit_enabled || return 0
 
 	# OAF uses conntrack packet counters to bound first-packet inspection.
@@ -69,11 +82,12 @@ start_service()
 	procd_set_param stderr 1
 	procd_close_instance
 
-	# Account old sessions once, then replace only LAN-client conntrack entries.
-	# Merely flushing PPE is insufficient: connections already beyond OAF's
-	# first-N-packet window are terminally unknown and cannot be reclassified.
+	# Establish the byte-accounting baseline without destroying every LAN
+	# conntrack/PPE entry.  A native IK profile contains roughly 15k features;
+	# forcing all devices to reconnect at once made both A53 CPUs enter DPI
+	# softirq together and could starve the 30-second hardware watchdog.  Old
+	# sessions age out naturally while all newly created sessions are audited.
 	/usr/sbin/c2000max-traffic sample >/dev/null 2>&1 || true
-	/usr/sbin/c2000max-traffic audit-reset >/dev/null 2>&1 || true
 }
 
 stop_service()

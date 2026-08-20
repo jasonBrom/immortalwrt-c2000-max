@@ -22,6 +22,8 @@ THE SOFTWARE.
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
+#include <limits.h>
 #include "appfilter_config.h"
 #include "appfilter.h"
 #include <uci.h>
@@ -168,10 +170,16 @@ int af_uci_get_list_value(struct uci_context *ctx, char *key, char *output, int 
     struct uci_element *e;
     struct uci_ptr ptr;
     int ret = -1;
-    int dummy;
-    char *parameters ;
+    int sep = 0;
+    int written;
+    size_t len;
     char param_tmp[128] = {0};
-    strcpy(param_tmp, key);
+
+    if (!ctx || !key || !output || out_len <= 0 || !delimt)
+        return ret;
+    if (snprintf(param_tmp, sizeof(param_tmp), "%s", key) >=
+        (int)sizeof(param_tmp))
+        return ret;
     if (uci_lookup_ptr(ctx, &ptr, param_tmp, true) != UCI_OK) {
         return ret;
     }
@@ -180,23 +188,25 @@ int af_uci_get_list_value(struct uci_context *ctx, char *key, char *output, int 
         ctx->err = UCI_ERR_NOTFOUND;
         goto done;
     }
-    int sep = 0;
     e = ptr.last;
-	int len = 0;
     switch(e->type) {
         case UCI_TYPE_SECTION:
             ret = -1;
 			goto done;
         case UCI_TYPE_OPTION:
 			if (UCI_TYPE_LIST == ptr.o->type){
-				memset(output, 0x0, out_len);
+				output[0] = '\0';
 				uci_foreach_element(&ptr.o->v.list, e) {
 					len = strlen(output);
-					if (sep){
-						strncat(output + len, delimt, out_len);
+					written = snprintf(output + len, out_len - len,
+							   "%s%s", sep ? delimt : "",
+							   e->name);
+					if (written < 0 || (size_t)written >=
+					    (size_t)out_len - len) {
+						output[0] = '\0';
+						ret = -1;
+						goto done;
 					}
-					len = strlen(output);
-					sprintf(output + len, "%s", e->name);
 					sep = 1;
 				}
 				ret = 0;
@@ -408,46 +418,99 @@ config_init_package(const char *config)
 
     return p;
 }
+static int app_id_to_index(int id)
+{
+    int app_type = id / 1000;
+    int app_num = id % 1000;
+
+    if (app_type < 1 || app_type > MAX_APP_TYPE ||
+        app_num < 1 || app_num > MAX_APP_ID_NUM)
+        return -1;
+
+    return (app_type - 1) * MAX_APP_ID_NUM + app_num - 1;
+}
+
+static char *skip_space(char *p)
+{
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    return p;
+}
+
+static void trim_end(char *begin, char **end)
+{
+    while (*end > begin && isspace((unsigned char)(*end)[-1]))
+        (*end)--;
+}
+
 char *get_app_name_by_id(int id)
 {
-    int i;
-    for (i = 0; i < g_app_count; i++)
-    {
-        if (id == app_name_table[i].id)
-            return app_name_table[i].name;
-    }
-    return "";
+    int index = app_id_to_index(id);
+
+    if (index < 0 || app_name_table[index].id != id)
+        return "";
+
+    return app_name_table[index].name;
 }
 
 void init_app_name_table(void)
 {
-    int count = 0;
+    FILE *fp;
     char line_buf[2048] = {0};
+    char *cursor;
+    char *id_end;
+    char *name_begin;
+    char *name_end;
+    char *feature_sep;
+    long parsed_id;
+    int app_id;
+    int index;
+    size_t name_len;
 
-    FILE *fp = fopen("/tmp/feature.cfg", "r");
+    memset(app_name_table, 0, sizeof(app_name_table));
+    g_app_count = 0;
+    fp = fopen("/tmp/feature.cfg", "r");
     if (!fp)
     {
         printf("open file failed\n");
         return;
     }
-    g_app_count = 0;
+
     while (fgets(line_buf, sizeof(line_buf), fp))
     {
-        if (strstr(line_buf, "#"))
+        cursor = skip_space(line_buf);
+        if (*cursor == '\0' || *cursor == '#' ||
+            !isdigit((unsigned char)*cursor) || strchr(cursor, '#'))
             continue;
-        if (strlen(line_buf) < 10)
+
+        feature_sep = strstr(cursor, ":[");
+        if (!feature_sep)
             continue;
-        if (!strstr(line_buf, ":"))
+
+        parsed_id = strtol(cursor, &id_end, 10);
+        if (id_end == cursor || !isspace((unsigned char)*id_end) ||
+            id_end >= feature_sep || parsed_id < INT_MIN || parsed_id > INT_MAX)
             continue;
-        char *pos1 = strstr(line_buf, ":");
-        char app_info_buf[128] = {0};
-        int app_id;
-        char app_name[64] = {0};
-        memset(app_name, 0x0, sizeof(app_name));
-        strncpy(app_info_buf, line_buf, pos1 - line_buf);
-        sscanf(app_info_buf, "%d %s", &app_id, app_name);
-        app_name_table[g_app_count].id = app_id;
-        strcpy(app_name_table[g_app_count].name, app_name);
+
+        app_id = (int)parsed_id;
+        index = app_id_to_index(app_id);
+        if (index < 0)
+            continue;
+
+        name_begin = skip_space(id_end);
+        name_end = feature_sep;
+        trim_end(name_begin, &name_end);
+        name_len = (size_t)(name_end - name_begin);
+        if (name_len == 0 || name_len >= sizeof(app_name_table[index].name))
+            continue;
+
+        /* Keep the first definition, matching the historic linear lookup. */
+        if (app_name_table[index].id != 0)
+            continue;
+
+        app_name_table[index].id = app_id;
+        memcpy(app_name_table[index].name, name_begin, name_len);
+        app_name_table[index].name[name_len] = '\0';
         g_app_count++;
     }
     fclose(fp);
@@ -455,21 +518,51 @@ void init_app_name_table(void)
 
 void init_app_class_name_table(void)
 {
+    FILE *fp;
     char line_buf[2048] = {0};
+    char *cursor;
+    char *id_end;
+    char *name_begin;
+    char *name_end;
+    long parsed_id;
     int class_id;
-    char class_name[64] = {0};
-    FILE *fp = fopen("/tmp/app_class.txt", "r");
+    size_t name_len;
+
+    memset(CLASS_NAME_TABLE, 0, sizeof(CLASS_NAME_TABLE));
+    g_cur_class_num = 0;
+    fp = fopen("/tmp/app_class.txt", "r");
     if (!fp)
     {
         printf("open file failed\n");
         return;
     }
-    g_cur_class_num = 0;
+
     while (fgets(line_buf, sizeof(line_buf), fp))
     {
-        sscanf(line_buf, "%d %*s %s", &class_id, class_name);
-        strcpy(CLASS_NAME_TABLE[class_id - 1], class_name);
-        g_cur_class_num++;
+        cursor = skip_space(line_buf);
+        if (!isdigit((unsigned char)*cursor))
+            continue;
+        parsed_id = strtol(cursor, &id_end, 10);
+        if (id_end == cursor || !isspace((unsigned char)*id_end) ||
+            parsed_id < 1 || parsed_id > MAX_APP_TYPE)
+            continue;
+        class_id = (int)parsed_id;
+
+        /* Skip the machine-readable class key emitted by gen_class.sh. */
+        cursor = skip_space(id_end);
+        while (*cursor && !isspace((unsigned char)*cursor))
+            cursor++;
+        name_begin = skip_space(cursor);
+        name_end = name_begin + strlen(name_begin);
+        trim_end(name_begin, &name_end);
+        name_len = (size_t)(name_end - name_begin);
+        if (name_len == 0 || name_len >= MAX_CLASS_NAME_LEN)
+            continue;
+
+        memcpy(CLASS_NAME_TABLE[class_id - 1], name_begin, name_len);
+        CLASS_NAME_TABLE[class_id - 1][name_len] = '\0';
+        if (class_id > g_cur_class_num)
+            g_cur_class_num = class_id;
     }
     fclose(fp);
 }

@@ -17,16 +17,54 @@ fi
 [ "$(uci -q get c2000max_traffic.audit)" = audit ] || {
 	uci -q set c2000max_traffic.audit='audit'
 	uci -q set c2000max_traffic.audit.enabled='0'
-	uci -q set c2000max_traffic.audit.recognition_mode='seamless'
+	uci -q set c2000max_traffic.audit.recognition_mode='balanced'
 	uci -q set c2000max_traffic.audit.control_mode='seamless'
 	uci -q set c2000max_traffic.audit.retention_days='30'
 }
 [ -n "$(uci -q get c2000max_traffic.audit.recognition_mode)" ] || \
-	uci -q set c2000max_traffic.audit.recognition_mode='seamless'
+	uci -q set c2000max_traffic.audit.recognition_mode='balanced'
 [ -n "$(uci -q get c2000max_traffic.audit.control_mode)" ] || \
 	uci -q set c2000max_traffic.audit.control_mode='seamless'
 [ -n "$(uci -q get c2000max_traffic.config.storage_limit_mb)" ] || \
 	uci -q set c2000max_traffic.config.storage_limit_mb='100'
+
+# The original default was seamless, which allows PPE/HNAT to bind before an
+# application payload naturally reaches OAF.  That is unsuitable for the
+# packet-sequence and multi-header predicates in a native IK profile and was
+# the main reason a valid rule could remain completely unobserved.  Migrate
+# the old default once; users who explicitly need zero slow-path packets can
+# still choose seamless afterwards.  Balanced only holds each unknown flow
+# for at most eight application-payload packets, then hardware acceleration
+# resumes normally.
+if [ "$(uci -q get c2000max_traffic.audit.accuracy_default_v42)" != 1 ]; then
+	[ "$(uci -q get c2000max_traffic.audit.recognition_mode)" != seamless ] || \
+		uci -q set c2000max_traffic.audit.recognition_mode='balanced'
+	uci -q set c2000max_traffic.audit.accuracy_default_v42='1'
+fi
+
+# Adopt the currently installed feature database as the first immutable
+# profile. Existing numeric APPIDs must be bound to that profile before a
+# second database can be uploaded, otherwise the same number could name a
+# different application after a switch.
+if [ -z "$IPKG_INSTROOT" ] && [ -x /usr/sbin/c2000max-feature-manager ]; then
+	profile_json="$(/usr/sbin/c2000max-feature-manager init 2>/dev/null || true)"
+	ruleset="$(printf '%s' "$profile_json" | jsonfilter -e '@.sha256' 2>/dev/null)"
+	case "$ruleset" in
+		''|*[!0-9a-f]*) ;;
+		*) [ "${#ruleset}" -eq 64 ] && {
+			uci -q set "c2000max_traffic.audit.ruleset=$ruleset"
+			. /lib/functions.sh
+			bind_schedule_ruleset() {
+				local section="$1" current
+				config_get current "$section" ruleset
+				[ -n "$current" ] || \
+					uci -q set "c2000max_traffic.$section.ruleset=$ruleset"
+			}
+			config_load c2000max_traffic
+			config_foreach bind_schedule_ruleset schedule
+		} ;;
+	esac
+fi
 uci -q commit c2000max_traffic
 
 uci -q batch <<-EOF >/dev/null

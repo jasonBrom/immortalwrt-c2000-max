@@ -1711,7 +1711,7 @@ fi
 [[ "$(grep -c 'hnat_bind_table_empty' "$HNAT_INIT")" -ge 3 ]] ||
 	fail "controller does not verify zero BIND entries before and after commit"
 DEFAULTS="$ROOT/files/etc/uci-defaults/99-c2000max-defaults"
-grep -q 'for wan_network in wan wan6 c2000_wan c2000_wan6' "$DEFAULTS" ||
+grep -q 'for wan_network in wan wan6 eth2 eth2v6 c2000_wan c2000_wan6' "$DEFAULTS" ||
 	fail "permanent standard and managed WAN-zone membership missing"
 grep -q 'input=REJECT' "$DEFAULTS" ||
 	fail "fail-closed WAN input default missing"

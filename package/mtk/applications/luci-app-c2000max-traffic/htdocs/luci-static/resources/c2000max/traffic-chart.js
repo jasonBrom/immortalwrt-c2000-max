@@ -23,7 +23,8 @@ function frame(height) {
 		'style': 'display:block;width:100%;height:%dpx;touch-action:none'.format(height)
 	});
 	return {
-		root: E('div', { 'style': 'position:relative;width:100%;min-width:0' }, [ canvas, tooltip ]),
+		root: E('div', { 'class': 'c2000max-chart-frame',
+			'style': 'position:relative;width:100%;min-width:0' }, [ canvas, tooltip ]),
 		canvas: canvas,
 		tooltip: tooltip,
 		height: height
@@ -48,18 +49,52 @@ function contextFor(chart) {
 
 function watchSize(chart, draw) {
 	var queued = false;
+	var attached = false;
+	var destroyed = false;
+	var observer = null;
+	var resizeHandler = null;
+
+	function destroy() {
+		if (destroyed)
+			return;
+		destroyed = true;
+		if (observer)
+			observer.disconnect();
+		if (resizeHandler)
+			window.removeEventListener('resize', resizeHandler);
+	}
+
 	function redraw() {
-		if (queued) return;
+		if (destroyed || queued) return;
+		if (document.body.contains(chart.root))
+			attached = true;
+		else if (attached) {
+			destroy();
+			return;
+		}
 		queued = true;
 		requestAnimationFrame(function() {
 			queued = false;
+			if (destroyed)
+				return;
+			if (document.body.contains(chart.root))
+				attached = true;
+			else if (attached) {
+				destroy();
+				return;
+			}
 			draw();
 		});
 	}
-	if (window.ResizeObserver)
-		new ResizeObserver(redraw).observe(chart.root);
-	else
-		window.addEventListener('resize', redraw);
+	if (window.ResizeObserver) {
+		observer = new ResizeObserver(redraw);
+		observer.observe(chart.root);
+	}
+	else {
+		resizeHandler = redraw;
+		window.addEventListener('resize', resizeHandler);
+	}
+	chart.root.addEventListener('c2000max-chart-destroy', destroy, { once: true });
 	redraw();
 }
 
@@ -282,7 +317,7 @@ function doughnut(items, options) {
 		if (selected >= 0) {
 			var total = visibleTotal();
 			var item = items[selected];
-			positionTooltip(chart, event, '<b>%s</b><br>%s（%.1f%%）'.format(item.name,
+			positionTooltip(chart, event, '<b>%h</b><br>%h（%.1f%%）'.format(String(item.name),
 				options.formatValue ? options.formatValue(item.value) : item.value, item.value * 100 / total));
 		}
 		else hideTooltip(chart);
@@ -309,7 +344,7 @@ function doughnut(items, options) {
 			}
 		}, [
 			E('span', { 'style': 'color:%s'.format(item.color) }, '●'),
-			E('span', { 'style': 'flex:1' }, item.name),
+			E('span', { 'style': 'flex:1' }, [ String(item.name) ]),
 			E('span', {}, options.formatValue ? options.formatValue(item.value) : String(item.value))
 		]);
 	}));

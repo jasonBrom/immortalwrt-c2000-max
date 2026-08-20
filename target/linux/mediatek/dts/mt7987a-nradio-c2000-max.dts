@@ -31,7 +31,7 @@
 	};
 
 	chosen {
-		bootargs = "console=ttyS0,115200n1 earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait rootfstype=squashfs,f2fs pci=pcie_bus_perf cpufreq.default_governor=performance";
+		bootargs = "console=ttyS0,115200n1 earlycon=uart8250,mmio32,0x11000000 root=PARTLABEL=rootfs rootwait rootfstype=squashfs,f2fs pci=pcie_bus_perf cpufreq.default_governor=schedutil";
 		stdout-path = "serial0:115200n8";
 	};
 
@@ -132,6 +132,21 @@
 		regulator-max-microvolt = <5000000>;
 		regulator-boot-on;
 		regulator-always-on;
+	};
+};
+
+/* Keep the previous kernel console/oops across an unexpected watchdog or
+ * panic reboot.  The retail boot chain reserves 0x5ffc0000..0x5fffffff for
+ * secure monitor memory; this adjacent 256 KiB range is otherwise ordinary
+ * DDR and does not overlap the Wi-Fi MCU reservation at 0x50000000. */
+&{/reserved-memory} {
+	ramoops@5ff80000 {
+		compatible = "ramoops";
+		no-map;
+		reg = <0 0x5ff80000 0 0x00040000>;
+		record-size = <0x00010000>;
+		console-size = <0x00020000>;
+		pmsg-size = <0x00010000>;
 	};
 };
 

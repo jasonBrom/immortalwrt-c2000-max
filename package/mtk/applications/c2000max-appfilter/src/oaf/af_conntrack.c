@@ -292,8 +292,7 @@ int af_conn_init(void)
 	{
 		INIT_HLIST_HEAD(&af_conn_table[i]);
 	}
-    af_conn_init_procfs();
-    return 0;
+    return af_conn_init_procfs();
 }
 
 void af_conn_exit(void){

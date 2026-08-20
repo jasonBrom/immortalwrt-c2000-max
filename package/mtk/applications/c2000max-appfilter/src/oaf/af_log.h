@@ -9,6 +9,7 @@ extern int g_by_pass_accl;
 extern unsigned int af_lan_ip;
 extern unsigned int af_lan_mask;
 extern int g_feature_init;
+extern unsigned int g_feature_generation;
 extern int g_user_mode;
 extern int g_disable_quic;
 extern int g_app_filter_mode;

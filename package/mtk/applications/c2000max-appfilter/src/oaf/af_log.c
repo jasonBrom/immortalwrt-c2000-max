@@ -19,6 +19,7 @@ unsigned int af_lan_mask = 0;
 char g_lan_ifname[64] = "br-lan";
 int g_tcp_rst = 1;
 int g_feature_init = 0;
+unsigned int g_feature_generation;
 char g_oaf_version[64] = AF_VERSION;
 int g_disable_quic = 0;
 int g_app_filter_mode = 0; // 0 = specified apps, 1 = all apps
@@ -48,8 +49,15 @@ static struct ctl_table oaf_table[] = {
 		.procname	= "feature_init",
 		.data		= &g_feature_init,
 		.maxlen 	= sizeof(int),
-		.mode		= 0666,
+		.mode		= 0444,
 		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "feature_generation",
+		.data		= &g_feature_generation,
+		.maxlen		= sizeof(g_feature_generation),
+		.mode		= 0444,
+		.proc_handler	= proc_douintvec,
 	},
 	{
 		.procname	= "version",
@@ -202,8 +210,7 @@ static int af_fini_log_sysctl(void)
 }
 
 int af_log_init(void){
-	af_init_log_sysctl();
-	return 0;
+	return af_init_log_sysctl();
 }
 
 int af_log_exit(void){
