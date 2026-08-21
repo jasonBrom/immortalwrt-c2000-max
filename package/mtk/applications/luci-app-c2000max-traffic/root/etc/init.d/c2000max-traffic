@@ -37,6 +37,18 @@ reload_service()
 		stop
 		return 0
 	fi
+	# This service owns the UCI reload trigger.  Start/reconfigure OAF before
+	# applying its nft consumer policy; when audit was disabled at boot the
+	# appfilter procd instance does not yet exist and cannot receive a trigger.
+	if [ "$(uci -q get c2000max_traffic.audit.enabled)" = 1 ]; then
+		if [ -r /proc/sys/oaf/version ]; then
+			/etc/init.d/c2000max-appfilter reload >/dev/null 2>&1 || return 1
+		else
+			/usr/sbin/c2000max-traffic audit-engine-sync >/dev/null 2>&1 || return 1
+		fi
+	else
+		/etc/init.d/c2000max-appfilter stop >/dev/null 2>&1 || true
+	fi
 
 	case "$pid" in
 		''|*[!0-9]*) ;;

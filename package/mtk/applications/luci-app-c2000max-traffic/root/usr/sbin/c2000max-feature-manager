@@ -45,7 +45,7 @@ MAX_ICON_DIMENSION="${C2000_FEATURE_MAX_ICON_DIMENSION:-1024}"
 # Native v4 libraries can contain thousands of regex programs.  The loader
 # sends them to the kernel synchronously, one netlink message at a time; allow
 # slower A53-class routers enough time to finish before declaring rollback.
-RELOAD_TRIES="${C2000_FEATURE_RELOAD_TRIES:-60}"
+RELOAD_TRIES="${C2000_FEATURE_RELOAD_TRIES:-180}"
 RELOAD_INTERVAL="${C2000_FEATURE_RELOAD_INTERVAL:-1}"
 RELOAD_GRACE="${C2000_FEATURE_RELOAD_GRACE:-1}"
 
@@ -55,6 +55,7 @@ TRAFFIC_PROFILE_LOCKED=0
 ACTIVATION_STAGED=0
 ACTIVATION_PENDING=0
 ROLLBACK_RUNTIME_FAILED=0
+RELOAD_DIAGNOSTIC=""
 
 fail()
 {
@@ -609,7 +610,11 @@ extract_tar_member()
 {
 	local archive="$1" member="$2" output="$3" archive_member
 	archive_member="$(awk -v wanted="$member" '
-		{ path=$0; sub(/^\.[/]/,"",path); if (path == wanted) { print $0; exit } }
+		{
+			path=$0
+			if (substr(path, 1, 2) == "./") path=substr(path, 3)
+			if (path == wanted) { print $0; exit }
+		}
 	' "$WORK/tar.list")"
 	[ -n "$archive_member" ] || fail "IKprotocol member $member is missing"
 	tar -xOzf "$archive" "$archive_member" > "$output" 2>/dev/null ||
@@ -620,7 +625,7 @@ extract_tar_member()
 
 extract_ik_native()
 {
-	local archive="$1" content compiler auxiliary
+	local archive="$1" content compiler auxiliary compiler_error
 	content="$WORK/content"
 	mkdir -p "$content" || fail "cannot stage the IKprotocol archive"
 	extract_tar_member "$archive" README.txt "$content/README.txt"
@@ -643,10 +648,16 @@ extract_ik_native()
 		compiler="${0%/*}/../libexec/c2000max-ik-compile.uc"
 	fi
 	[ -x "$compiler" ] || fail "the ik-native-v1 compiler is unavailable"
-	"$compiler" "$content" "$content" > "$WORK/ik-compiler.result" ||
-		fail "ik-native-v1 compilation failed"
+	if ! "$compiler" "$content" "$content" > "$WORK/ik-compiler.result" \
+		2> "$WORK/ik-compiler.error"; then
+		compiler_error="$(tail -n 8 "$WORK/ik-compiler.error" 2>/dev/null |
+			tr '\r\n\t' '   ' | cut -c 1-800)"
+		[ -n "$compiler_error" ] || compiler_error="the compiler returned no diagnostic"
+		fail "ik-native-v1 compilation failed: $compiler_error"
+	fi
 	[ -f "$content/feature.cfg" ] && [ -f "$content/conversion-report.json" ] &&
-		[ -f "$content/catalog.tsv" ] || fail "ik-native-v1 compiler output is incomplete"
+		[ -f "$content/catalog.tsv" ] && [ -f "$content/domains.tsv" ] ||
+		fail "ik-native-v1 compiler output is incomplete"
 	validate_feature "$content/feature.cfg" strict
 	EXTRACTED_CONTENT="$content"
 	EXTRACTED_FORMAT="ik-native-v1"
@@ -692,7 +703,11 @@ extract_upload()
 		# A native extracted edition has no feature.cfg; an OAF .bin has one.
 		tar -tzf "$WORK/library.bin" > "$WORK/archive.names" 2>/dev/null ||
 			fail "invalid gzip/tar feature library"
-		if awk '{ p=$0; sub(/^\.[/]/,"",p); if (p=="feature.cfg") found=1 } END { exit !found }' \
+		if awk '{
+			p=$0
+			if (substr(p, 1, 2) == "./") p=substr(p, 3)
+			if (p=="feature.cfg") found=1
+		} END { exit !found }' \
 			"$WORK/archive.names"; then
 			archive_kind=oaf
 		else
@@ -837,7 +852,7 @@ store_profile()
 	mkdir -p "$stage/app_icons" || fail "cannot stage the feature profile"
 	cp "$content/feature.cfg" "$stage/feature.cfg" || fail "cannot stage feature.cfg"
 	for auxiliary in README.txt appid-map.csv appid-map.json conversion-report.json \
-		catalog.tsv native.meta app5.dat app5.decode_raw.txt \
+		catalog.tsv domains.tsv native.meta app5.dat app5.decode_raw.txt \
 		ikapp-rules.jsonl http-rules.jsonl protocols \
 		source-conversion-report.json; do
 		[ -f "$content/$auxiliary" ] || continue
@@ -852,7 +867,7 @@ store_profile()
 	write_profile_meta "$stage/profile.meta" "$source" "$sha"
 	chmod 0444 "$stage/feature.cfg" "$stage/profile.meta"
 	for auxiliary in README.txt appid-map.csv appid-map.json conversion-report.json \
-		catalog.tsv native.meta app5.dat app5.decode_raw.txt \
+		catalog.tsv domains.tsv native.meta app5.dat app5.decode_raw.txt \
 		ikapp-rules.jsonl http-rules.jsonl protocols \
 		source-conversion-report.json; do
 		[ ! -f "$stage/$auxiliary" ] || chmod 0444 "$stage/$auxiliary"
@@ -945,16 +960,25 @@ reload_oaf()
 {
 	local expected="$1" pids pid tries=0 stable=0 value
 	local generation_file generation_before generation_now generation_supported=0
+	local attempt_file attempt_before attempt_now attempt_supported=0
+	local loaded_file loaded_now errno_file errno_now errno_name
+	RELOAD_DIAGNOSTIC=""
 	runtime_enabled || return 0
 	pids="$(pidof "$OAF_DAEMON" 2>/dev/null || true)"
 	if [ -z "$pids" ]; then
 		# A fully stopped audit engine will load the selected on-disk profile at
 		# its next start.  A live kernel module without its loader is different:
 		# accepting the switch would leave old APPIDs in-kernel under a new policy.
-		[ ! -r "$OAF_SYSCTL_DIR/feature_init" ]
-		return $?
+		if [ ! -r "$OAF_SYSCTL_DIR/feature_init" ]; then
+			return 0
+		fi
+		RELOAD_DIAGNOSTIC="OAF 内核模块已加载，但 $OAF_DAEMON 未运行"
+		return 1
 	fi
-	[ -r "$OAF_SYSCTL_DIR/feature_init" ] || return 1
+	if [ ! -r "$OAF_SYSCTL_DIR/feature_init" ]; then
+		RELOAD_DIAGNOSTIC="OAF feature_init 状态节点不可读"
+		return 1
+	fi
 	generation_file="$OAF_SYSCTL_DIR/feature_generation"
 	if [ -r "$generation_file" ]; then
 		generation_before="$(cat "$generation_file" 2>/dev/null || true)"
@@ -962,26 +986,63 @@ reload_oaf()
 			generation_supported=1
 		fi
 	fi
+	attempt_file="$OAF_SYSCTL_DIR/feature_reload_attempt"
+	loaded_file="$OAF_SYSCTL_DIR/feature_reload_loaded"
+	errno_file="$OAF_SYSCTL_DIR/feature_reload_errno"
+	if [ -r "$attempt_file" ]; then
+		attempt_before="$(cat "$attempt_file" 2>/dev/null || true)"
+		is_uint "$attempt_before" && attempt_supported=1
+	fi
 	for pid in $pids; do
-		is_uint "$pid" || return 1
-		kill -USR1 "$pid" 2>/dev/null || return 1
+		if ! is_uint "$pid"; then
+			RELOAD_DIAGNOSTIC="OAF daemon PID 无效"
+			return 1
+		fi
+		if ! kill -USR1 "$pid" 2>/dev/null; then
+			RELOAD_DIAGNOSTIC="无法通知 OAF daemon 重载规则"
+			return 1
+		fi
 	done
 	[ "$RELOAD_GRACE" -eq 0 ] || sleep "$RELOAD_GRACE"
 	while [ "$tries" -lt "$RELOAD_TRIES" ]; do
 		value="$(cat "$OAF_SYSCTL_DIR/feature_init" 2>/dev/null || true)"
 		generation_now="$(cat "$generation_file" 2>/dev/null || true)"
+		if [ "$attempt_supported" -eq 1 ]; then
+			attempt_now="$(cat "$attempt_file" 2>/dev/null || true)"
+			loaded_now="$(cat "$loaded_file" 2>/dev/null || true)"
+			errno_now="$(cat "$errno_file" 2>/dev/null || true)"
+			if is_uint "$attempt_now" && [ "$attempt_now" != "$attempt_before" ] &&
+			   is_uint "$errno_now" && [ "$errno_now" -gt 0 ]; then
+				case "$errno_now" in
+				7) errno_name="规则或正则表达式超过内核上限" ;;
+				12) errno_name="内核内存不足" ;;
+				22) errno_name="规则格式不被当前 OAF 内核解析器接受" ;;
+				34) errno_name="规则字段超出内核允许范围" ;;
+				*) errno_name="内核错误 errno=$errno_now" ;;
+				esac
+				is_uint "$loaded_now" || loaded_now=0
+				RELOAD_DIAGNOSTIC="$errno_name（失败前装入 $loaded_now/$expected 条）"
+				return 1
+			fi
+		fi
 		if [ "$generation_supported" -eq 1 ] &&
 		   { ! is_uint "$generation_now" || [ "$generation_now" = "$generation_before" ]; }; then
 			stable=0
 		elif [ "$value" = "$expected" ]; then
 			stable=$((stable + 1))
-			[ "$stable" -ge 2 ] && return 0
+			if [ "$stable" -ge 2 ]; then
+				RELOAD_DIAGNOSTIC="成功装入 $expected 条规则"
+				return 0
+			fi
 		else
 			stable=0
 		fi
 		tries=$((tries + 1))
 		[ "$RELOAD_INTERVAL" -eq 0 ] || sleep "$RELOAD_INTERVAL"
 	done
+	loaded_now="$(cat "$loaded_file" 2>/dev/null || true)"
+	is_uint "$loaded_now" || loaded_now=0
+	RELOAD_DIAGNOSTIC="OAF 重载超时：内核报告 $value 条活动规则，本次已接收 $loaded_now/$expected 条"
 	return 1
 }
 
@@ -1095,7 +1156,7 @@ rollback_activation()
 
 activate_profile()
 {
-	local sha="$1" profile expected icon icon_parent icon_base
+	local sha="$1" profile expected icon icon_parent icon_base reload_error
 
 	profile_is_valid "$sha" || fail "the requested profile is missing, damaged or invalid"
 	profile="$LIBRARY_DIR/$sha"
@@ -1239,8 +1300,10 @@ activate_profile()
 	RB_META_SWITCHED=1
 
 	if test_failpoint reload || ! reload_oaf "$expected"; then
+		reload_error="$RELOAD_DIAGNOSTIC"
 		rollback_activation
-		fail "OAF did not report the expected $expected loaded features; the previous profile was restored"
+		[ -n "$reload_error" ] || reload_error="OAF 未报告预期的 $expected 条活动规则"
+		fail "$reload_error；已恢复上一套特征库"
 	fi
 
 	if uci_available; then RB_UCI_TOUCHED=1; fi

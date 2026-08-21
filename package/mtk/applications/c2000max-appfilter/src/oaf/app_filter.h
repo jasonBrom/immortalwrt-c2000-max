@@ -5,13 +5,17 @@
 #ifndef APP_FILTER_H
 #define APP_FILTER_H
 
-#define AF_VERSION "5.3.3-c2000max10-ikv4.2"
+#define AF_VERSION "5.3.3-c2000max17-ikv4.2-perflow-p1"
 #define AF_FEATURE_CONFIG_FILE "/tmp/feature.cfg"
 
 #define DEFAULT_DPI_PKT_NUM 8
 #define MAX_DPI_PKT_NUM 64
 #define OAF_UNKNOWN_APPID 1
 #define OAF_ACCEL_BYPASS_MARK 0x00800000
+/* Reserved in both skb->mark and ct->mark.  The skb bit protects the current
+ * packet; the conntrack bit is the persistent per-flow HNAT/flowtable
+ * admission guard used while DPI is pending or a flow is blocked. */
+#define OAF_CT_NO_OFFLOAD_MARK OAF_ACCEL_BYPASS_MARK
 #define MIN_HTTP_DATA_LEN 16
 #define MAX_APP_NAME_LEN 64
 #define MAX_FEATURE_NUM_PER_APP 512
@@ -111,6 +115,8 @@ struct af_http_clause {
 	u_int8_t method;
 	u_int8_t pattern_offset;
 	u_int8_t pattern_len;
+	u_int8_t prefilter_valid;
+	u_int8_t prefilter_byte;
 	struct ik_regex *regex;
 };
 

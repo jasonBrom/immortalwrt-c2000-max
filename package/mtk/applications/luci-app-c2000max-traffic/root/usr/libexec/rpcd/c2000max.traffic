@@ -40,6 +40,9 @@ case "$1" in
 	"feature_install_status": {
 		"job_id": "String"
 	},
+	"feature_install_ack": {
+		"job_id": "String"
+	},
 	"policy_reload": {}
 }
 EOF
@@ -100,6 +103,10 @@ EOF
 			feature_install_status)
 				job_id="$(printf '%s' "$input" | jsonfilter -e '@.job_id' 2>/dev/null)"
 				/usr/sbin/c2000max-feature-job status "$job_id" || true
+				;;
+			feature_install_ack)
+				job_id="$(printf '%s' "$input" | jsonfilter -e '@.job_id' 2>/dev/null)"
+				/usr/sbin/c2000max-feature-job acknowledge "$job_id" || true
 				;;
 			feature_list)
 				exec /usr/sbin/c2000max-feature-manager list

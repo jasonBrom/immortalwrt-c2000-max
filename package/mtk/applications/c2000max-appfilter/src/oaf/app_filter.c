@@ -32,6 +32,8 @@
 #include <linux/mutex.h>
 #include <linux/random.h>
 #include <linux/sched.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include "app_filter.h"
 #include "af_utils.h"
 #include "af_log.h"
@@ -44,6 +46,11 @@
 #include "af_user_config.h"
 #include "af_whitelist_config.h"
 #include "ik_regex.h"
+
+/* Optional MediaTek HNAT API.  symbol_get() keeps OAF loadable on targets
+ * without the proprietary accelerator module and takes a module reference
+ * only for the duration of the bounded queue operation. */
+extern int mtk_hnat_kick_conntrack(struct nf_conn *ct);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("destan19@126.com");
@@ -103,6 +110,125 @@ u_int32_t g_update_jiffies = 0;
 #define AF_IK_DEFAULT_PRIORITY 100
 #define NF_PAYLOAD_SEQ_MAX 7
 #define AF_FEATURE_PACKET_NODE_BUDGET 16384U
+#define AF_HTTP_PREFIX_SLOTS 128U
+#define AF_HTTP_PREFIX_TIMEOUT (5 * HZ)
+#define AF_TLS_PREFIX_MAX 8192U
+#define AF_TLS_ECH_EXTENSION 0xfe0d
+
+enum af_prefix_kind {
+	AF_PREFIX_NONE = 0,
+	AF_PREFIX_HTTP,
+	AF_PREFIX_TLS,
+};
+
+struct af_http_prefix_slot {
+	struct nf_conn *ct;
+	unsigned long updated;
+	u32 next_seq;
+	u16 len;
+	u8 kind;
+	bool seq_valid;
+	bool complete;
+	u8 data[AF_TLS_PREFIX_MAX];
+};
+
+struct af_http_stats {
+	atomic64_t parse_ok, parse_fail;
+	atomic64_t uri_checked, host_checked, ua_checked;
+	atomic64_t candidate_rules, rule_match, rule_no_match, unsupported_rule;
+	atomic64_t priority_candidates, priority_rule_match;
+	atomic64_t priority_budget_expired, field_prefilter_reject;
+	atomic64_t generic_set, generic_upgraded, generic_finalize_timeout;
+	atomic64_t generic_finalize_deferred;
+	atomic64_t pktseq_wait, pktseq_match, pktseq_budget_expired;
+	atomic64_t prefix_alloc, prefix_complete, prefix_restarted;
+	atomic64_t prefix_budget_expired, prefix_oom;
+	atomic64_t tls_prefix_alloc, tls_prefix_complete;
+	atomic64_t tls_prefix_budget_expired, tls_prefix_oom;
+	atomic64_t tls_client_hello, tls_sni_ok, tls_sni_missing, tls_ech_seen;
+	atomic64_t sni_candidates, sni_rule_match, sni_rule_no_match;
+	atomic64_t sni_priority_rule_match, sni_prepass_match;
+	atomic64_t sni_pktseq_bypassed;
+	atomic64_t policy_hold_seen, policy_hold_published;
+	atomic64_t appid1_flows;
+	atomic64_t terminal_generic_set, terminal_generic_reentry;
+	atomic64_t terminal_generic_upgrade_attempt, terminal_generic_upgrade_ok;
+};
+
+#define AF_CLASSIFY_RECENT_MAX 16
+struct af_classify_recent {
+	u32 src, dst;
+	struct in6_addr src6, dst6;
+	u16 sport, dport;
+	u8 proto, family;
+	u16 old_raw, old_appid, new_appid;
+	u8 terminal, attempt, ok;
+	unsigned long when;
+};
+
+static struct af_classify_recent af_classify_recent[AF_CLASSIFY_RECENT_MAX];
+static unsigned int af_classify_recent_head;
+static DEFINE_SPINLOCK(af_classify_recent_lock);
+static struct proc_dir_entry *af_classify_recent_proc;
+
+#define AF_HTTP_MATCH_RECENT_MAX 16
+struct af_http_match_recent {
+	u32 src, dst;
+	u16 sport, dport, appid;
+	u8 proto, match_kind, priority, field, fallback, policy_priority;
+	char uri[96];
+	char host[64];
+	char user_agent[64];
+	unsigned long when;
+};
+
+static struct af_http_match_recent af_http_match_recent[AF_HTTP_MATCH_RECENT_MAX];
+static unsigned int af_http_match_recent_head;
+static DEFINE_SPINLOCK(af_http_match_recent_lock);
+static struct proc_dir_entry *af_http_match_recent_proc;
+
+#define AF_SNI_RECENT_MAX 16
+enum af_sni_result {
+	AF_SNI_OK = 0,
+	AF_SNI_MISSING,
+	AF_SNI_ECH,
+};
+
+struct af_sni_recent {
+	u32 src, dst;
+	struct in6_addr src6, dst6;
+	u16 sport, dport;
+	u16 prefix_len, record_len;
+	u8 proto, family, result;
+	char sni[64];
+	unsigned long when;
+};
+
+static struct af_sni_recent af_sni_recent[AF_SNI_RECENT_MAX];
+static unsigned int af_sni_recent_head;
+static DEFINE_SPINLOCK(af_sni_recent_lock);
+static struct proc_dir_entry *af_sni_recent_proc;
+
+#define AF_SNI_MATCH_RECENT_MAX 16
+struct af_sni_match_recent {
+	u32 src, dst;
+	struct in6_addr src6, dst6;
+	u16 sport, dport, appid;
+	u8 proto, family, match_kind, priority, policy_priority;
+	u8 pkt_seq, pkt_seq_mask;
+	char sni[64];
+	unsigned long when;
+};
+
+static struct af_sni_match_recent af_sni_match_recent[AF_SNI_MATCH_RECENT_MAX];
+static unsigned int af_sni_match_recent_head;
+static DEFINE_SPINLOCK(af_sni_match_recent_lock);
+static struct proc_dir_entry *af_sni_match_recent_proc;
+
+static struct af_http_prefix_slot af_http_prefix[AF_HTTP_PREFIX_SLOTS];
+static DEFINE_SPINLOCK(af_http_prefix_lock);
+static struct af_http_stats af_http_stats;
+static struct proc_dir_entry *af_http_stats_proc;
 
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(5,10,197)
@@ -572,6 +698,12 @@ static int parse_http_multi_pattern(struct parsed_app_feature *parsed)
 				parsed->http_clause_count = 0;
 				return ret;
 			}
+			clause->prefilter_valid =
+				ik_regex_prefilter_byte(clause->regex,
+							&clause->prefilter_byte);
+		} else {
+			clause->prefilter_valid = 1;
+			clause->prefilter_byte = parsed->pattern[pos];
 		}
 		pos += clause->pattern_len;
 	}
@@ -597,15 +729,9 @@ static void af_set_parsed_prefilter(struct parsed_app_feature *parsed)
 	if (parsed->match_kind == AF_IK_MATCH_HTTP_MULTI) {
 		for (i = 0; i < parsed->http_clause_count; i++) {
 			clause = &parsed->http_clauses[i];
-			if (clause->method == AF_HTTP_CLAUSE_REGEX) {
-				if (!ik_regex_prefilter_byte(clause->regex, &value))
-					continue;
-			} else {
-				if (!clause->pattern_len ||
-				    clause->pattern_offset >= parsed->pattern_len)
-					continue;
-				value = parsed->pattern[clause->pattern_offset];
-			}
+			if (!clause->prefilter_valid)
+				continue;
+			value = clause->prefilter_byte;
 			parsed->prefilter_valid = 1;
 			parsed->prefilter_byte = value;
 			return;
@@ -1455,6 +1581,10 @@ static int af_begin_feature_reload(void)
 
 	new_db = af_feature_db_alloc(GFP_KERNEL);
 	mutex_lock(&af_feature_reload_lock);
+	WRITE_ONCE(g_feature_reload_attempt,
+		   READ_ONCE(g_feature_reload_attempt) + 1);
+	WRITE_ONCE(g_feature_reload_loaded, 0);
+	WRITE_ONCE(g_feature_reload_errno, new_db ? 0 : ENOMEM);
 	old_db = af_feature_staging;
 	af_feature_staging = new_db;
 	af_feature_reload_failed = !new_db;
@@ -1479,6 +1609,9 @@ static int af_commit_feature_reload(u32 expected_count, u32 *actual_count)
 	    expected_count > MAX_FEATURE_NUM_TOTAL ||
 	    new_db->count != expected_count) {
 		af_feature_reload_failed = true;
+		WRITE_ONCE(g_feature_reload_loaded, new_db ? new_db->count : 0);
+		if (!READ_ONCE(g_feature_reload_errno))
+			WRITE_ONCE(g_feature_reload_errno, EINVAL);
 		goto out_unlock;
 	}
 	af_feature_db_sort(new_db);
@@ -1490,6 +1623,8 @@ static int af_commit_feature_reload(u32 expected_count, u32 *actual_count)
 	af_feature_active = new_db;
 	af_feature_staging = NULL;
 	g_feature_init = new_db->count;
+	WRITE_ONCE(g_feature_reload_loaded, new_db->count);
+	WRITE_ONCE(g_feature_reload_errno, 0);
 	g_feature_generation++;
 	if (!(g_feature_generation & 0x1fffU))
 		g_feature_generation++;
@@ -1504,10 +1639,16 @@ out_unlock:
 	return ret;
 }
 
-static void af_fail_feature_reload(void)
+static void af_fail_feature_reload(int error)
 {
 	mutex_lock(&af_feature_reload_lock);
 	af_feature_reload_failed = true;
+	if (error < 0)
+		error = -error;
+	if (!error)
+		error = EINVAL;
+	if (!READ_ONCE(g_feature_reload_errno))
+		WRITE_ONCE(g_feature_reload_errno, error);
 	mutex_unlock(&af_feature_reload_lock);
 }
 
@@ -1520,7 +1661,7 @@ static int af_add_feature_msg_handle(char *data, int len)
 	    data[len - 1] != '\0' ||
 	    strnlen(data, len) != len - 1) {
 		printk("warn, feature data len = %d\n", len);
-		af_fail_feature_reload();
+		af_fail_feature_reload(EINVAL);
 		return -EINVAL;
 	}
 	memcpy(feature, data, len);
@@ -1531,8 +1672,14 @@ static int af_add_feature_msg_handle(char *data, int len)
 	}
 	AF_DEBUG("stage feature %s\n", feature);
 	ret = af_init_feature(feature, af_feature_staging);
-	if (ret < 0)
+	if (ret < 0) {
 		af_feature_reload_failed = true;
+		if (!READ_ONCE(g_feature_reload_errno))
+			WRITE_ONCE(g_feature_reload_errno, -ret);
+	} else {
+		WRITE_ONCE(g_feature_reload_loaded,
+			   af_feature_staging->count);
+	}
 
 out_unlock:
 	mutex_unlock(&af_feature_reload_lock);
@@ -1689,6 +1836,41 @@ static int check_domain(const u8 *h, int len)
 	return 1;
 }
 
+static void af_sni_recent_add(const flow_info_t *flow, enum af_sni_result result,
+			      const u8 *sni, u16 sni_len,
+			      u16 prefix_len, u16 record_len)
+{
+	struct af_sni_recent *recent;
+	u16 copy_len;
+
+	if (!flow)
+		return;
+	spin_lock_bh(&af_sni_recent_lock);
+	recent = &af_sni_recent[af_sni_recent_head++ % AF_SNI_RECENT_MAX];
+	memset(recent, 0, sizeof(*recent));
+	recent->src = flow->src;
+	recent->dst = flow->dst;
+	if (flow->src6 && flow->dst6) {
+		recent->family = NFPROTO_IPV6;
+		recent->src6 = *flow->src6;
+		recent->dst6 = *flow->dst6;
+	} else {
+		recent->family = NFPROTO_IPV4;
+	}
+	recent->sport = flow->sport;
+	recent->dport = flow->dport;
+	recent->proto = flow->l4_protocol;
+	recent->prefix_len = prefix_len;
+	recent->record_len = record_len;
+	recent->result = result;
+	copy_len = min_t(u16, sni_len, sizeof(recent->sni) - 1);
+	if (sni && copy_len)
+		memcpy(recent->sni, sni, copy_len);
+	recent->sni[copy_len] = '\0';
+	recent->when = jiffies;
+	spin_unlock_bh(&af_sni_recent_lock);
+}
+
 static int dpi_https_proto(flow_info_t *flow)
 {
 	int i;
@@ -1700,15 +1882,22 @@ static int dpi_https_proto(flow_info_t *flow)
 	u16 url_len;
 	u16 ext_type;
 	u16 ext_len;
+	u16 record_len = 0;
 	u32 hello_len;
-	u8 *p = flow->l4_data;
-	int data_len = flow->l4_len;
+	u8 *p;
+	const u8 *sni = NULL;
+	u16 sni_len = 0;
+	int data_len;
+	bool complete_hello = false;
+	bool ech_seen = false;
 
 	if (NULL == flow)
 	{
 		AF_ERROR("flow is NULL\n");
 		return -1;
 	}
+	p = flow->l4_data;
+	data_len = flow->l4_len;
 	if (NULL == p || data_len < 16)
 	{
 		return -1;
@@ -1718,8 +1907,11 @@ static int dpi_https_proto(flow_info_t *flow)
 
 	/* Parse a complete TLS ClientHello first. */
 	if (data_len >= 9 && p[0] == 0x16 && p[1] == 0x03 && p[5] == 0x01) {
-		end = min_t(int, data_len, 5 + (((u16)p[3] << 8) | p[4]));
+		record_len = ((u16)p[3] << 8) | p[4];
+		end = min_t(int, data_len, 5 + record_len);
 		hello_len = ((u32)p[6] << 16) | ((u32)p[7] << 8) | p[8];
+		complete_hello = data_len >= 5 + record_len &&
+				  9 + hello_len <= 5 + record_len;
 		end = min_t(int, end, 9 + hello_len);
 		pos = 9;
 		if (pos + 34 <= end) {
@@ -1756,6 +1948,8 @@ static int dpi_https_proto(flow_info_t *flow)
 					pos += 4;
 					if (pos + ext_len > ext_end)
 						break;
+					if (ext_type == AF_TLS_ECH_EXTENSION)
+						ech_seen = true;
 					if (ext_type == 0 && ext_len >= 5) {
 						name_end = pos + ext_len;
 						i = pos + 2; /* server_name_list length */
@@ -1769,11 +1963,9 @@ static int dpi_https_proto(flow_info_t *flow)
 							    url_len > MIN_HOST_LEN &&
 							    url_len <= MAX_HOST_LEN &&
 							    check_domain(p + i, url_len)) {
-								flow->https.match = AF_TRUE;
-								flow->https.url_pos = p + i;
-								flow->https.url_len = url_len;
-								flow->client_hello = 0;
-								return 0;
+								sni = p + i;
+								sni_len = url_len;
+								break;
 							}
 							i += url_len;
 						}
@@ -1781,6 +1973,20 @@ static int dpi_https_proto(flow_info_t *flow)
 					pos += ext_len;
 				}
 			}
+		}
+		if (complete_hello)
+			atomic64_inc(&af_http_stats.tls_client_hello);
+		if (ech_seen)
+			atomic64_inc(&af_http_stats.tls_ech_seen);
+		if (sni) {
+			flow->https.match = AF_TRUE;
+			flow->https.url_pos = (char *)sni;
+			flow->https.url_len = sni_len;
+			flow->client_hello = 0;
+			atomic64_inc(&af_http_stats.tls_sni_ok);
+			af_sni_recent_add(flow, ech_seen ? AF_SNI_ECH : AF_SNI_OK,
+					  sni, sni_len, data_len, record_len);
+			return 0;
 		}
 	}
 
@@ -1807,9 +2013,18 @@ static int dpi_https_proto(flow_info_t *flow)
 				flow->https.url_pos = p + i + HTTPS_URL_OFFSET;
 				flow->https.url_len = url_len;
 				flow->client_hello = 0;
+				atomic64_inc(&af_http_stats.tls_sni_ok);
+				af_sni_recent_add(flow, AF_SNI_OK,
+						  p + i + HTTPS_URL_OFFSET, url_len,
+						  data_len, record_len);
 				return 0;
 			}
 		}
+	}
+	if (complete_hello) {
+		atomic64_inc(&af_http_stats.tls_sni_missing);
+		af_sni_recent_add(flow, ech_seen ? AF_SNI_ECH : AF_SNI_MISSING,
+				  NULL, 0, data_len, record_len);
 	}
 	if (p[0] == 0x16 && p[1] == 0x03)
 		flow->client_hello = 1;
@@ -1842,6 +2057,191 @@ static int af_http_header_field(const char *name, int len)
 		    !strncasecmp(name, headers[i].name, len))
 			return headers[i].field;
 	return -ENOENT;
+}
+
+static bool af_http_method_prefix(const u8 *p, int len)
+{
+	static const char * const methods[] = {
+		"GET ", "POST ", "HEAD ", "PUT ", "DELETE ",
+		"OPTIONS ", "PATCH ", "CONNECT "
+	};
+	int i;
+
+	if (!p || len < 4)
+		return false;
+	for (i = 0; i < ARRAY_SIZE(methods); i++) {
+		int n = strlen(methods[i]);
+		if (len >= n && !memcmp(p, methods[i], n))
+			return true;
+	}
+	return false;
+}
+
+static bool af_tls_client_hello_prefix(const u8 *p, int len)
+{
+	return p && len >= 5 && p[0] == 0x16 && p[1] == 0x03 &&
+	       p[2] <= 0x04 && (len == 5 || p[5] == 0x01);
+}
+
+static u8 af_prefix_start_kind(const u8 *p, int len)
+{
+	if (af_http_method_prefix(p, len))
+		return AF_PREFIX_HTTP;
+	if (af_tls_client_hello_prefix(p, len))
+		return AF_PREFIX_TLS;
+	return AF_PREFIX_NONE;
+}
+
+static unsigned int af_http_prefix_index(struct nf_conn *ct)
+{
+	return hash_ptr(ct, ilog2(AF_HTTP_PREFIX_SLOTS));
+}
+
+static bool af_http_prefix_pending(struct nf_conn *ct)
+{
+	struct af_http_prefix_slot *slot;
+	bool found;
+
+	spin_lock_bh(&af_http_prefix_lock);
+	slot = &af_http_prefix[af_http_prefix_index(ct)];
+	found = slot->ct == ct && !slot->complete &&
+		time_before(jiffies, slot->updated + AF_HTTP_PREFIX_TIMEOUT);
+	spin_unlock_bh(&af_http_prefix_lock);
+	return found;
+}
+
+static void af_http_prefix_forget(struct nf_conn *ct)
+{
+	struct af_http_prefix_slot *slot;
+
+	spin_lock_bh(&af_http_prefix_lock);
+	slot = &af_http_prefix[af_http_prefix_index(ct)];
+	if (slot->ct == ct)
+		memset(slot, 0, sizeof(*slot));
+	spin_unlock_bh(&af_http_prefix_lock);
+}
+
+/* Reassemble only the bounded HTTP request prefix.  This is not a TCP stream
+ * engine: it accepts contiguous original-direction segments, trims a simple
+ * retransmission overlap and abandons gaps/collisions.  The snapshot returned
+ * to the matcher is private, so no softirq holds the table lock while running
+ * thousands of IK candidates. */
+static u8 *af_http_prefix_snapshot(struct sk_buff *skb, struct nf_conn *ct,
+					 flow_info_t *flow, int *snapshot_len)
+{
+	struct af_http_prefix_slot *slot;
+	const struct tcphdr *th;
+	u32 seq, skip = 0;
+	u32 limit;
+	u32 tls_record_len;
+	u8 *copy = NULL;
+	u8 start_kind;
+	bool starts;
+
+	*snapshot_len = 0;
+	if (!skb || !ct || !flow || flow->dir != AF_IK_DIR_ORIGINAL ||
+	    flow->l4_protocol != IPPROTO_TCP || flow->l4_len <= 0)
+		return NULL;
+	start_kind = af_prefix_start_kind(flow->l4_data, flow->l4_len);
+	starts = start_kind != AF_PREFIX_NONE;
+	if (!starts && !af_http_prefix_pending(ct))
+		return NULL;
+	th = tcp_hdr(skb);
+	seq = ntohl(th->seq);
+
+	spin_lock_bh(&af_http_prefix_lock);
+	slot = &af_http_prefix[af_http_prefix_index(ct)];
+	if (slot->ct == ct && starts && slot->complete &&
+	    (!slot->seq_valid || !before(seq, slot->next_seq))) {
+		/* A keep-alive connection can carry many independent requests.  The
+		 * old code retained the first complete request forever and appended
+		 * later GETs to it, so dpi_http_proto() kept parsing the stale Host/URI
+		 * on every generic re-entry.  Start a fresh bounded prefix only after
+		 * the previous request's sequence range; an overlapping retransmission
+		 * still follows the normal trim path below. */
+		memset(slot, 0, sizeof(*slot));
+		slot->ct = ct;
+		slot->kind = start_kind;
+		if (start_kind == AF_PREFIX_HTTP)
+			atomic64_inc(&af_http_stats.prefix_restarted);
+		else
+			atomic64_inc(&af_http_stats.tls_prefix_alloc);
+	}
+	if (slot->ct != ct) {
+		if (!starts || (slot->ct &&
+		    time_before(jiffies, slot->updated + AF_HTTP_PREFIX_TIMEOUT))) {
+			if (start_kind == AF_PREFIX_TLS)
+				atomic64_inc(&af_http_stats.tls_prefix_budget_expired);
+			else
+				atomic64_inc(&af_http_stats.prefix_budget_expired);
+			goto out;
+		}
+		memset(slot, 0, sizeof(*slot));
+		slot->ct = ct;
+		slot->kind = start_kind;
+		if (start_kind == AF_PREFIX_TLS)
+			atomic64_inc(&af_http_stats.tls_prefix_alloc);
+		else
+			atomic64_inc(&af_http_stats.prefix_alloc);
+	}
+	if (slot->kind == AF_PREFIX_NONE)
+		slot->kind = start_kind;
+	if (slot->seq_valid) {
+		if (before(seq, slot->next_seq))
+			skip = min_t(u32, slot->next_seq - seq, flow->l4_len);
+		else if (seq != slot->next_seq) {
+			if (slot->kind == AF_PREFIX_TLS)
+				atomic64_inc(&af_http_stats.tls_prefix_budget_expired);
+			else
+				atomic64_inc(&af_http_stats.prefix_budget_expired);
+			memset(slot, 0, sizeof(*slot));
+			goto out;
+		}
+	}
+	limit = slot->kind == AF_PREFIX_TLS ? AF_TLS_PREFIX_MAX :
+		MAX_AF_SUPPORT_DATA_LEN;
+	if (flow->l4_len - skip > limit - slot->len) {
+		if (slot->kind == AF_PREFIX_TLS)
+			atomic64_inc(&af_http_stats.tls_prefix_budget_expired);
+		else
+			atomic64_inc(&af_http_stats.prefix_budget_expired);
+		memset(slot, 0, sizeof(*slot));
+		goto out;
+	}
+	memcpy(slot->data + slot->len, flow->l4_data + skip,
+	       flow->l4_len - skip);
+	slot->len += flow->l4_len - skip;
+	slot->next_seq = seq + flow->l4_len;
+	slot->seq_valid = true;
+	slot->updated = jiffies;
+	copy = kmemdup(slot->data, slot->len, GFP_ATOMIC);
+	if (!copy) {
+		if (slot->kind == AF_PREFIX_TLS)
+			atomic64_inc(&af_http_stats.tls_prefix_oom);
+		else
+			atomic64_inc(&af_http_stats.prefix_oom);
+		goto out;
+	}
+	*snapshot_len = slot->len;
+	if (!slot->complete && slot->kind == AF_PREFIX_HTTP &&
+	    strnstr(copy, "\r\n\r\n", slot->len)) {
+		slot->complete = true;
+		atomic64_inc(&af_http_stats.prefix_complete);
+	} else if (!slot->complete && slot->kind == AF_PREFIX_TLS &&
+		   slot->len >= 5) {
+		tls_record_len = 5 + (((u16)slot->data[3] << 8) |
+				      slot->data[4]);
+		if (tls_record_len > AF_TLS_PREFIX_MAX || tls_record_len < 9) {
+			atomic64_inc(&af_http_stats.tls_prefix_budget_expired);
+			memset(slot, 0, sizeof(*slot));
+		} else if (slot->len >= tls_record_len) {
+			slot->complete = true;
+			atomic64_inc(&af_http_stats.tls_prefix_complete);
+		}
+	}
+out:
+	spin_unlock_bh(&af_http_prefix_lock);
+	return copy;
 }
 
 static void dpi_http_proto(flow_info_t *flow)
@@ -1955,6 +2355,17 @@ static void dpi_http_proto(flow_info_t *flow)
 			flow->http.data_len = data_len - start;
 			break;
 		}
+	}
+	if (flow->http.match) {
+		atomic64_inc(&af_http_stats.parse_ok);
+		if (flow->http.field_pos[0])
+			atomic64_inc(&af_http_stats.uri_checked);
+		if (flow->http.field_pos[1])
+			atomic64_inc(&af_http_stats.host_checked);
+		if (flow->http.field_pos[2])
+			atomic64_inc(&af_http_stats.ua_checked);
+	} else if (af_http_method_prefix(data, data_len)) {
+		atomic64_inc(&af_http_stats.parse_fail);
 	}
 }
 
@@ -2227,6 +2638,16 @@ static int af_match_http_multi(flow_info_t *flow, af_feature_node_t *node,
 		data = flow->http.field_pos[clause->field];
 		len = flow->http.field_len[clause->field];
 		pattern = node->pattern + clause->pattern_offset;
+		/* The packet-wide bitmap is deliberately only a cheap first gate.  On
+		 * long media request-targets its byte may occur in another header,
+		 * causing thousands of unrelated regex NFAs to consume the shared
+		 * packet budget before Host/User-Agent rules are reached.  Recheck the
+		 * compiled required byte inside the clause's actual field. */
+		if (clause->prefilter_valid &&
+		    !memchr(data, clause->prefilter_byte, len)) {
+			atomic64_inc(&af_http_stats.field_prefilter_reject);
+			return AF_FALSE;
+		}
 		switch (clause->method) {
 		case AF_HTTP_CLAUSE_EXACT:
 			if (len != clause->pattern_len ||
@@ -2319,6 +2740,8 @@ static int af_match_one(flow_info_t *flow, af_feature_node_t *node,
 {
 	int ret = AF_FALSE;
 	int match_port;
+	u8 family;
+	bool parsed_request_seq;
 	if (!flow || !node)
 	{
 		AF_ERROR("node or flow is NULL\n");
@@ -2329,13 +2752,36 @@ static int af_match_one(flow_info_t *flow, af_feature_node_t *node,
 	if (flow->l4_len <= 0)
 		return AF_FALSE;
 	if (node->feature_version == 4) {
+		family = af_feature_family(node->match_kind);
 		if (node->direction != AF_IK_DIR_BOTH &&
 		    node->direction != flow->dir)
 			return AF_FALSE;
+		/* Native HTTP pkt_seq=1 means the first parsable HTTP request, not
+		 * necessarily the first arbitrary TCP payload (a bootstrap record may
+		 * precede it).  SNI is likewise matched against a reconstructed
+		 * ClientHello, whose completion packet can have any ordinal.  Old R20.5
+		 * compilers incorrectly copied a raw table bucket (usually 1|2) onto all
+		 * SNI rules even though the source rule's pkt_seq is zero.  A validated
+		 * parsed header therefore supersedes those transport ordinals.  Raw
+		 * IKAPP rules retain their directional payload ordinals. */
+		parsed_request_seq =
+			(family == AF_FEATURE_FAMILY_HTTP && flow->http.match &&
+			 (node->pkt_seq_mask & BIT(0))) ||
+			(family == AF_FEATURE_FAMILY_SNI && flow->https.match);
 		if (node->pkt_seq_mask &&
+		    !parsed_request_seq &&
 		    (flow->pkt_seq < 1 || flow->pkt_seq > NF_PAYLOAD_SEQ_MAX ||
-		     !(node->pkt_seq_mask & BIT(flow->pkt_seq - 1))))
+		     !(node->pkt_seq_mask & BIT(flow->pkt_seq - 1)))) {
+			atomic64_inc(&af_http_stats.pktseq_wait);
 			return AF_FALSE;
+		}
+		if (node->pkt_seq_mask) {
+			if (family == AF_FEATURE_FAMILY_SNI && parsed_request_seq &&
+			    (flow->pkt_seq < 1 || flow->pkt_seq > NF_PAYLOAD_SEQ_MAX ||
+			     !(node->pkt_seq_mask & BIT(flow->pkt_seq - 1))))
+				atomic64_inc(&af_http_stats.sni_pktseq_bypassed);
+			atomic64_inc(&af_http_stats.pktseq_match);
+		}
 		if (node->payload_len_info.num &&
 		    !af_match_port(&node->payload_len_info,
 				   flow->total_len ? flow->total_len : flow->l4_len))
@@ -2428,24 +2874,248 @@ static int af_match_quic(flow_info_t *flow)
 	return AF_FALSE;
 }
 
-
-static int match_feature(flow_info_t *flow)
+static void af_http_recent_copy(char *dest, size_t dest_size,
+				const char *source, size_t source_len,
+				bool strip_query)
 {
-	struct af_feature_db *db;
-	struct list_head *heads[AF_MATCH_LIST_MAX];
+	size_t i;
+	size_t copy_len;
+
+	if (!dest || !dest_size)
+		return;
+	dest[0] = '\0';
+	if (!source || !source_len)
+		return;
+	copy_len = min(source_len, dest_size - 1);
+	for (i = 0; i < copy_len; i++) {
+		u8 ch = source[i];
+
+		if (strip_query && ch == '?')
+			break;
+		dest[i] = ch >= 0x20 && ch < 0x7f ? ch : '.';
+	}
+	dest[i] = '\0';
+}
+
+static void af_http_match_recent_add(flow_info_t *flow,
+				     af_feature_node_t *node,
+				     bool policy_priority)
+{
+	struct af_http_match_recent *recent;
+	u8 field = 0xff;
+
+	if (!flow || !node || !flow->http.match)
+		return;
+	if (node->match_kind == AF_IK_MATCH_HTTP_MULTI &&
+	    node->http_clause_count == 1)
+		field = node->http_clauses[0].field;
+	spin_lock_bh(&af_http_match_recent_lock);
+	recent = &af_http_match_recent[af_http_match_recent_head++ %
+						 AF_HTTP_MATCH_RECENT_MAX];
+	memset(recent, 0, sizeof(*recent));
+	recent->src = flow->src;
+	recent->dst = flow->dst;
+	recent->sport = flow->sport;
+	recent->dport = flow->dport;
+	recent->proto = flow->l4_protocol;
+	recent->appid = node->app_id;
+	recent->match_kind = node->match_kind;
+	recent->priority = node->priority;
+	recent->field = field;
+	recent->fallback = node->fallback;
+	recent->policy_priority = policy_priority;
+	recent->when = jiffies;
+	af_http_recent_copy(recent->uri, sizeof(recent->uri),
+			    flow->http.field_pos[0], flow->http.field_len[0], true);
+	af_http_recent_copy(recent->host, sizeof(recent->host),
+			    flow->http.field_pos[1], flow->http.field_len[1], false);
+	af_http_recent_copy(recent->user_agent, sizeof(recent->user_agent),
+			    flow->http.field_pos[2], flow->http.field_len[2], false);
+	spin_unlock_bh(&af_http_match_recent_lock);
+}
+
+static void af_sni_match_recent_add(flow_info_t *flow,
+				    af_feature_node_t *node,
+				    bool policy_priority)
+{
+	struct af_sni_match_recent *recent;
+
+	if (!flow || !node || !flow->https.match || !flow->https.url_pos ||
+	    flow->https.url_len <= 0)
+		return;
+	spin_lock_bh(&af_sni_match_recent_lock);
+	recent = &af_sni_match_recent[af_sni_match_recent_head++ %
+						 AF_SNI_MATCH_RECENT_MAX];
+	memset(recent, 0, sizeof(*recent));
+	recent->src = flow->src;
+	recent->dst = flow->dst;
+	if (flow->src6 && flow->dst6) {
+		recent->family = NFPROTO_IPV6;
+		recent->src6 = *flow->src6;
+		recent->dst6 = *flow->dst6;
+	} else {
+		recent->family = NFPROTO_IPV4;
+	}
+	recent->sport = flow->sport;
+	recent->dport = flow->dport;
+	recent->proto = flow->l4_protocol;
+	recent->appid = node->app_id;
+	recent->match_kind = node->match_kind;
+	recent->priority = node->priority;
+	recent->policy_priority = policy_priority;
+	recent->pkt_seq = flow->pkt_seq;
+	recent->pkt_seq_mask = node->pkt_seq_mask;
+	af_http_recent_copy(recent->sni, sizeof(recent->sni),
+			    flow->https.url_pos, flow->https.url_len, false);
+	recent->when = jiffies;
+	spin_unlock_bh(&af_sni_match_recent_lock);
+}
+
+
+enum af_match_pass_result {
+	AF_MATCH_PASS_NONE = 0,
+	AF_MATCH_PASS_SPECIFIC,
+	AF_MATCH_PASS_FALLBACK,
+};
+
+static int af_match_feature_pass(flow_info_t *flow,
+				 struct list_head **heads, int list_count,
+				 u32 payload_bitmap[8], bool *bitmap_ready,
+				 bool priority_only)
+{
 	struct list_head *cursor[AF_MATCH_LIST_MAX];
 	af_feature_node_t *node;
 	af_feature_node_t *candidate;
 	u32 step_budget = IK_REGEX_PACKET_STEP_BUDGET;
 	u32 node_budget = AF_FEATURE_PACKET_NODE_BUDGET;
+	int best;
+	int i;
+	bool fallback_found = false;
+	u8 family;
+
+	for (i = 0; i < list_count; i++)
+		cursor[i] = heads[i]->next;
+
+	while (step_budget && node_budget--) {
+		best = -1;
+		node = NULL;
+		for (i = 0; i < list_count; i++) {
+			if (cursor[i] == heads[i])
+				continue;
+			candidate = list_entry(cursor[i], af_feature_node_t, head);
+			if (best < 0 || af_feature_precedes(candidate, node)) {
+				best = i;
+				node = candidate;
+			}
+		}
+		if (best < 0)
+			break;
+		cursor[best] = cursor[best]->next;
+		/* nftables consumes pure APPIDs from secmark, but it cannot influence
+		 * the order of a 14k-entry native matcher.  Userspace mirrors the union
+		 * of active policy APPIDs into this existing status bitmap.  Scan those
+		 * rules once with an independent budget before the audit-wide pass, so a
+		 * long media URI cannot starve the very application being blocked. */
+		if (priority_only && !af_get_app_status_fast(node->app_id))
+			continue;
+		/* Metadata-only failures are still work in softirq context. */
+		step_budget--;
+		if (node->prefilter_valid) {
+			if (!*bitmap_ready) {
+				size_t head_len = min_t(size_t, flow->l4_len,
+							    MAX_AF_SUPPORT_DATA_LEN);
+				size_t tail_start = flow->l4_len > MAX_AF_SUPPORT_DATA_LEN ?
+					flow->l4_len - MAX_AF_SUPPORT_DATA_LEN : head_len;
+				size_t pos;
+
+				for (pos = 0; flow->l4_data && pos < head_len; pos++)
+					payload_bitmap[flow->l4_data[pos] >> 5] |=
+						BIT(flow->l4_data[pos] & 31);
+				/* Negative IK offsets are relative to the real payload tail.
+				 * Include the bounded tail window as well as the head window so
+				 * this rejection hint can never hide a valid tail signature. */
+				for (pos = tail_start; flow->l4_data &&
+				     pos < flow->l4_len; pos++)
+					payload_bitmap[flow->l4_data[pos] >> 5] |=
+						BIT(flow->l4_data[pos] & 31);
+				*bitmap_ready = true;
+			}
+			if (!(payload_bitmap[node->prefilter_byte >> 5] &
+			      BIT(node->prefilter_byte & 31)))
+				continue;
+		}
+		family = af_feature_family(node->match_kind);
+		if (family == AF_FEATURE_FAMILY_HTTP) {
+			if (priority_only)
+				atomic64_inc(&af_http_stats.priority_candidates);
+			else
+				atomic64_inc(&af_http_stats.candidate_rules);
+		} else if (family == AF_FEATURE_FAMILY_SNI) {
+			atomic64_inc(&af_http_stats.sni_candidates);
+		}
+		if (af_match_one(flow, node, &step_budget)) {
+			if (family == AF_FEATURE_FAMILY_HTTP) {
+				atomic64_inc(&af_http_stats.rule_match);
+				if (priority_only)
+					atomic64_inc(&af_http_stats.priority_rule_match);
+				af_http_match_recent_add(flow, node, priority_only);
+			} else if (family == AF_FEATURE_FAMILY_SNI) {
+				atomic64_inc(&af_http_stats.sni_rule_match);
+				if (priority_only)
+					atomic64_inc(&af_http_stats.sni_priority_rule_match);
+				af_sni_match_recent_add(flow, node, priority_only);
+			}
+			/* A weak/fallback rule remains pending.  The policy fast pass is
+			 * only for concrete applications; normal fallback selection stays
+			 * in the complete pass below. */
+			if (priority_only && node->fallback)
+				continue;
+			if (node->fallback && fallback_found)
+				continue;
+			AF_LMT_INFO("match feature, appid=%d, feature = %s\n",
+				    node->app_id, node->feature);
+			flow->app_id = node->app_id;
+			flow->ignore = node->ignore ? 1 : 0;
+			flow->fallback = node->fallback ? 1 : 0;
+			strscpy(flow->matched_feature, node->feature,
+				sizeof(flow->matched_feature));
+			strncpy(flow->app_name, node->app_name,
+				sizeof(flow->app_name) - 1);
+			if (!node->fallback) {
+				return AF_MATCH_PASS_SPECIFIC;
+			}
+			/* A generic protocol is only a candidate. Keep scanning this
+			 * packet for a real application and retain the best ordered
+			 * fallback only when no specific signature matches. */
+			fallback_found = true;
+		} else if (!priority_only) {
+			if (family == AF_FEATURE_FAMILY_HTTP)
+				atomic64_inc(&af_http_stats.rule_no_match);
+			else if (family == AF_FEATURE_FAMILY_SNI)
+				atomic64_inc(&af_http_stats.sni_rule_no_match);
+		}
+	}
+	if (!step_budget || !node_budget) {
+		if (priority_only)
+			atomic64_inc(&af_http_stats.priority_budget_expired);
+		else
+			atomic64_inc(&af_http_stats.pktseq_budget_expired);
+	}
+	return fallback_found ? AF_MATCH_PASS_FALLBACK : AF_MATCH_PASS_NONE;
+}
+
+static int match_feature(flow_info_t *flow)
+{
+	struct af_feature_db *db;
+	struct list_head *heads[AF_MATCH_LIST_MAX];
+	struct list_head *sni_heads[2];
 	u32 payload_bitmap[8] = { 0 };
 	u8 families[AF_FEATURE_FAMILY_COUNT];
 	u8 proto;
 	int family_count = 0;
 	int list_count = 0;
-	int best;
+	int result;
 	int i;
-	bool fallback_found = false;
 	bool bitmap_ready = false;
 
 	if (!flow)
@@ -2476,79 +3146,40 @@ static int match_feature(flow_info_t *flow)
 		families[family_count++] = AF_FEATURE_FAMILY_TLS;
 
 	for (i = 0; i < family_count; i++) {
-		heads[list_count] = &db->heads[proto][families[i]];
-		cursor[list_count] = heads[list_count]->next;
-		list_count++;
-		heads[list_count] = &db->heads[AF_FEATURE_PROTO_ANY][families[i]];
-		cursor[list_count] = heads[list_count]->next;
-		list_count++;
+		heads[list_count++] = &db->heads[proto][families[i]];
+		heads[list_count++] = &db->heads[AF_FEATURE_PROTO_ANY][families[i]];
 	}
 
-	while (step_budget && node_budget--) {
-		best = -1;
-		node = NULL;
-		for (i = 0; i < list_count; i++) {
-			if (cursor[i] == heads[i])
-				continue;
-			candidate = list_entry(cursor[i], af_feature_node_t, head);
-			if (best < 0 || af_feature_precedes(candidate, node)) {
-				best = i;
-				node = candidate;
-			}
-		}
-		if (best < 0)
-			break;
-		cursor[best] = cursor[best]->next;
-		/* Metadata-only failures are still work in softirq context. */
-		step_budget--;
-		if (node->prefilter_valid) {
-			if (!bitmap_ready) {
-				size_t head_len = min_t(size_t, flow->l4_len,
-							    MAX_AF_SUPPORT_DATA_LEN);
-				size_t tail_start = flow->l4_len > MAX_AF_SUPPORT_DATA_LEN ?
-					flow->l4_len - MAX_AF_SUPPORT_DATA_LEN : head_len;
-				size_t pos;
-
-				for (pos = 0; flow->l4_data && pos < head_len; pos++)
-					payload_bitmap[flow->l4_data[pos] >> 5] |=
-						BIT(flow->l4_data[pos] & 31);
-				/* Negative IK offsets are relative to the real payload tail.
-				 * Include the bounded tail window as well as the head window so
-				 * this rejection hint can never hide a valid tail signature. */
-				for (pos = tail_start; flow->l4_data &&
-				     pos < flow->l4_len; pos++)
-					payload_bitmap[flow->l4_data[pos] >> 5] |=
-						BIT(flow->l4_data[pos] & 31);
-				bitmap_ready = true;
-			}
-			if (!(payload_bitmap[node->prefilter_byte >> 5] &
-			      BIT(node->prefilter_byte & 31)))
-				continue;
-		}
-		if (af_match_one(flow, node, &step_budget)) {
-			if (node->fallback && fallback_found)
-				continue;
-			AF_LMT_INFO("match feature, appid=%d, feature = %s\n",
-				    node->app_id, node->feature);
-			flow->app_id = node->app_id;
-			flow->ignore = node->ignore ? 1 : 0;
-			flow->fallback = node->fallback ? 1 : 0;
-			strscpy(flow->matched_feature, node->feature,
-				sizeof(flow->matched_feature));
-			strncpy(flow->app_name, node->app_name,
-				sizeof(flow->app_name) - 1);
-			if (!node->fallback) {
-				feature_list_read_unlock();
-				return AF_TRUE;
-			}
-			/* A generic protocol is only a candidate. Keep scanning this
-			 * packet for a real application and retain the best ordered
-			 * fallback only when no specific signature matches. */
-			fallback_found = true;
+	if (af_has_app_status()) {
+		result = af_match_feature_pass(flow, heads, list_count,
+					       payload_bitmap, &bitmap_ready, true);
+		if (result == AF_MATCH_PASS_SPECIFIC) {
+			feature_list_read_unlock();
+			return AF_TRUE;
 		}
 	}
+	/* Parsed SNI is bounded, normalized application evidence.  Scan only the
+	 * two SNI buckets before mixing in thousands of raw/TLS regex candidates.
+	 * On the live desktop flow the parser exposed i2.hdslb.com, but the shared
+	 * packet step budget was exhausted before the priority-90 .hdslb.com row
+	 * when userspace's optional policy bitmap was momentarily empty.  Duplicate
+	 * cross-application predicates were already removed by the compiler, so
+	 * this prepass changes cost/order only; it does not weaken a predicate. */
+	if (flow->https.match) {
+		sni_heads[0] = &db->heads[proto][AF_FEATURE_FAMILY_SNI];
+		sni_heads[1] = &db->heads[AF_FEATURE_PROTO_ANY][AF_FEATURE_FAMILY_SNI];
+		result = af_match_feature_pass(flow, sni_heads, ARRAY_SIZE(sni_heads),
+					       payload_bitmap, &bitmap_ready, false);
+		if (result == AF_MATCH_PASS_SPECIFIC) {
+			atomic64_inc(&af_http_stats.sni_prepass_match);
+			feature_list_read_unlock();
+			return AF_TRUE;
+		}
+	}
+	result = af_match_feature_pass(flow, heads, list_count, payload_bitmap,
+				       &bitmap_ready, false);
 	feature_list_read_unlock();
-	return fallback_found ? AF_TRUE : AF_FALSE;
+	return result != AF_MATCH_PASS_NONE ? AF_TRUE : AF_FALSE;
 }
 
 
@@ -2602,12 +3233,13 @@ static int match_app_filter_rule(int appid, af_client_info_t *client)
 #define NF_PAYLOAD_COUNT_MAX   127
 #define NF_PROFILE_EPOCH_SHIFT 16
 #define NF_PROFILE_EPOCH_MASK  0x1fff0000
-/* Valid OAF APPIDs are below 0x8000.  While a generic protocol fallback is
- * waiting for the rest of the DPI window, bit 15 distinguishes it from a
- * terminal classification without consuming routing marks or HNAT flags. */
-#define NF_APPID_MASK          0x00007fff
-#define NF_PENDING_APP_BIT     0x00008000
-#define NF_CLASSIFICATION_MASK 0x0000ffff
+/* R20 ABI: secmark low16 is always a pure APPID.  R19 temporarily used bit15
+ * as PENDING, producing externally visible 0x8001 values which nftables and
+ * traffic accounting correctly interpreted as the nonexistent APPID 32769.
+ * Keep the legacy masks only to migrate live R19 conntracks on first sight. */
+#define NF_APPID_VALUE_MASK       0x0000ffff
+#define NF_LEGACY_PENDING_APP_BIT 0x00008000
+#define NF_LEGACY_APPID_MASK      0x00007fff
 
 /* Native IK profiles can contain more than ten thousand candidates.  A burst
  * of previously established connections may otherwise run the full matcher
@@ -2618,18 +3250,123 @@ static int match_app_filter_rule(int appid, af_client_info_t *client)
 static atomic_t af_dpi_global_owner = ATOMIC_INIT(0);
 static unsigned long af_dpi_next_admission;
 
-static bool af_dpi_global_try_enter(void)
+static bool af_dpi_global_try_enter(bool urgent_http)
 {
-	if (time_before(jiffies, READ_ONCE(af_dpi_next_admission)) ||
+	if ((!urgent_http &&
+	     time_before(jiffies, READ_ONCE(af_dpi_next_admission))) ||
 	    atomic_cmpxchg(&af_dpi_global_owner, 0, 1) != 0)
 		return false;
 	/* A contender can observe the old deadline just before the previous owner
 	 * publishes a new one.  Recheck after ownership acquisition. */
-	if (time_before(jiffies, READ_ONCE(af_dpi_next_admission))) {
+	if (!urgent_http &&
+	    time_before(jiffies, READ_ONCE(af_dpi_next_admission))) {
 		atomic_set(&af_dpi_global_owner, 0);
 		return false;
 	}
 	return true;
+}
+
+static bool af_appid_is_generic(u16 app_id)
+{
+	return app_id == OAF_UNKNOWN_APPID || app_id == 8073 || app_id == 8092;
+}
+
+static u32 af_current_profile_epoch(void);
+
+static bool af_ct_generic_pending(u32 tag)
+{
+	u16 app_id = tag & NF_APPID_VALUE_MASK;
+
+	/* Pending packets carry direction ordinals/counts in bits 16..28. A
+	 * terminal publication atomically replaces those transient bits with the
+	 * active profile epoch. This keeps low16 pure without another state bit. */
+	return af_appid_is_generic(app_id) &&
+	       (tag & NF_PROFILE_EPOCH_MASK) != af_current_profile_epoch();
+}
+
+static u16 af_ct_generic_app(u32 tag)
+{
+	u16 app_id = tag & NF_APPID_VALUE_MASK;
+
+	return af_appid_is_generic(app_id) ? app_id : 0;
+}
+
+static void af_classify_recent_add(struct nf_conn *ct, u16 old_raw,
+					   u16 old_appid, u16 new_appid,
+					   bool terminal, bool attempt, bool ok)
+{
+	struct af_classify_recent *r;
+	const struct nf_conntrack_tuple *tuple;
+
+	if (!ct)
+		return;
+	spin_lock_bh(&af_classify_recent_lock);
+	r = &af_classify_recent[af_classify_recent_head++ % AF_CLASSIFY_RECENT_MAX];
+	memset(r, 0, sizeof(*r));
+	tuple = &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple;
+	if (tuple->src.l3num == NFPROTO_IPV4) {
+		r->family = NFPROTO_IPV4;
+		r->src = tuple->src.u3.ip;
+		r->dst = tuple->dst.u3.ip;
+	} else if (tuple->src.l3num == NFPROTO_IPV6) {
+		r->family = NFPROTO_IPV6;
+		r->src6 = tuple->src.u3.in6;
+		r->dst6 = tuple->dst.u3.in6;
+	}
+	r->proto = tuple->dst.protonum;
+	r->sport = ntohs(tuple->src.u.all);
+	r->dport = ntohs(tuple->dst.u.all);
+	r->old_raw = old_raw;
+	r->old_appid = old_appid;
+	r->new_appid = new_appid;
+	r->terminal = terminal;
+	r->attempt = attempt;
+	r->ok = ok;
+	r->when = jiffies;
+	spin_unlock_bh(&af_classify_recent_lock);
+}
+
+static bool af_payload_may_upgrade_generic(flow_info_t *flow,
+					   struct nf_conn *ct)
+{
+	if (!flow || flow->l4_len <= 0 || flow->dir != AF_IK_DIR_ORIGINAL)
+		return false;
+	if (flow->l4_protocol == IPPROTO_TCP &&
+	    (af_http_method_prefix(flow->l4_data, flow->l4_len) ||
+	     af_http_prefix_pending(ct)))
+		return true;
+	return flow->l4_protocol == IPPROTO_TCP && flow->l4_len >= 3 &&
+	       (u8)flow->l4_data[0] == 0x16 &&
+	       (u8)flow->l4_data[1] == 0x03;
+}
+
+static void af_ct_reopen_generic(struct nf_conn *ct, u16 app_id)
+{
+	u32 tag;
+	u16 old_raw;
+	bool terminal = false;
+
+	spin_lock_bh(&ct->lock);
+	tag = OAF_CT_TAG(ct);
+	old_raw = tag & NF_APPID_VALUE_MASK;
+	if (af_ct_generic_app(tag) == app_id) {
+		terminal = !af_ct_generic_pending(tag);
+		/* Reopen with a fresh bounded window; low16 remains the pure APPID. */
+		tag &= ~(NF_PAYLOAD_COUNT_MASK | NF_ORIGINAL_SEQ_MASK |
+			 NF_REPLY_SEQ_MASK | NF_IGNORE_BIT);
+		tag = (tag & ~NF_APPID_VALUE_MASK) | app_id;
+		OAF_CT_TAG(ct) = tag;
+	}
+	spin_unlock_bh(&ct->lock);
+	if (terminal) {
+		/* A terminal generic result belongs to the request which just ended.
+		 * Never feed that completed prefix back into a later keep-alive request;
+		 * the current method-leading packet will allocate its own prefix. */
+		af_http_prefix_forget(ct);
+		atomic64_inc(&af_http_stats.terminal_generic_reentry);
+		af_classify_recent_add(ct, old_raw, app_id, app_id,
+				       true, false, false);
+	}
 }
 
 static void af_dpi_global_leave(void)
@@ -2646,27 +3383,111 @@ static void af_dpi_global_cancel(void)
 	atomic_set(&af_dpi_global_owner, 0);
 }
 
-static bool af_ct_has_pending_app(u32 tag)
-{
-	return (tag & NF_PENDING_APP_BIT) &&
-	       af_appid_valid(tag & NF_APPID_MASK);
-}
-
-static u16 af_ct_pending_app(u32 tag)
-{
-	return af_ct_has_pending_app(tag) ? tag & NF_APPID_MASK : 0;
-}
-
 static u32 af_ct_tag_read(struct nf_conn *ct)
 {
 	u32 tag;
+	u16 raw;
+	u16 base = 0;
+	bool migrated = false;
 
 	if (!ct)
 		return 0;
 	spin_lock_bh(&ct->lock);
 	tag = OAF_CT_TAG(ct);
+	raw = tag & NF_APPID_VALUE_MASK;
+	if ((raw & NF_LEGACY_PENDING_APP_BIT) &&
+	    af_appid_is_generic(raw & NF_LEGACY_APPID_MASK)) {
+		base = raw & NF_LEGACY_APPID_MASK;
+		tag = (tag & ~NF_APPID_VALUE_MASK) |
+		      base;
+		tag &= ~(NF_PAYLOAD_COUNT_MASK | NF_ORIGINAL_SEQ_MASK |
+			 NF_REPLY_SEQ_MASK | NF_IGNORE_BIT);
+		OAF_CT_TAG(ct) = tag;
+		migrated = true;
+	}
 	spin_unlock_bh(&ct->lock);
+	if (migrated) {
+		atomic64_inc(&af_http_stats.terminal_generic_reentry);
+		af_classify_recent_add(ct, raw, base, base, true, false, false);
+	}
 	return tag;
+}
+
+/* The packet mark used by the original integration only protects one skb.
+ * Some MediaTek external-device paths rebuild that skb before the proprietary
+ * HNAT bind point, and software flow offload does not consult it at all.  Keep
+ * the same reserved bit on the conntrack while DPI is pending or the policy
+ * verdict is BLOCK.  This is deliberately a single bit so mwan/PBR/QoS mark
+ * namespaces remain intact. */
+static bool af_ct_set_no_offload_locked(struct nf_conn *ct, bool enabled)
+{
+#if IS_ENABLED(CONFIG_NF_CONNTRACK_MARK)
+	u32 mark, old_mark;
+
+	if (!ct)
+		return false;
+	old_mark = READ_ONCE(ct->mark);
+	mark = old_mark;
+	if (enabled)
+		mark |= OAF_CT_NO_OFFLOAD_MARK;
+	else
+		mark &= ~OAF_CT_NO_OFFLOAD_MARK;
+	if (mark == old_mark)
+		return false;
+	WRITE_ONCE(ct->mark, mark);
+	return true;
+#else
+	return false;
+#endif
+}
+
+static bool af_ct_set_no_offload(struct nf_conn *ct, bool enabled)
+{
+	bool changed;
+
+	if (!ct)
+		return false;
+	spin_lock_bh(&ct->lock);
+	changed = af_ct_set_no_offload_locked(ct, enabled);
+	spin_unlock_bh(&ct->lock);
+	return changed;
+}
+
+static void af_hnat_kick_conntrack(struct nf_conn *ct)
+{
+	int (*kick)(struct nf_conn *ct);
+
+	if (!ct)
+		return;
+	kick = symbol_get(mtk_hnat_kick_conntrack);
+	if (!kick)
+		return;
+	kick(ct);
+	symbol_put(mtk_hnat_kick_conntrack);
+}
+
+/* Existing terminal flows need a KICK only when their durable admission bit
+ * transitions to BLOCK.  First-time classifications are kicked explicitly in
+ * af_ct_publish_classification(), including when DPI_PENDING already held the
+ * same bit. */
+static void af_ct_apply_terminal_offload(struct nf_conn *ct, bool blocked)
+{
+	if (af_ct_set_no_offload(ct, blocked) && blocked)
+		af_hnat_kick_conntrack(ct);
+}
+
+/* mark_control runs before OAF and therefore its skb mark would otherwise
+ * survive even after an ALLOW classification cleared the durable ct mark.
+ * MediaTek's bind hook consults both namespaces, so clear/set the dedicated
+ * bit on the current packet together with the terminal conntrack decision. */
+static void af_skb_apply_terminal_offload(struct sk_buff *skb, bool blocked)
+{
+	if (!skb)
+		return;
+	if (blocked)
+		skb->mark |= OAF_ACCEL_BYPASS_MARK;
+	else
+		skb->mark &= ~OAF_ACCEL_BYPASS_MARK;
 }
 
 static u32 af_current_profile_epoch(void)
@@ -2685,8 +3506,8 @@ static bool af_ct_reset_stale_profile(struct nf_conn *ct, u32 *result)
 		return false;
 	spin_lock_bh(&ct->lock);
 	tag = OAF_CT_TAG(ct);
-	classification = tag & NF_CLASSIFICATION_MASK;
-	if (classification && !af_ct_has_pending_app(tag) &&
+	classification = tag & NF_APPID_VALUE_MASK;
+	if (classification && !af_ct_generic_pending(tag) &&
 	    (tag & NF_PROFILE_EPOCH_MASK) != af_current_profile_epoch()) {
 		/* secmark is OAF's private namespace.  Terminal APPIDs from a prior
 		 * module/profile must never be interpreted using the new catalog. */
@@ -2720,32 +3541,70 @@ static u32 af_ct_tag_update(struct nf_conn *ct, u32 clear_mask, u32 set_mask)
 }
 
 static bool af_ct_publish_classification(struct nf_conn *ct, u16 app_id,
-					 bool ignore, bool drop, u32 *result)
+					 bool ignore, bool drop,
+					 bool policy_no_offload, u32 *result)
 {
 	u32 tag;
 	u16 current_app;
+	u16 pending_app;
+	bool upgrade_attempt;
+	bool old_terminal;
 	bool published = false;
 
 	if (!ct)
 		return false;
 	spin_lock_bh(&ct->lock);
 	tag = OAF_CT_TAG(ct);
-	current_app = tag & NF_CLASSIFICATION_MASK;
+	current_app = tag & NF_APPID_VALUE_MASK;
+	pending_app = af_ct_generic_pending(tag) ? af_ct_generic_app(tag) : 0;
+	upgrade_attempt = af_appid_is_generic(current_app) &&
+			  !af_appid_is_generic(app_id) && af_appid_valid(app_id);
+	old_terminal = af_appid_is_generic(current_app) &&
+		       !af_ct_generic_pending(tag);
+	if (upgrade_attempt) {
+		atomic64_inc(&af_http_stats.terminal_generic_upgrade_attempt);
+		af_classify_recent_add(ct, current_app, current_app, app_id,
+				       old_terminal, true, false);
+	}
 	/* First terminal decision wins.  A late DPI packet must not replace an
 	 * already published valid APPID from the other CPU.  A valid result may
 	 * still replace UNKNOWN at the DPI-window boundary. */
-	if (!current_app || af_ct_has_pending_app(tag) ||
-	    (current_app == OAF_UNKNOWN_APPID &&
-	     app_id != OAF_UNKNOWN_APPID && af_appid_valid(app_id))) {
-		tag = (tag & ~(NF_CLASSIFICATION_MASK | NF_PROFILE_EPOCH_MASK |
+	if (!current_app || af_ct_generic_pending(tag) || upgrade_attempt) {
+		tag = (tag & ~(NF_APPID_VALUE_MASK | NF_PROFILE_EPOCH_MASK |
 			       NF_IGNORE_BIT | NF_DROP_BIT)) |
 		      app_id | af_current_profile_epoch() |
 		      (ignore ? NF_IGNORE_BIT : 0) |
 		      (drop ? NF_DROP_BIT : 0);
 		OAF_CT_TAG(ct) = tag;
+		/* Strict policy marks the skb/conntrack before OAF's -149 hook.  That
+		 * hold is only an admission barrier while APPID is unknown: release it
+		 * for a completed result, then the -148 nft rule pins only a matching
+		 * blocked APPID before reject.  Keeping it here would push every flow of
+		 * a selected client through the CPUs indefinitely. */
+		af_ct_set_no_offload_locked(ct, drop);
 		published = true;
+		if (policy_no_offload)
+			atomic64_inc(&af_http_stats.policy_hold_published);
+		if (app_id == OAF_UNKNOWN_APPID)
+			atomic64_inc(&af_http_stats.appid1_flows);
+		if (pending_app && af_appid_is_generic(pending_app) &&
+		    !af_appid_is_generic(app_id))
+			atomic64_inc(&af_http_stats.generic_upgraded);
+		if (upgrade_attempt) {
+			atomic64_inc(&af_http_stats.terminal_generic_upgrade_ok);
+			af_classify_recent_add(ct, current_app, current_app, app_id,
+					       old_terminal, true, true);
+		}
 	}
 	spin_unlock_bh(&ct->lock);
+	/* Publication ends the current bounded request/DPI window.  Specific
+	 * results are final; terminal generic results may be reopened only by a
+	 * fresh original-direction HTTP request, which must not inherit this
+	 * request's prefix. */
+	if (published)
+		af_http_prefix_forget(ct);
+	if (published && (drop || policy_no_offload))
+		af_hnat_kick_conntrack(ct);
 	if (result)
 		*result = tag;
 	return published;
@@ -2757,17 +3616,17 @@ static bool af_ct_note_fallback(struct nf_conn *ct, u16 app_id, u32 *result)
 	u16 current_class;
 	bool stored = false;
 
-	if (!ct || !af_appid_valid(app_id) || app_id > NF_APPID_MASK)
+	if (!ct || !af_appid_valid(app_id))
 		return false;
 	spin_lock_bh(&ct->lock);
 	tag = OAF_CT_TAG(ct);
-	current_class = tag & NF_CLASSIFICATION_MASK;
+	current_class = tag & NF_APPID_VALUE_MASK;
 	if (!current_class) {
-		tag = (tag & ~NF_CLASSIFICATION_MASK) |
-		      NF_PENDING_APP_BIT | app_id;
+		tag = (tag & ~NF_APPID_VALUE_MASK) | app_id;
 		OAF_CT_TAG(ct) = tag;
 		stored = true;
-	} else if (af_ct_has_pending_app(tag)) {
+		atomic64_inc(&af_http_stats.generic_set);
+	} else if (af_ct_generic_pending(tag)) {
 		/* match_feature() is priority/specificity ordered: keep the first
 		 * generic candidate observed for this connection. */
 		stored = true;
@@ -2807,14 +3666,15 @@ static int af_ct_begin_payload_dpi(struct nf_conn *ct, u8 direction,
 
 	spin_lock_bh(&ct->lock);
 	tag = OAF_CT_TAG(ct);
-	if ((tag & NF_CLASSIFICATION_MASK) && !af_ct_has_pending_app(tag)) {
+	if ((tag & NF_APPID_VALUE_MASK) && !af_ct_generic_pending(tag)) {
 		result = AF_DPI_BEGIN_CLASSIFIED;
 		goto out;
 	}
 	/* Before APPID publication NF_IGNORE_BIT is an in-flight latch.  Once
 	 * low16 becomes nonzero the publisher atomically gives the bit its normal
 	 * IGNORE meaning.  This serialises packet ordinals and UNKNOWN publication
-	 * for a conn without touching ct->mark or any PPE state. */
+	 * for a conn without storing APP_ID in ct->mark.  The separate reserved
+	 * NO_OFFLOAD bit may still be present there while classification is pending. */
 	if (tag & NF_IGNORE_BIT) {
 		result = AF_DPI_BEGIN_BUSY;
 		goto out;
@@ -2844,8 +3704,8 @@ static void af_ct_end_payload_dpi(struct nf_conn *ct)
 	if (!ct)
 		return;
 	spin_lock_bh(&ct->lock);
-	if (!(OAF_CT_TAG(ct) & NF_CLASSIFICATION_MASK) ||
-	    af_ct_has_pending_app(OAF_CT_TAG(ct)))
+	if (!(OAF_CT_TAG(ct) & NF_APPID_VALUE_MASK) ||
+	    af_ct_generic_pending(OAF_CT_TAG(ct)))
 		OAF_CT_TAG(ct) &= ~NF_IGNORE_BIT;
 	spin_unlock_bh(&ct->lock);
 }
@@ -3204,12 +4064,17 @@ static u_int32_t app_filter_hook_gateway_handle(struct sk_buff *skb,
 	u_int32_t tag;
 	u_int8_t payload_count = 0;
 	u_int8_t malloc_data = 0;
+	u8 *skb_copy_data = NULL;
+	u8 *prefix_data = NULL;
+	int prefix_len = 0;
+	bool urgent_http;
 	bool published;
+	bool policy_no_offload;
 	bool dpi_global_owned = false;
 	int dpi_begin;
 
-	if ((!in || !strstr(in->name, g_lan_ifname)) &&
-	    (!out || !strstr(out->name, g_lan_ifname)))
+	if (!af_netdev_is_lan(in, g_lan_ifname) &&
+	    !af_netdev_is_lan(out, g_lan_ifname))
 		return NF_ACCEPT;
 
 	memset((char *)&flow, 0x0, sizeof(flow_info_t));
@@ -3219,6 +4084,13 @@ static u_int32_t app_filter_hook_gateway_handle(struct sk_buff *skb,
 	ct = nf_ct_get(skb, &ctinfo);
 	if (ct == NULL)
 		return NF_ACCEPT;
+	/* nft mark_control runs at -150, immediately before this -149 hook.  Capture
+	 * its skb mark before OAF adds the same compatibility bit for balanced or
+	 * precise DPI, so a strict per-client hold can survive APPID publication. */
+	policy_no_offload = !!(skb->mark & OAF_ACCEL_BYPASS_MARK);
+	if (policy_no_offload)
+		atomic64_inc(&af_http_stats.policy_hold_seen);
+	flow.ct = ct;
 	flow.dir = CTINFO2DIR(ctinfo) == IP_CT_DIR_REPLY ?
 		   AF_IK_DIR_REPLY : AF_IK_DIR_ORIGINAL;
 
@@ -3254,6 +4126,8 @@ static u_int32_t app_filter_hook_gateway_handle(struct sk_buff *skb,
 	 * mwan3, policy routing and EQoS all own portions of the normal mark.  The
 	 * conntrack security mark is a separate 32-bit namespace and survives both
 	 * software flow offload and MediaTek PPE MIB-to-conntrack synchronization.
+	 * Only OAF_CT_NO_OFFLOAD_MARK is reserved in ct->mark as a per-flow
+	 * accelerator admission guard; all other mark bits are preserved.
 	 */
 	tag = af_ct_tag_read(ct);
 	if (tag && af_ct_reset_stale_profile(ct, &tag))
@@ -3262,8 +4136,8 @@ static u_int32_t app_filter_hook_gateway_handle(struct sk_buff *skb,
 	{
 		u_int32_t orig_tag = tag;
 
-		app_id = tag & NF_CLASSIFICATION_MASK;
-		if (af_ct_has_pending_app(tag)) {
+		app_id = tag & NF_APPID_VALUE_MASK;
+		if (af_ct_generic_pending(tag)) {
 			/* A generic protocol match is deliberately non-terminal.  Keep
 			 * looking for a specific application on later payload packets. */
 			app_id = 0;
@@ -3274,8 +4148,16 @@ static u_int32_t app_filter_hook_gateway_handle(struct sk_buff *skb,
 		// 1: drop , 0: accept
 		int ct_action = !!(tag & NF_DROP_BIT);
 		flow.ignore = !!(tag & NF_IGNORE_BIT);
-		if (app_id == OAF_UNKNOWN_APPID)
+		if (af_appid_is_generic(app_id) &&
+		    af_payload_may_upgrade_generic(&flow, ct)) {
+			af_ct_reopen_generic(ct, app_id);
+			goto CLASSIFY_PENDING;
+		}
+		if (app_id == OAF_UNKNOWN_APPID) {
+			af_ct_set_no_offload(ct, false);
+			af_skb_apply_terminal_offload(skb, false);
 			return NF_ACCEPT;
+		}
 		if (flow.ignore){
 			AF_LMT_DEBUG("match ignore appid = %d, drop = %d\n", app_id, ct_action);
 		}
@@ -3283,11 +4165,15 @@ static u_int32_t app_filter_hook_gateway_handle(struct sk_buff *skb,
 		if (g_oaf_filter_enable){
 			// quic proto
 			if (g_disable_quic && app_id == APPID_QUIC && ct_action){
+				af_ct_apply_terminal_offload(ct, true);
+				af_skb_apply_terminal_offload(skb, true);
 				AF_LMT_INFO("secmark = %x,drop appid = %d\n", tag, app_id);
 				return NF_DROP;
 			}
 
 			if (g_app_filter_mode && ct_action){
+				af_ct_apply_terminal_offload(ct, true);
+				af_skb_apply_terminal_offload(skb, true);
 				AF_LMT_INFO("ct drop all app\n");
 				return NF_DROP;
 			}
@@ -3305,6 +4191,10 @@ static u_int32_t app_filter_hook_gateway_handle(struct sk_buff *skb,
 				AF_LMT_DEBUG("update appid %d action to %s, secmark = %x-->%x\n",
 						 app_id, ct_action ? "drop" : "accept", orig_tag, tag);
 			}
+			af_ct_apply_terminal_offload(ct,
+						    g_oaf_filter_enable && ct_action);
+			af_skb_apply_terminal_offload(skb,
+						     g_oaf_filter_enable && ct_action);
 
 			if (g_oaf_record_enable){
 				AF_CLIENT_LOCK_W();
@@ -3326,6 +4216,8 @@ static u_int32_t app_filter_hook_gateway_handle(struct sk_buff *skb,
 			}
 		}
 		else {
+			af_ct_set_no_offload(ct, false);
+			af_skb_apply_terminal_offload(skb, false);
 			AF_LMT_DEBUG("ct->secmark = %x\n", tag);
 			if (tag & NF_CLIENT_HELLO_BIT) {
 				AF_LMT_INFO("match ct client hello...\n");
@@ -3335,60 +4227,103 @@ static u_int32_t app_filter_hook_gateway_handle(struct sk_buff *skb,
 	}
 
 CLASSIFY_PENDING:
+	/* Keep this connection, not the whole device or accelerator, on CPU until
+	 * DPI reaches ALLOW/BLOCK/UNKNOWN.  The skb bit remains as protection for
+	 * the current packet and compatibility with older HNAT paths. */
+	af_ct_set_no_offload(ct, !!g_hold_acceleration || policy_no_offload);
 	/* Handshake/ACK-only packets are neither DPI input nor part of its window. */
 	if (flow.l4_len <= 0) {
 		/* Precise/balanced must still keep the flow off PPE until payload
 		 * classification; seamless deliberately leaves this bit clear. */
-		if (g_hold_acceleration)
+		if (g_hold_acceleration || policy_no_offload)
 			skb->mark |= OAF_ACCEL_BYPASS_MARK;
 		return NF_ACCEPT;
 	}
-	if (g_hold_acceleration)
+	if (g_hold_acceleration || policy_no_offload)
 		skb->mark |= OAF_ACCEL_BYPASS_MARK;
-	if (!af_dpi_global_try_enter())
-		return NF_ACCEPT;
-	dpi_global_owned = true;
-	dpi_begin = af_ct_begin_payload_dpi(ct, flow.dir, &flow.pkt_seq,
-					      &payload_count, &tag);
-	if (dpi_begin == AF_DPI_BEGIN_BUSY) {
-		af_dpi_global_cancel();
-		return NF_ACCEPT;
-	}
-	if (dpi_begin == AF_DPI_BEGIN_CLASSIFIED) {
-		af_dpi_global_cancel();
-		return g_oaf_filter_enable && (tag & NF_DROP_BIT) ?
-		       NF_DROP : NF_ACCEPT;
-	}
-
-	if (payload_count > g_max_dpi_packets) {
-		app_id = af_ct_pending_app(tag);
-		flow.drop = app_id && g_oaf_filter_enable &&
-			    match_app_filter_rule(app_id, client);
-		af_ct_publish_classification(ct,
-					     app_id ? app_id : OAF_UNKNOWN_APPID,
-					     false, flow.drop,
-					     &tag);
-		if (g_oaf_filter_enable && (tag & NF_DROP_BIT))
-			ret = NF_DROP;
-		goto EXIT;
-	}
-
+	/* Capture a ClientHello/HTTP prefix before taking the global matcher slot.
+	 * A busy slot must delay expensive matching, not discard the first TCP
+	 * segment which anchors stream reassembly.  The bounded per-conn slot keeps
+	 * the bytes; these private copies are released on every early return. */
 	if (skb_is_nonlinear(skb) && flow.l4_len > 0)
 	{
 		flow.l4_len = min_t(int, flow.l4_len, MAX_AF_SUPPORT_DATA_LEN);
 		flow.l4_data = read_skb(skb, flow.l4_data - skb->data,
 				    flow.l4_len);
 		if (!flow.l4_data)
-			goto EXIT;
+			return NF_ACCEPT;
+		skb_copy_data = flow.l4_data;
 		malloc_data = 1;
 	}
+	prefix_data = af_http_prefix_snapshot(skb, ct, &flow, &prefix_len);
+	if (prefix_data) {
+		flow.l4_data = prefix_data;
+		flow.l4_len = prefix_len;
+	}
+	urgent_http = flow.dir == AF_IK_DIR_ORIGINAL &&
+		(flow.l4_protocol == IPPROTO_TCP) &&
+		(af_http_method_prefix(flow.l4_data, flow.l4_len) ||
+		 af_tls_client_hello_prefix(flow.l4_data, flow.l4_len) ||
+		 af_http_prefix_pending(ct));
+	if (!af_dpi_global_try_enter(urgent_http)) {
+		if (malloc_data)
+			kfree(skb_copy_data);
+		kfree(prefix_data);
+		return NF_ACCEPT;
+	}
+	dpi_global_owned = true;
+	dpi_begin = af_ct_begin_payload_dpi(ct, flow.dir, &flow.pkt_seq,
+					      &payload_count, &tag);
+	if (dpi_begin == AF_DPI_BEGIN_BUSY) {
+		af_dpi_global_cancel();
+		if (malloc_data)
+			kfree(skb_copy_data);
+		kfree(prefix_data);
+		return NF_ACCEPT;
+	}
+	if (dpi_begin == AF_DPI_BEGIN_CLASSIFIED) {
+		af_dpi_global_cancel();
+		if (malloc_data)
+			kfree(skb_copy_data);
+		kfree(prefix_data);
+		af_skb_apply_terminal_offload(skb,
+					       g_oaf_filter_enable &&
+					       !!(tag & NF_DROP_BIT));
+		return g_oaf_filter_enable && (tag & NF_DROP_BIT) ?
+		       NF_DROP : NF_ACCEPT;
+	}
+
+	if (payload_count > g_max_dpi_packets && !prefix_data) {
+		app_id = af_ct_generic_app(tag);
+		if (app_id) {
+			atomic64_inc(&af_http_stats.terminal_generic_set);
+			af_classify_recent_add(ct, app_id, app_id, app_id,
+					       true, false, false);
+		}
+		flow.drop = app_id && g_oaf_filter_enable &&
+			    match_app_filter_rule(app_id, client);
+		af_ct_publish_classification(ct,
+					     app_id ? app_id : OAF_UNKNOWN_APPID,
+					     false, flow.drop, policy_no_offload,
+					     &tag);
+		af_skb_apply_terminal_offload(skb,
+					       g_oaf_filter_enable &&
+					       !!(tag & NF_DROP_BIT));
+		if (g_oaf_filter_enable && (tag & NF_DROP_BIT))
+			ret = NF_DROP;
+		goto EXIT;
+	}
+	if (payload_count > g_max_dpi_packets)
+		atomic64_inc(&af_http_stats.generic_finalize_deferred);
 	/* Balanced/precise profiles keep an unknown flow on CPU until DPI decides
 	 * ALLOW/BLOCK. Seamless inspects only packets that naturally reach CPU.
 	 * QUIC must run after nonlinear payloads have been copied safely. */
 	if (g_oaf_filter_enable && g_disable_quic && af_match_quic(&flow) &&
 	    match_app_filter_user(client)) {
-		af_ct_publish_classification(ct, APPID_QUIC, false, true, &tag);
-		if ((tag & 0x0000ffff) != APPID_QUIC) {
+		af_ct_publish_classification(ct, APPID_QUIC, false, true,
+					     policy_no_offload, &tag);
+		af_skb_apply_terminal_offload(skb, true);
+		if ((tag & NF_APPID_VALUE_MASK) != APPID_QUIC) {
 			ret = tag & NF_DROP_BIT ? NF_DROP : NF_ACCEPT;
 			goto EXIT;
 		}
@@ -3436,10 +4371,13 @@ CLASSIFY_PENDING:
 	}
 
 	published = af_ct_publish_classification(ct, flow.app_id,
-						 flow.ignore, flow.drop, &tag);
+						 flow.ignore, flow.drop,
+						 policy_no_offload, &tag);
+	af_skb_apply_terminal_offload(skb,
+				       g_oaf_filter_enable && !!(tag & NF_DROP_BIT));
 	if (!published) {
-		app_id = tag & NF_CLASSIFICATION_MASK;
-		if (af_ct_has_pending_app(tag))
+		app_id = tag & NF_APPID_VALUE_MASK;
+		if (af_ct_generic_pending(tag))
 			goto EXIT;
 		if (app_id == OAF_UNKNOWN_APPID ||
 		    (app_id && !af_appid_valid(app_id)))
@@ -3485,11 +4423,9 @@ EXIT:
 		af_dpi_global_leave();
 	if (malloc_data)
 	{
-		if (flow.l4_data)
-		{
-			kfree(flow.l4_data);
-		}
+		kfree(skb_copy_data);
 	}
+	kfree(prefix_data);
 	return ret;
 }
 
@@ -3706,11 +4642,11 @@ static void oaf_user_msg_handle(char *data, int len)
 	case AF_MSG_ADD_FEATURE:
 		if (af_add_feature_msg_handle(msg_data,
 					      len - sizeof(af_msg_t)) < 0)
-			af_fail_feature_reload();
+			af_fail_feature_reload(EINVAL);
 		break;
 	case AF_MSG_RELOAD_BEGIN:
 		if (len != sizeof(af_msg_t)) {
-			af_fail_feature_reload();
+			af_fail_feature_reload(EINVAL);
 			break;
 		}
 		AF_INFO("begin atomic feature reload\n");
@@ -3719,7 +4655,7 @@ static void oaf_user_msg_handle(char *data, int len)
 		break;
 	case AF_MSG_RELOAD_COMMIT:
 		if (len != sizeof(*commit)) {
-			af_fail_feature_reload();
+			af_fail_feature_reload(EINVAL);
 			break;
 		}
 		commit = (af_reload_commit_msg_t *)data;
@@ -3777,6 +4713,241 @@ static int netlink_oaf_init(void)
 	return 0;
 }
 
+static int af_http_stats_show(struct seq_file *m, void *v)
+{
+#define AF_STAT(name) seq_printf(m, #name "=%lld\n", \
+	(long long)atomic64_read(&af_http_stats.name))
+	AF_STAT(parse_ok); AF_STAT(parse_fail);
+	AF_STAT(uri_checked); AF_STAT(host_checked); AF_STAT(ua_checked);
+	AF_STAT(candidate_rules); AF_STAT(rule_match); AF_STAT(rule_no_match);
+	AF_STAT(unsupported_rule);
+	AF_STAT(priority_candidates); AF_STAT(priority_rule_match);
+	AF_STAT(priority_budget_expired); AF_STAT(field_prefilter_reject);
+	AF_STAT(generic_set); AF_STAT(generic_upgraded);
+	AF_STAT(generic_finalize_timeout);
+	AF_STAT(generic_finalize_deferred);
+	AF_STAT(pktseq_wait); AF_STAT(pktseq_match); AF_STAT(pktseq_budget_expired);
+	AF_STAT(prefix_alloc); AF_STAT(prefix_complete);
+	AF_STAT(prefix_restarted);
+	AF_STAT(prefix_budget_expired); AF_STAT(prefix_oom);
+	AF_STAT(tls_prefix_alloc); AF_STAT(tls_prefix_complete);
+	AF_STAT(tls_prefix_budget_expired); AF_STAT(tls_prefix_oom);
+	AF_STAT(tls_client_hello); AF_STAT(tls_sni_ok);
+	AF_STAT(tls_sni_missing); AF_STAT(tls_ech_seen);
+	AF_STAT(sni_candidates); AF_STAT(sni_rule_match);
+	AF_STAT(sni_rule_no_match); AF_STAT(sni_priority_rule_match);
+	AF_STAT(sni_prepass_match);
+	AF_STAT(sni_pktseq_bypassed);
+	AF_STAT(policy_hold_seen); AF_STAT(policy_hold_published);
+	AF_STAT(appid1_flows);
+	AF_STAT(terminal_generic_set); AF_STAT(terminal_generic_reentry);
+	AF_STAT(terminal_generic_upgrade_attempt);
+	AF_STAT(terminal_generic_upgrade_ok);
+#undef AF_STAT
+	return 0;
+}
+
+static int af_http_stats_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, af_http_stats_show, NULL);
+}
+
+static const struct proc_ops af_http_stats_ops = {
+	.proc_open = af_http_stats_open,
+	.proc_read = seq_read,
+	.proc_lseek = seq_lseek,
+	.proc_release = single_release,
+};
+
+static int af_classify_recent_show(struct seq_file *m, void *v)
+{
+	unsigned int head, count, i, index;
+	struct af_classify_recent r;
+
+	spin_lock_bh(&af_classify_recent_lock);
+	head = af_classify_recent_head;
+	count = min_t(unsigned int, head, AF_CLASSIFY_RECENT_MAX);
+	spin_unlock_bh(&af_classify_recent_lock);
+	for (i = 0; i < count; i++) {
+		index = (head - count + i) % AF_CLASSIFY_RECENT_MAX;
+		spin_lock_bh(&af_classify_recent_lock);
+		r = af_classify_recent[index];
+		spin_unlock_bh(&af_classify_recent_lock);
+		if (r.family == NFPROTO_IPV6)
+			seq_printf(m, "flow=[%pI6c]:%u->[%pI6c]:%u ",
+				   &r.src6, r.sport, &r.dst6, r.dport);
+		else
+			seq_printf(m, "flow=%pI4:%u->%pI4:%u ",
+				   &r.src, r.sport, &r.dst, r.dport);
+		seq_printf(m,
+			   "proto=%u age_ms=%u "
+			   "old_raw=0x%04x old_appid=%u terminal=%u "
+			   "upgrade_attempt=%u upgrade_ok=%u new_appid=%u\n",
+			   r.proto, jiffies_to_msecs(jiffies - r.when), r.old_raw,
+			   r.old_appid, r.terminal, r.attempt, r.ok,
+			   r.new_appid);
+	}
+	return 0;
+}
+
+static int af_classify_recent_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, af_classify_recent_show, NULL);
+}
+
+static const struct proc_ops af_classify_recent_ops = {
+	.proc_open = af_classify_recent_open,
+	.proc_read = seq_read,
+	.proc_lseek = seq_lseek,
+	.proc_release = single_release,
+};
+
+static int af_http_match_recent_show(struct seq_file *m, void *v)
+{
+	unsigned int head, count, i, index;
+	struct af_http_match_recent recent;
+
+	spin_lock_bh(&af_http_match_recent_lock);
+	head = af_http_match_recent_head;
+	count = min_t(unsigned int, head, AF_HTTP_MATCH_RECENT_MAX);
+	spin_unlock_bh(&af_http_match_recent_lock);
+	for (i = 0; i < count; i++) {
+		index = (head - count + i) % AF_HTTP_MATCH_RECENT_MAX;
+		spin_lock_bh(&af_http_match_recent_lock);
+		recent = af_http_match_recent[index];
+		spin_unlock_bh(&af_http_match_recent_lock);
+		seq_printf(m,
+			   "flow=%pI4:%u->%pI4:%u proto=%u age_ms=%u "
+			   "appid=%u kind=%u priority=%u field=%u fallback=%u "
+			   "policy_priority=%u uri=%s host=%s ua=%s\n",
+			   &recent.src, recent.sport, &recent.dst, recent.dport,
+			   recent.proto,
+			   jiffies_to_msecs(jiffies - recent.when), recent.appid,
+			   recent.match_kind, recent.priority, recent.field,
+			   recent.fallback, recent.policy_priority, recent.uri,
+			   recent.host, recent.user_agent);
+	}
+	return 0;
+}
+
+static int af_http_match_recent_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, af_http_match_recent_show, NULL);
+}
+
+static const struct proc_ops af_http_match_recent_ops = {
+	.proc_open = af_http_match_recent_open,
+	.proc_read = seq_read,
+	.proc_lseek = seq_lseek,
+	.proc_release = single_release,
+};
+
+static const char *af_sni_result_name(u8 result)
+{
+	switch (result) {
+	case AF_SNI_OK:
+		return "ok";
+	case AF_SNI_ECH:
+		return "ech";
+	default:
+		return "missing";
+	}
+}
+
+static int af_sni_recent_show(struct seq_file *m, void *v)
+{
+	unsigned int head, count, i, index;
+	struct af_sni_recent recent;
+
+	spin_lock_bh(&af_sni_recent_lock);
+	head = af_sni_recent_head;
+	count = min_t(unsigned int, head, AF_SNI_RECENT_MAX);
+	spin_unlock_bh(&af_sni_recent_lock);
+	for (i = 0; i < count; i++) {
+		index = (head - count + i) % AF_SNI_RECENT_MAX;
+		spin_lock_bh(&af_sni_recent_lock);
+		recent = af_sni_recent[index];
+		spin_unlock_bh(&af_sni_recent_lock);
+		if (recent.family == NFPROTO_IPV6)
+			seq_printf(m,
+				   "flow=[%pI6c]:%u->[%pI6c]:%u proto=%u age_ms=%u ",
+				   &recent.src6, recent.sport, &recent.dst6,
+				   recent.dport, recent.proto,
+				   jiffies_to_msecs(jiffies - recent.when));
+		else
+			seq_printf(m,
+				   "flow=%pI4:%u->%pI4:%u proto=%u age_ms=%u ",
+				   &recent.src, recent.sport, &recent.dst,
+				   recent.dport, recent.proto,
+				   jiffies_to_msecs(jiffies - recent.when));
+		seq_printf(m,
+			   "prefix_len=%u record_len=%u result=%s sni=%s\n",
+			   recent.prefix_len, recent.record_len,
+			   af_sni_result_name(recent.result), recent.sni);
+	}
+	return 0;
+}
+
+static int af_sni_recent_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, af_sni_recent_show, NULL);
+}
+
+static const struct proc_ops af_sni_recent_ops = {
+	.proc_open = af_sni_recent_open,
+	.proc_read = seq_read,
+	.proc_lseek = seq_lseek,
+	.proc_release = single_release,
+};
+
+static int af_sni_match_recent_show(struct seq_file *m, void *v)
+{
+	unsigned int head, count, i, index;
+	struct af_sni_match_recent recent;
+
+	spin_lock_bh(&af_sni_match_recent_lock);
+	head = af_sni_match_recent_head;
+	count = min_t(unsigned int, head, AF_SNI_MATCH_RECENT_MAX);
+	spin_unlock_bh(&af_sni_match_recent_lock);
+	for (i = 0; i < count; i++) {
+		index = (head - count + i) % AF_SNI_MATCH_RECENT_MAX;
+		spin_lock_bh(&af_sni_match_recent_lock);
+		recent = af_sni_match_recent[index];
+		spin_unlock_bh(&af_sni_match_recent_lock);
+		if (recent.family == NFPROTO_IPV6)
+			seq_printf(m,
+				   "flow=[%pI6c]:%u->[%pI6c]:%u ",
+				   &recent.src6, recent.sport, &recent.dst6,
+				   recent.dport);
+		else
+			seq_printf(m, "flow=%pI4:%u->%pI4:%u ",
+				   &recent.src, recent.sport, &recent.dst,
+				   recent.dport);
+		seq_printf(m,
+			   "proto=%u age_ms=%u appid=%u kind=%u priority=%u "
+			   "policy_priority=%u pkt_seq=%u pkt_seq_mask=0x%02x "
+			   "sni=%s\n",
+			   recent.proto,
+			   jiffies_to_msecs(jiffies - recent.when), recent.appid,
+			   recent.match_kind, recent.priority,
+			   recent.policy_priority, recent.pkt_seq,
+			   recent.pkt_seq_mask, recent.sni);
+	}
+	return 0;
+}
+
+static int af_sni_match_recent_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, af_sni_match_recent_show, NULL);
+}
+
+static const struct proc_ops af_sni_match_recent_ops = {
+	.proc_open = af_sni_match_recent_open,
+	.proc_read = seq_read,
+	.proc_lseek = seq_lseek,
+	.proc_release = single_release,
+};
+
 static int __init app_filter_init(void)
 {
 	int err;
@@ -3826,6 +4997,29 @@ static int __init app_filter_init(void)
 		AF_ERROR("oaf register filter hooks failed!\n");
 		goto err_netlink;
 	}
+	af_http_stats_proc = proc_create("oaf_http_stats", 0444,
+					 init_net.proc_net, &af_http_stats_ops);
+	if (!af_http_stats_proc)
+		pr_warn("oaf: cannot create /proc/net/oaf_http_stats\n");
+	af_classify_recent_proc = proc_create("oaf_classify_recent", 0444,
+					      init_net.proc_net,
+					      &af_classify_recent_ops);
+	if (!af_classify_recent_proc)
+		pr_warn("oaf: cannot create /proc/net/oaf_classify_recent\n");
+	af_http_match_recent_proc = proc_create("oaf_http_match_recent", 0444,
+					       init_net.proc_net,
+					       &af_http_match_recent_ops);
+	if (!af_http_match_recent_proc)
+		pr_warn("oaf: cannot create /proc/net/oaf_http_match_recent\n");
+	af_sni_recent_proc = proc_create("oaf_sni_recent", 0444,
+					init_net.proc_net, &af_sni_recent_ops);
+	if (!af_sni_recent_proc)
+		pr_warn("oaf: cannot create /proc/net/oaf_sni_recent\n");
+	af_sni_match_recent_proc = proc_create("oaf_sni_match_recent", 0444,
+					      init_net.proc_net,
+					      &af_sni_match_recent_ops);
+	if (!af_sni_match_recent_proc)
+		pr_warn("oaf: cannot create /proc/net/oaf_sni_match_recent\n");
 	init_oaf_maintenance_work();
 	printk("oaf: Driver ver. %s - Copyright(c) 2019-2026, destan19(TT), <www.openappfilter.com>\n", AF_VERSION);
 	printk("oaf: init ok\n");
@@ -3858,6 +5052,26 @@ err_conn:
 static void app_filter_fini(void)
 {
 	AF_INFO("app filter module exit\n");
+	if (af_http_stats_proc) {
+		proc_remove(af_http_stats_proc);
+		af_http_stats_proc = NULL;
+	}
+	if (af_classify_recent_proc) {
+		proc_remove(af_classify_recent_proc);
+		af_classify_recent_proc = NULL;
+	}
+	if (af_http_match_recent_proc) {
+		proc_remove(af_http_match_recent_proc);
+		af_http_match_recent_proc = NULL;
+	}
+	if (af_sni_recent_proc) {
+		proc_remove(af_sni_recent_proc);
+		af_sni_recent_proc = NULL;
+	}
+	if (af_sni_match_recent_proc) {
+		proc_remove(af_sni_match_recent_proc);
+		af_sni_match_recent_proc = NULL;
+	}
 	fini_oaf_maintenance_work();
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
 	nf_unregister_net_hooks(&init_net, app_filter_ops, ARRAY_SIZE(app_filter_ops));

@@ -2289,8 +2289,10 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 	struct ipv6hdr *ip6h;
 	struct tcpudphdr _ports;
 	const struct tcpudphdr *pptr;
+#if IS_ENABLED(CONFIG_NF_CONNTRACK_MARK)
 	struct nf_conn *ct;
 	enum ip_conntrack_info ctinfo;
+#endif
 	int whnat = IS_WHNAT(dev);
 	int gmac = NR_DISCARD;
 	int port_id = 0;
@@ -2305,6 +2307,17 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 	/*do not bind multicast if PPE mcast not enable*/
 	if (!mcast_hook_toggle && is_multicast_ether_addr(hw_path->eth_dest))
 		return -1;
+
+	/* C2000MAX per-flow admission guard.  skb->mark protects the packet that
+	 * passed the DPI hook, but it is not durable across every Wi-Fi/external
+	 * device path.  The conntrack bit remains set only while this flow is
+	 * DPI_PENDING or BLOCK, so unrelated and already-classified flows continue
+	 * to bind to PPE normally. */
+#if IS_ENABLED(CONFIG_NF_CONNTRACK_MARK)
+	ct = nf_ct_get(skb, &ctinfo);
+	if (ct && unlikely(READ_ONCE(ct->mark) & HNAT_EXCEPTION_TAG))
+		return -1;
+#endif
 
 	ret = hnat_offload_engine_done(skb, hw_path);
 	if (ret == 1) {

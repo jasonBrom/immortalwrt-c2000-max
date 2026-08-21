@@ -10,6 +10,17 @@ audit_enabled()
 	[ "$(uci -q get c2000max_traffic.audit.enabled)" = 1 ]
 }
 
+apply_lan_device_profile()
+{
+	[ -w "$OAF_SYSCTL_DIR/lan_ifname" ] || return 1
+	# Keep the legacy module on the bridge device.  Broadening this to the
+	# substring "lan" makes old kernels inspect DSA slave ingress directly and
+	# can re-enter the packet path which previously caused an OAF watchdog boot
+	# loop.  The flowctl1 kernel handles DSA slaves through their bridge master,
+	# so it also uses the exact bridge name.
+	printf '%s\n' br-lan > "$OAF_SYSCTL_DIR/lan_ifname"
+}
+
 apply_recognition_profile()
 {
 	local mode hold packets
@@ -36,6 +47,7 @@ apply_recognition_profile()
 
 	printf '%s\n' "$hold" > "$OAF_SYSCTL_DIR/hold_acceleration" || return 1
 	printf '%s\n' "$packets" > "$OAF_SYSCTL_DIR/max_dpi_packets" || return 1
+	apply_lan_device_profile || return 1
 }
 
 start_service()

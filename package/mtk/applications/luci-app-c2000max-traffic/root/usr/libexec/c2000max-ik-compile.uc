@@ -50,6 +50,8 @@ let compiled_match_kinds = {};
 let ik_constraints = {};
 let predicate_owner = {};
 let ambiguous_predicates = {};
+let domain_owner = {};
+let ambiguous_domains = {};
 
 /* These entries describe transport protocols rather than a concrete
  * application.  They remain useful as a last-resort label, but must never
@@ -267,6 +269,57 @@ function feature_as_fallback(feature) {
 		fatal('internal feature does not contain 18 fields');
 	fields[17] = '1';
 	return join(';', fields);
+}
+
+function domain_label_valid(label) {
+	return (length(label) >= 2 && length(label) <= 63 &&
+		match(label, /^[a-z0-9][a-z0-9-]*[a-z0-9]$/) != null) ||
+		(length(label) == 1 && match(label, /^[a-z0-9]$/) != null);
+}
+
+/* Extract only a literal DNS suffix from SNI or a standalone Host predicate.
+ * Regex support is deliberately narrow: anchors, an optional leading wildcard
+ * and escaped dots are accepted, while alternation/classes/groups remain OAF-
+ * only evidence. This avoids turning a multi-domain regex into an overbroad
+ * dnsmasq policy. */
+function dns_domain_suffix(raw, regex_mode) {
+	if (type(raw) != 'string' || !length(raw) || length(raw) > 253)
+		return null;
+	let value = lc(trim(raw));
+	if (regex_mode) {
+		if (substr(value, 0, 1) == '^')
+			value = substr(value, 1);
+		if (length(value) && substr(value, -1) == '$')
+			value = substr(value, 0, length(value) - 1);
+		if (substr(value, 0, 4) == '.*\\.')
+			value = substr(value, 4);
+		else if (substr(value, 0, 2) == '\\.')
+			value = substr(value, 2);
+		value = replace(value, /\\[.]/g, '.');
+		if (match(value, /[\\*+?(){}\[\]|]/) != null)
+			return null;
+	}
+	else {
+		if (substr(value, 0, 2) == '*.')
+			value = substr(value, 2);
+		else if (substr(value, 0, 1) == '.')
+			value = substr(value, 1);
+		let port = match(value, /^([^:]+):[0-9]+$/);
+		if (port)
+			value = port[1];
+	}
+	if (length(value) < 3 || length(value) > 253 ||
+	    match(value, /^[a-z0-9.-]+$/) == null ||
+	    substr(value, 0, 1) == '.' || substr(value, -1) == '.' ||
+	    index(value, '..') >= 0)
+		return null;
+	let labels = split(value, '.');
+	if (length(labels) < 2)
+		return null;
+	for (let label in labels)
+		if (!domain_label_valid(label))
+			return null;
+	return value;
 }
 
 function http_field_supported(index) {
@@ -566,7 +619,9 @@ for (let map_index = 0; map_index < length(app_list); map_index++) {
 		category,
 		fallback: fallback_source_apps[`${source_id}`] === true,
 		features: [],
-		feature_seen: {}
+		feature_seen: {},
+		domains: [],
+		domain_seen: {}
 	};
 	apps_by_source[`${source_id}`] = app;
 	apps_by_oaf[`${oaf_id}`] = app;
@@ -642,6 +697,21 @@ function add_feature(source_id, feature, priority, rule_id, source_kind,
 			ambiguous_predicates[predicate] = true;
 	}
 	candidate_rules++;
+}
+
+function add_domain_feature(source_id, raw, regex_mode, priority, rule_id,
+			    source_kind, source_context) {
+	let domain = dns_domain_suffix(raw, regex_mode);
+	let app = apps_by_source[`${source_id}`];
+	if (!domain || !app || app.domain_seen[domain])
+		return;
+	app.domain_seen[domain] = true;
+	push(app.domains, domain);
+	let owner = domain_owner[domain];
+	if (owner == null)
+		domain_owner[domain] = source_id;
+	else if (owner != source_id)
+		ambiguous_domains[domain] = true;
 }
 
 function unique_numeric(values, minimum, maximum, where) {
@@ -729,7 +799,17 @@ function compile_ikapp(rec, where) {
 		fatal(`${where} lost its payload length constraint`);
 	let sequence_values = unique_numeric(constraints.sequences, 1, 7,
 		`${where}.raw_packet_sequences`);
-	let pkt_seq_spec = length(sequence_values) ? join('|', sequence_values) : `${pkt_seq}`;
+	/* app5.decode_raw stores the accelerator table buckets used to reach an
+	 * IKAPP row.  For payload signatures those buckets also preserve useful
+	 * packet-ordinal constraints.  For reconstructed TLS ClientHello/SNI they
+	 * do not: every https_tls=1 rule in IKprotocol 2.0.476 declares pkt_seq=0,
+	 * while the parent table commonly says 1|2.  Applying that parent mask to
+	 * the packet which completes a split ClientHello made a valid SNI visible
+	 * to the parser but ineligible for matching.  Keep the source SNI semantic
+	 * here; the kernel also ignores legacy SNI masks from an already imported
+	 * R20.5 feature.cfg. */
+	let pkt_seq_spec = tls == 1 ? `${pkt_seq}` :
+		(length(sequence_values) ? join('|', sequence_values) : `${pkt_seq}`);
 	let payload_lengths = payload_length_string(constraints.lengths,
 		`${where}.raw_payload_lengths`);
 
@@ -826,6 +906,9 @@ function compile_ikapp(rec, where) {
 		add_feature(source_id, feature, priority, rule_id, 'IKAPP',
 			context.name, kind);
 	}
+	if (tls == 1 && kind != 'port')
+		add_domain_feature(source_id, raw, method == 1, priority, rule_id,
+			'IKAPP', context.name);
 }
 
 /* Compile the original HTTPINFO header list as one bounded AND expression.
@@ -950,6 +1033,9 @@ function compile_http(rec, where) {
 		apps_by_source[`${source_id}`].fallback);
 	add_feature(source_id, feature, priority, rule_id, 'HTTP', context.name,
 		'http_multi');
+	if (length(clauses) == 1 && clauses[0].field == 1)
+		add_domain_feature(source_id, clauses[0].pattern,
+			clauses[0].method == 2, priority, rule_id, 'HTTP', context.name);
 }
 
 function walk_jsonl(name, expected, callback) {
@@ -1040,6 +1126,7 @@ let ambiguous_runtime_features_removed = 0;
 for (let row in app_list) {
 	let app = apps_by_source[`${row.appid}`];
 	let retained = [];
+	let retained_domains = [];
 	for (let item in app.features) {
 		if (!app.fallback && ambiguous_predicates[item.predicate]) {
 			ambiguous_runtime_features_removed++;
@@ -1049,6 +1136,10 @@ for (let row in app_list) {
 		push(retained, item);
 	}
 	app.features = retained;
+	for (let domain in app.domains)
+		if (!ambiguous_domains[domain])
+			push(retained_domains, domain);
+	app.domains = retained_domains;
 }
 
 /* Retain at most the kernel's bounded per-application limit. Prefer original
@@ -1094,6 +1185,14 @@ for (let row in app_list) {
 let source_rules = source_ikapp_rules + source_http_rules;
 let runtime_features = compiled_rules;
 let skipped_rules = source_rules - compiled_source_rules;
+let dns_domains = 0;
+for (let row in app_list) {
+	let app = apps_by_source[`${row.appid}`];
+	if (!length(app.features))
+		continue;
+	sort(app.domains, (a, b) => a < b ? -1 : (a > b ? 1 : 0));
+	dns_domains += length(app.domains);
+}
 if (runtime_features < 1 || compiled_apps < 1 || skipped_rules < 0)
 	fatal('no safe native rules could be compiled');
 
@@ -1115,6 +1214,20 @@ for (let class_id in class_ids) {
 	}
 }
 feature_fp.close();
+
+/* A separate, immutable domain index lets dnsmasq populate policy-specific
+ * IPv4 and IPv6 nft sets from real DNS answers. It is intentionally limited
+ * to unique literal suffixes derived from safe SNI or standalone Host rules. */
+let domains_fp = open_write(path_join(output_dir, 'domains.tsv'));
+domains_fp.write('oaf_appid\tdomain\tsource_appid\n');
+for (let row in app_list) {
+	let app = apps_by_source[`${row.appid}`];
+	if (!length(app.features))
+		continue;
+	for (let domain in app.domains)
+		domains_fp.write(`${app.oaf_id}\t${domain}\t${app.source_id}\n`);
+}
+domains_fp.close();
 
 /* The first four columns are the user-facing semantic catalog. Runtime OAF
  * class shards are retained in later columns solely for diagnostics. */
@@ -1141,6 +1254,7 @@ let report = {
 	candidate_rules,
 	compiled_rules: compiled_source_rules,
 	runtime_features,
+	dns_domains,
 	skipped_rules,
 	flattened_context_unavailable: false,
 	flattened_context_missing_in_jsonl: true,
@@ -1171,6 +1285,7 @@ meta_fp.write(`skipped_apps=${length(app_list) - compiled_apps}\n`);
 meta_fp.write(`source_rules=${source_rules}\n`);
 meta_fp.write(`compiled_rules=${compiled_source_rules}\n`);
 meta_fp.write(`runtime_features=${runtime_features}\n`);
+meta_fp.write(`dns_domains=${dns_domains}\n`);
 meta_fp.write(`skipped_rules=${skipped_rules}\n`);
 meta_fp.write('flattened_context_unavailable=0\n');
 meta_fp.write('flattened_context_missing_in_jsonl=1\n');
@@ -1187,5 +1302,6 @@ print(sprintf('%J\n', {
 	source_rules,
 	compiled_rules: compiled_source_rules,
 	runtime_features,
+	dns_domains,
 	skipped_rules
 }));

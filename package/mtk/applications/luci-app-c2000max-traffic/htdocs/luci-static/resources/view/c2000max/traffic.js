@@ -73,6 +73,13 @@ var callFeatureInstallStatus = rpc.declare({
 	expect: { '': {} }
 });
 
+var callFeatureInstallAck = rpc.declare({
+	object: 'c2000max.traffic',
+	method: 'feature_install_ack',
+	params: [ 'job_id' ],
+	expect: { '': {} }
+});
+
 var callFeatureList = rpc.declare({
 	object: 'c2000max.traffic',
 	method: 'feature_list',
@@ -202,7 +209,10 @@ function auditModeName(mode) {
 }
 
 function controlModeName(mode) {
-	return mode === 'force' ? '强力管控（现有连接立即重检）' : '无感管控（新连接生效）';
+	if (mode === 'force') return '强力管控（定向重检）';
+	if (mode === 'strict') return '选择性严格（仅待识别/封禁流暂缓 HNAT）';
+	if (mode === 'deep') return '全局深度实验（全部 LAN 绕过加速）';
+	return '无感管控（新连接生效）';
 }
 
 function trafficPair(upload, download) {
@@ -328,6 +338,14 @@ function updateFeatureJobBanner(status) {
 	renderFeatureJobBanner();
 }
 
+function acknowledgeFeatureJob(jobId) {
+	if (!jobId)
+		return Promise.resolve();
+	return resolveWithin(callFeatureInstallAck(jobId), {}, 5000).then(function() {
+		updateFeatureJobBanner({ state: 'idle' });
+	});
+}
+
 function waitFeatureInstall(jobId, progress, failures) {
 	/* Each status call is independently bounded.  A wedged rpcd request must
 	 * not recreate the original endless XHR wait in the polling path. */
@@ -347,11 +365,12 @@ function waitFeatureInstall(jobId, progress, failures) {
 			var result = status.result || status;
 			var error = resultError(result, '特征库操作失败');
 			if (error) throw error;
-			return result;
+			return acknowledgeFeatureJob(jobId).then(function() { return result; });
 		}
 		if (state === 'failed' || state === 'missing' || state === 'idle') {
 			featureInstallInProgress = false;
-			throw new Error((status && (status.message || status.error)) || '特征库后台操作失败');
+			var failure = new Error((status && (status.message || status.error)) || '特征库后台操作失败');
+			return acknowledgeFeatureJob(jobId).then(function() { throw failure; });
 		}
 		if (state !== 'queued' && state !== 'running')
 			throw new Error('特征库后台任务返回了未知状态');
@@ -603,7 +622,7 @@ var LazyAppSelector = form.MultiValue.extend({
 		}
 		widgetNode.addEventListener('cbi-dropdown-change', updateCount);
 		updateCount();
-		return E('div', {}, [
+		return E('div', { 'class': 'c2000max-app-selector' }, [
 			widgetNode,
 			E('div', { 'style': 'display:flex;align-items:center;gap:.6em;margin-top:.5em;flex-wrap:wrap' }, [
 				E('button', {
@@ -1020,10 +1039,20 @@ function renderOverview(status) {
 						('未知连接最多检查 %d 个有效载荷包'.format(Number(status.audit_packets || 0))) : '不暂缓')
 				]),
 				E('div', { 'class': 'tr' }, [
-					E('div', { 'class': 'td left' }, '生效阻断规则'),
-					E('div', { 'class': 'td left' }, String(Number(status.policy_rules || 0))),
+					E('div', { 'class': 'td left' }, '生效 APPID / DNS 域名'),
+					E('div', { 'class': 'td left' }, '%d / %d'.format(
+						Number(status.policy_rules || 0), Number(status.policy_dns_domains || 0))),
 					E('div', { 'class': 'td left' }, '管控方式'),
 					E('div', { 'class': 'td left' }, controlModeName(status.control_mode))
+				]),
+				E('div', { 'class': 'tr' }, [
+					E('div', { 'class': 'td left' }, 'HNAT 绕过范围'),
+					E('div', { 'class': 'td left' }, status.policy_hnat_scope === 'global' ? '全部 LAN（实验）' :
+						(status.policy_hnat_scope === 'selected' ? '%d 个受控终端'.format(
+							Math.max(0, Number(status.policy_bypass_clients || 0))) : '无')),
+					E('div', { 'class': 'td left' }, 'DNS 协同'),
+					E('div', { 'class': 'td left' }, Number(status.policy_dns_domains || 0) > 0 ?
+						'已启用 IPv4 / IPv6 动态集合' : '当前规则没有可安全提取的域名')
 				]),
 				E('div', { 'class': 'tr' }, [
 					E('div', { 'class': 'td left' }, '趋势样本'),
@@ -1466,17 +1495,18 @@ return view.extend({
 		o.default = 'balanced'; o.rmempty = false;
 		o.description = '均衡模式只暂缓尚未识别的新连接，最多检查 8 个有效载荷包后即恢复 HNAT/PPE；不会全局关闭硬件加速。无感模式可能在首个应用载荷到达前就被硬件接管，从而漏识别。';
 		o = s.option(form.ListValue, 'control_mode', '管控生效方式');
-		o.value('seamless', '无感管控（推荐）');
-		o.value('force', '强力管控（立即中断现有连接）');
+		o.value('seamless', '无感管控（最少影响加速）');
+		o.value('force', '强力管控（定向重检现有连接）');
+		o.value('strict', '选择性严格（推荐用于实际拦截）');
+		o.value('deep', '全局深度实验（排障；全部 LAN 走 CPU）');
 		o.default = 'seamless'; o.rmempty = false;
-		o.description = '无感管控只让新连接立即受规则约束，已有 HNAT/Flowtable 连接自然结束后生效；强力管控会清空加速连接使规则立即生效，保存时可能出现短暂卡顿。';
+		o.description = '所有模式都会使用 DNS A/AAAA 动态集合辅助 APPID。选择性严格只在受控终端的新连接尚未识别时暂缓加速，并让 UDP/443 回退到可识别的 TCP/TLS：允许流分类后立即恢复 HNAT/PPE，只有命中封禁的流保持 NO_OFFLOAD 并被拒绝；全局深度实验才会让全部 LAN 流量走 CPU。';
 		o = s.option(form.Value, 'retention_days', '明细保留天数'); o.datatype = 'and(uinteger,min(1),max(90))'; o.default = '30'; o.rmempty = false;
 		o = s.option(form.DummyValue, '_feature_profiles', '已上传的规则库',
 			'同一时刻只激活一个经过校验的 OAF v3/v4 Profile；不同库的 APPID、历史和管控规则互相隔离。');
 		o.rawhtml = true;
 		o.cfgvalue = function() { return renderFeatureManager(featureData, catalog); };
-		o = s.option(form.Button, '_upload_feature', '上传新规则库',
-			'支持 OpenAppFilter 官方 ZIP/.bin、IKprotocol-*-oaf.bin，以及 IKprotocol extracted.tar.gz 原始规则包。原始 .lib 需先解包为 extracted 版；爱快规则不会被打包到固件或自动下载。');
+		o = s.option(form.Button, '_upload_feature', '上传新规则库');
 		o.inputstyle = 'action'; o.inputtitle = '选择文件并更新';
 		o.onclick = function(ev) {
 			var progress = null;
@@ -1559,6 +1589,10 @@ return view.extend({
 			'.modal.c2000max-app-picker-modal{width:calc(100vw - 3rem);max-width:1050px!important;}',
 			'.c2000max-audit-pies{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1.25em;align-items:start;}',
 			'.c2000max-tabs-wrap>.cbi-tabmenu{overflow-x:auto;white-space:nowrap;flex-wrap:nowrap;}',
+			'.c2000max-app-selector{width:100%;max-width:100%;min-width:0;overflow:hidden;}',
+			'.c2000max-app-selector>.cbi-dropdown{display:block;width:100%!important;max-width:100%!important;min-width:0;box-sizing:border-box;}',
+			'.c2000max-app-selector>.cbi-dropdown>ul{max-width:100%;overflow:hidden;}',
+			'.c2000max-app-selector>.cbi-dropdown>ul>li{max-width:min(24rem,75vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
 			'@media(max-width:760px){.modal.c2000max-audit-modal,.modal.c2000max-app-picker-modal{width:calc(100vw - 1rem);margin:1em auto;}.c2000max-audit-pies{grid-template-columns:1fr;}}'
 		].join(''));
 		var latestStatus = status;
@@ -1669,7 +1703,6 @@ return view.extend({
 		var page = E('div', { 'class': 'c2000max-tabs-wrap' }, [
 			modalStyle,
 			E('h2', {}, 'C2000MAX 流量统计'),
-			E('p', {}, 'HNAT 使用硬件 MIB 同步，Flow Offloading 和普通转发使用 Conntrack。规则库切换只重建应用识别连接，不清空总流量和趋势。'),
 			jobBanner,
 			tabGroup
 		]);
@@ -1678,6 +1711,11 @@ return view.extend({
 		function recoverFeatureJob(status) {
 			var state = String((status || {}).state || 'idle');
 			updateFeatureJobBanner(status);
+			if ((state === 'done' || state === 'failed' || state === 'missing') &&
+			    (status || {}).job_id) {
+				acknowledgeFeatureJob(status.job_id);
+				return;
+			}
 			if ((state !== 'queued' && state !== 'running') ||
 			    featureJobRecoveryStarted || !(status || {}).job_id)
 				return;

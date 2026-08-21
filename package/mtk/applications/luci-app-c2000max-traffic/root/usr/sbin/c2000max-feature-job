@@ -409,6 +409,66 @@ show_status()
 	cat "$file"
 }
 
+acknowledge_job()
+{
+	local job="${1:-}" file state current acknowledged=false tries=0
+
+	ensure_state_dir || {
+		printf '%s\n' '{"success":false,"acknowledged":false,"message":"无法读取特征库任务目录"}'
+		return 1
+	}
+	if ! valid_job_id "$job"; then
+		printf '%s\n' '{"success":false,"acknowledged":false,"message":"特征库任务编号无效"}'
+		return 1
+	fi
+	file="$(status_file "$job")"
+	state="$(status_state "$file")"
+	case "$state" in
+		done|failed) ;;
+		*)
+			printf '{"success":false,"acknowledged":false,"job_id":"%s","state":"%s","message":"特征库任务尚未结束"}\n' \
+				"$job" "${state:-missing}"
+			return 1
+			;;
+	esac
+
+	current="$(read_current)"
+	if [ "$current" != "$job" ]; then
+		printf '{"success":true,"acknowledged":false,"job_id":"%s","state":"%s"}\n' \
+			"$job" "$state"
+		return 0
+	fi
+	# A terminal status is published immediately before the detached worker
+	# releases this lease. Poll briefly rather than blocking an rpcd worker if a
+	# different browser already started the next long-running job. The final
+	# compare-and-remove stays serialized with start_job(). Keep the per-job JSON
+	# so explicit job-id polling remains valid.
+	exec 8> "$ACTIVE_LOCK" || return 1
+	while ! flock -n 8 2>/dev/null; do
+		current="$(read_current)"
+		if [ "$current" != "$job" ]; then
+			printf '{"success":true,"acknowledged":false,"job_id":"%s","state":"%s"}\n' \
+				"$job" "$state"
+			return 0
+		fi
+		tries=$((tries + 1))
+		[ "$tries" -lt 30 ] || {
+			printf '{"success":false,"acknowledged":false,"job_id":"%s","state":"%s","message":"特征库任务确认超时"}\n' \
+				"$job" "$state"
+			return 1
+		}
+		sleep 0.1
+	done
+	current="$(read_current)"
+	if [ "$current" = "$job" ]; then
+		rm -f "$CURRENT_FILE"
+		acknowledged=true
+	fi
+	flock -u 8 2>/dev/null || true
+	printf '{"success":true,"acknowledged":%s,"job_id":"%s","state":"%s"}\n' \
+		"$acknowledged" "$job" "$state"
+}
+
 safe_path "$STATE_DIR" && safe_path "$ACTIVE_LOCK" && safe_path "$CURRENT_FILE" &&
 	safe_path "$DEFAULT_UPLOAD" && safe_path "$INSTALLER" && safe_path "$MANAGER" &&
 	safe_path "$TRAFFIC_BIN" || {
@@ -441,6 +501,11 @@ status)
 	[ "$#" -le 1 ] || exit 2
 	show_status "${1:-}"
 	;;
+acknowledge)
+	shift
+	[ "$#" -eq 1 ] || exit 2
+	acknowledge_job "$1"
+	;;
 _run)
 	shift
 	[ "$#" -eq 4 ] && valid_job_id "$1" && is_uint "$2" || exit 2
@@ -452,7 +517,7 @@ _run)
 	run_worker "$1" "$2" "$3" "$4"
 	;;
 *)
-	echo "Usage: $0 start [upload] | activate <profile-sha256> | rollback | status [job-id]" >&2
+	echo "Usage: $0 start [upload] | activate <profile-sha256> | rollback | status [job-id] | acknowledge <job-id>" >&2
 	exit 2
 	;;
 esac

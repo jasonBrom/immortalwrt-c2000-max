@@ -7,6 +7,7 @@ export LC_ALL
 HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PACKAGE_DIR="$(CDPATH= cd -- "$HERE/.." && pwd)"
 COMPILER="$PACKAGE_DIR/root/usr/libexec/c2000max-ik-compile.uc"
+DOMAIN_HELPER="$PACKAGE_DIR/root/usr/libexec/c2000max-feature-domains.uc"
 MANAGER="$PACKAGE_DIR/root/usr/sbin/c2000max-feature-manager"
 UCODE_BIN="${UCODE_BIN:-$(command -v ucode 2>/dev/null || true)}"
 UCODE_MODULE_PATH="${UCODE_MODULE_PATH:-}"
@@ -17,7 +18,12 @@ if [ -z "$UCODE_BIN" ]; then
 fi
 
 TMP="$(mktemp -d /tmp/c2000max-ik-test.XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+cleanup_tmp()
+{
+	chmod -R u+w "$TMP" 2>/dev/null || true
+	rm -rf "$TMP" 2>/dev/null || true
+}
+trap cleanup_tmp EXIT HUP INT TERM
 FIXTURE="$TMP/fixture"
 OUTPUT="$TMP/output"
 mkdir -p "$FIXTURE" "$OUTPUT"
@@ -27,6 +33,17 @@ fail()
 	echo "FAIL: $*" >&2
 	exit 1
 }
+
+# BusyBox awk terminates a /.../ literal at an unescaped slash even when it
+# appears inside a bracket expression.  Keep archive path normalization on
+# substr(), otherwise /^\.[/]/ is parsed as the invalid expression /^\.[/.
+if grep -Fq 'sub(/^\.[/]/' "$MANAGER"; then
+	fail "manager contains the BusyBox awk-incompatible ./ regex"
+fi
+[ "$(grep -Fc 'substr(path, 1, 2) == "./"' "$MANAGER")" -ge 1 ] ||
+	fail "tar member path normalization does not use substr"
+[ "$(grep -Fc 'substr(p, 1, 2) == "./"' "$MANAGER")" -ge 1 ] ||
+	fail "archive path normalization does not use substr"
 
 run_ucode()
 {
@@ -140,6 +157,7 @@ run_ucode "$COMPILER" "$FIXTURE" "$OUTPUT" > "$TMP/compiler.json"
 grep -q '"compiled_apps": 2' "$TMP/compiler.json" || fail "compiled app count"
 grep -q '"compiled_rules": 8' "$TMP/compiler.json" || fail "compiled rule count"
 grep -q '"skipped_rules": 3' "$TMP/compiler.json" || fail "skipped rule count"
+grep -q '"dns_domains": 2' "$TMP/compiler.json" || fail "safe DNS domain count"
 grep -q '^#format v4.2$' "$OUTPUT/feature.cfg" || fail "v4.2 header"
 grep -q 'any;;;;;;;0;1;2;bm;;616263;42' "$OUTPUT/feature.cfg" || fail "native any/BM rule"
 grep -q 'udp;;80|443;;;;;0;1;0;port;;;70;;;;1' "$OUTPUT/feature.cfg" ||
@@ -156,6 +174,16 @@ grep -q '"deferred_weak_features": 1' "$OUTPUT/conversion-report.json" ||
 [ "$(wc -l < "$OUTPUT/catalog.tsv")" -eq 4 ] || fail "full source catalog"
 awk -F '\t' '$1 == 1001 && $2 == "Alpha_App" && $4 == "系统工具" { found = 1 } END { exit !found }' \
 	"$OUTPUT/catalog.tsv" || fail "semantic application category"
+awk -F '\t' '$1==1001 && $2=="example.com" && $3==100 {found=1} END {exit !found}' \
+	"$OUTPUT/domains.tsv" || fail "SNI domain index"
+awk -F '\t' '$1==2001 && $2=="api.example" && $3==200 {found=1} END {exit !found}' \
+	"$OUTPUT/domains.tsv" || fail "standalone Host domain index"
+! grep -q 'x.example' "$OUTPUT/domains.tsv" || fail "multi-clause Host was unsafely flattened"
+run_ucode "$DOMAIN_HELPER" "$OUTPUT/feature.cfg" "$OUTPUT/domains.tsv" |
+	sort -t "$(printf '\t')" -k1,1n -k2,2 > "$TMP/domain-helper.tsv"
+awk -F '\t' '$1==1001 && $2=="example.com" {a=1} $1==2001 && $2=="api.example" {b=1} END {exit !(a&&b)}' \
+	"$TMP/domain-helper.tsv" ||
+	fail "runtime DNS domain helper"
 
 ( cd "$FIXTURE" && tar -czf "$TMP/native.tar.gz" . )
 cat > "$TMP/compiler-wrapper" <<'EOF'
@@ -198,7 +226,9 @@ ACTIVE="$(cat "$TMP/router/state/active")"
 [ -f "$TMP/router/state/libraries/$ACTIVE/app5.dat" ] || fail "raw app5 preservation"
 [ -f "$TMP/router/state/libraries/$ACTIVE/app5.decode_raw.txt" ] || fail "raw context preservation"
 [ -f "$TMP/router/state/libraries/$ACTIVE/ikapp-rules.jsonl" ] || fail "IK JSONL preservation"
+[ -f "$TMP/router/state/libraries/$ACTIVE/domains.tsv" ] || fail "DNS domain index preservation"
 grep -q '^raw_context_recovered=1$' "$TMP/router/state/libraries/$ACTIVE/native.meta" || fail "native metadata"
+grep -q '^dns_domains=2$' "$TMP/router/state/libraries/$ACTIVE/native.meta" || fail "DNS metadata"
 
 mkdir "$TMP/incomplete"
 cp "$FIXTURE/README.txt" "$FIXTURE/appid-map.json" "$FIXTURE/ikapp-rules.jsonl" \

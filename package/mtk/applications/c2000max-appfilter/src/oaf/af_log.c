@@ -20,6 +20,9 @@ char g_lan_ifname[64] = "br-lan";
 int g_tcp_rst = 1;
 int g_feature_init = 0;
 unsigned int g_feature_generation;
+unsigned int g_feature_reload_attempt;
+unsigned int g_feature_reload_loaded;
+int g_feature_reload_errno;
 char g_oaf_version[64] = AF_VERSION;
 int g_disable_quic = 0;
 int g_app_filter_mode = 0; // 0 = specified apps, 1 = all apps
@@ -58,6 +61,27 @@ static struct ctl_table oaf_table[] = {
 		.maxlen		= sizeof(g_feature_generation),
 		.mode		= 0444,
 		.proc_handler	= proc_douintvec,
+	},
+	{
+		.procname	= "feature_reload_attempt",
+		.data		= &g_feature_reload_attempt,
+		.maxlen		= sizeof(g_feature_reload_attempt),
+		.mode		= 0444,
+		.proc_handler	= proc_douintvec,
+	},
+	{
+		.procname	= "feature_reload_loaded",
+		.data		= &g_feature_reload_loaded,
+		.maxlen		= sizeof(g_feature_reload_loaded),
+		.mode		= 0444,
+		.proc_handler	= proc_douintvec,
+	},
+	{
+		.procname	= "feature_reload_errno",
+		.data		= &g_feature_reload_errno,
+		.maxlen		= sizeof(g_feature_reload_errno),
+		.mode		= 0444,
+		.proc_handler	= proc_dointvec,
 	},
 	{
 		.procname	= "version",

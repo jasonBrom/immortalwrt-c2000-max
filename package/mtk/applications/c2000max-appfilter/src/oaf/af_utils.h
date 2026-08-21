@@ -1,6 +1,11 @@
 #ifndef AF_UTILS_H
 #define AF_UTILS_H
+
+struct net_device;
+
 u_int32_t af_get_timestamp_sec(void);
+
+bool af_netdev_is_lan(const struct net_device *dev, const char *lan_ifname);
 
 char *k_trim(char *s);
 

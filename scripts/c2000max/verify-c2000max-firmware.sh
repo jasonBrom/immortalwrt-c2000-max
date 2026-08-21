@@ -13,6 +13,7 @@ OAF_SRC="$APPFILTER/src/oaf"
 OAFD_SRC="$APPFILTER/src/oafd"
 MANIFEST="${1:-}"
 ROOTFS="${2:-}"
+SYSUPGRADE="${3:-}"
 
 fail() {
 	echo "C2000MAX firmware verification failed: $*" >&2
@@ -269,6 +270,12 @@ if [ -n "$ROOTFS" ]; then
 		grep -q .; then
 		fail "rootfs bundles an uploaded feature profile"
 	fi
+fi
+
+if [ -n "$SYSUPGRADE" ]; then
+	[ -f "$SYSUPGRADE" ] || fail "sysupgrade image not found: $SYSUPGRADE"
+	python3 "$ROOT/scripts/c2000max/verify-fwtool-metadata.py" "$SYSUPGRADE" ||
+		fail "sysupgrade fwtool metadata CRC is invalid"
 fi
 
 echo "C2000MAX firmware verification passed"

@@ -329,9 +329,9 @@ static int __af_visit_info_report(af_client_info_t *node)
 	return 0;
 }
 
-static inline int get_packet_dir(struct net_device *in)
+static inline int get_packet_dir(const struct net_device *in)
 {
-	if (strstr(in->name, g_lan_ifname))
+	if (af_netdev_is_lan(in, g_lan_ifname))
 	{
 		return PKT_DIR_UP;
 	}
@@ -408,10 +408,10 @@ static u_int32_t af_client_hook(unsigned int hook,
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0)
-	if (!skb->dev)
+	if (!state->in && !skb->dev)
 		return NF_ACCEPT;
 
-	pkt_dir = get_packet_dir(skb->dev);
+	pkt_dir = get_packet_dir(state->in ? state->in : skb->dev);
 #else
 	if (!in)
 	{
@@ -496,10 +496,10 @@ static u_int32_t af_client_hook2(unsigned int hook,
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0)
-	if (!skb->dev)
+	if (!state->in && !skb->dev)
 		return NF_ACCEPT;
 
-	pkt_dir = get_packet_dir(skb->dev);
+	pkt_dir = get_packet_dir(state->in ? state->in : skb->dev);
 #else
 	if (!in)
 	{

@@ -6,7 +6,12 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 TRAFFIC="$ROOT/root/usr/sbin/c2000max-traffic"
 EQOS_ROOT="$ROOT/../luci-app-eqos-mtk"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+cleanup_tmp()
+{
+	chmod -R u+w "$TMP" 2>/dev/null || true
+	rm -rf "$TMP" 2>/dev/null || true
+}
+trap cleanup_tmp EXIT HUP INT TERM
 
 fail()
 {
@@ -543,6 +548,136 @@ compile_schedule regression
 	grep -Fq '[ "$POLICY_ACTIVE_PROFILE" = "$current_profile_sha" ]' "$TRAFFIC" &&
 	grep -Fq '[ "$ruleset" = "$POLICY_ACTIVE_PROFILE" ]' "$TRAFFIC" ||
 	fail "application policy is not one set bound to active profile and feature SHA"
+
+# DNS-assisted control complements DPI without globally disabling HNAT.  Each
+# active schedule owns bounded IPv4/IPv6 timeout sets, directs client DNS to the
+# router, and asks dnsmasq to populate both address families.
+(
+	POLICY_DOMAIN_INDEX="$TMP/policy-domains.tsv"
+	POLICY_SET_FILE="$TMP/policy-domain-sets.nft"
+	POLICY_RULE_FILE="$TMP/policy-domain-block.nft"
+	POLICY_DNS_REDIRECT_RULE_FILE="$TMP/policy-domain-redirect.nft"
+	POLICY_DNSMASQ_RULE_FILE="$TMP/policy-domain-dnsmasq.conf"
+	POLICY_ACTIVE_PROFILE="$PROFILE_B"
+	POLICY_TABLE=c2000_appaudit
+	POLICY_VERDICT=reject
+	POLICY_DNS_DOMAIN_COUNT=0
+	POLICY_DNS_SCHEDULE_COUNT=0
+	POLICY_DNS_TRUNCATED=0
+	cat > "$POLICY_DOMAIN_INDEX" <<'EOF'
+1001	baidu.com
+1001	www.baidu.com
+1002	douyin.com
+1003	unselected.example
+EOF
+	: > "$POLICY_SET_FILE"
+	: > "$POLICY_RULE_FILE"
+	: > "$POLICY_DNS_REDIRECT_RULE_FILE"
+	: > "$POLICY_DNSMASQ_RULE_FILE"
+	compile_schedule_domains dns-regression \
+		'iifname "br-lan" ether saddr { aa:bb:cc:dd:ee:01 }' '1001, 1002'
+	[ "$POLICY_DNS_DOMAIN_COUNT" -eq 3 ] &&
+		[ "$POLICY_DNS_SCHEDULE_COUNT" -eq 1 ] &&
+		grep -Fq 'type ipv4_addr;' "$POLICY_SET_FILE" &&
+		grep -Fq 'type ipv6_addr;' "$POLICY_SET_FILE" &&
+		grep -Fq 'flags timeout;' "$POLICY_SET_FILE" &&
+		grep -Fq 'ip daddr @dns4_' "$POLICY_RULE_FILE" &&
+		grep -Fq 'ip6 daddr @dns6_' "$POLICY_RULE_FILE" &&
+		grep -Fq 'udp dport 53 counter redirect to :53' "$POLICY_DNS_REDIRECT_RULE_FILE" &&
+		grep -Fq 'tcp dport 53 counter redirect to :53' "$POLICY_DNS_REDIRECT_RULE_FILE" &&
+		[ "$(grep -c '^nftset=/' "$POLICY_DNSMASQ_RULE_FILE")" -eq 3 ] &&
+		grep -Fq 'nftset=/baidu.com/4#inet#c2000_appaudit#dns4_' \
+			"$POLICY_DNSMASQ_RULE_FILE" &&
+		! grep -Fq 'unselected.example' "$POLICY_DNSMASQ_RULE_FILE" ||
+		fail "DNS A/AAAA policy-set compilation regressed"
+
+	C2000_TRAFFIC_DNSMASQ_CONFDIRS="$TMP/dnsmasq-policy.d"
+	C2000_TRAFFIC_NO_DNSMASQ_RELOAD=1
+	sync_dnsmasq_policy "$POLICY_DNSMASQ_RULE_FILE"
+	cmp -s "$POLICY_DNSMASQ_RULE_FILE" \
+		"$TMP/dnsmasq-policy.d/$DNSMASQ_POLICY_FILE" ||
+		fail "dnsmasq did not receive the generated nftset policy"
+	: > "$POLICY_DNSMASQ_RULE_FILE"
+	sync_dnsmasq_policy "$POLICY_DNSMASQ_RULE_FILE"
+	[ ! -e "$TMP/dnsmasq-policy.d/$DNSMASQ_POLICY_FILE" ] ||
+		fail "stale dnsmasq nftset policy was not removed"
+)
+
+# Strict mode keeps only covered clients on the CPU path.  Downlink matching
+# must include both IPv4 and IPv6 client addresses; deep mode is the explicit
+# global fallback and is reported with a distinct sentinel count.
+(
+	POLICY_SET_FILE="$TMP/policy-bypass-sets.nft"
+	POLICY_MARK_RULE_FILE="$TMP/policy-bypass-mark.nft"
+	POLICY_LAN_DEVICE=br-lan
+	: > "$POLICY_SET_FILE"
+	: > "$POLICY_MARK_RULE_FILE"
+	build_policy_targets()
+	{
+		: > "$2"
+		cat > "$3" <<'EOF'
+192.0.2.10	aa:bb:cc:dd:ee:01
+2001:db8::10	aa:bb:cc:dd:ee:01
+192.0.2.11	aa:bb:cc:dd:ee:02
+EOF
+		printf '%s\n' aa:bb:cc:dd:ee:01 aa:bb:cc:dd:ee:02 > "$4"
+	}
+	compile_policy_bypass strict "$TMP/unused-scopes"
+	[ "$POLICY_BYPASS_COUNT" -eq 2 ] &&
+		grep -Fq 'set strict_clients4 {' "$POLICY_SET_FILE" &&
+		grep -Fq 'elements = { 192.0.2.10, 192.0.2.11 };' "$POLICY_SET_FILE" &&
+		grep -Fq 'set strict_clients6 {' "$POLICY_SET_FILE" &&
+		grep -Fq 'elements = { 2001:db8::10 };' "$POLICY_SET_FILE" &&
+		grep -Fq 'ip daddr @strict_clients4 ct mark set ct mark | 0x00800000 meta mark set meta mark | 0x00800000' \
+			"$POLICY_MARK_RULE_FILE" &&
+		grep -Fq 'ip saddr @strict_clients4 ct mark set ct mark | 0x00800000 meta mark set meta mark | 0x00800000' \
+			"$POLICY_MARK_RULE_FILE" &&
+		grep -Fq 'ip6 daddr @strict_clients6 ct mark set ct mark | 0x00800000 meta mark set meta mark | 0x00800000' \
+			"$POLICY_MARK_RULE_FILE" &&
+		grep -Fq 'ip6 saddr @strict_clients6 ct mark set ct mark | 0x00800000 meta mark set meta mark | 0x00800000' \
+			"$POLICY_MARK_RULE_FILE" &&
+		! grep -Eq 'iifname "br-lan" meta mark set' "$POLICY_MARK_RULE_FILE" ||
+		fail "strict mode does not selectively bypass IPv4/IPv6 client acceleration"
+
+	: > "$POLICY_MARK_RULE_FILE"
+	compile_policy_bypass deep "$TMP/unused-scopes"
+	[ "$POLICY_BYPASS_COUNT" -eq -1 ] &&
+		grep -Fq 'iifname "br-lan" ct mark set ct mark | 0x00800000 meta mark set meta mark | 0x00800000' \
+			"$POLICY_MARK_RULE_FILE" &&
+		grep -Fq 'oifname "br-lan" ct mark set ct mark | 0x00800000 meta mark set meta mark | 0x00800000' \
+			"$POLICY_MARK_RULE_FILE" ||
+		fail "deep diagnostic mode does not bypass both LAN directions"
+)
+
+# The immutable profile domain index must not launch the ucode parser at the
+# collector's ten-second cadence.  One parse per content-addressed profile is
+# sufficient; changing the profile invalidates the cache.
+(
+	mkdir -p "$TMP/domain-cache-bin"
+	cat > "$TMP/domain-cache-bin/ucode" <<'EOF'
+#!/bin/sh
+printf 'run\n' >> "$DOMAIN_CACHE_CALLS"
+printf '5110\thdslb.com\n'
+EOF
+	chmod +x "$TMP/domain-cache-bin/ucode"
+	export PATH="$TMP/domain-cache-bin:$PATH"
+	export DOMAIN_CACHE_CALLS="$TMP/domain-cache.calls"
+	POLICY_FEATURE_FILE="$TMP/domain-cache-feature.cfg"
+	DOMAIN_HELPER="$TMP/domain-cache-helper.uc"
+	POLICY_ACTIVE_PROFILE="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	printf 'fixture\n' > "$POLICY_FEATURE_FILE"
+	printf 'fixture\n' > "$DOMAIN_HELPER"
+	build_policy_domain_index "$TMP/domain-cache.tsv"
+	build_policy_domain_index "$TMP/domain-cache.tsv"
+	[ "$(wc -l < "$DOMAIN_CACHE_CALLS")" -eq 1 ] &&
+		awk -F '\t' '$1==5110 && $2=="hdslb.com" {found=1} END {exit !found}' \
+			"$TMP/domain-cache.tsv" ||
+		fail "immutable policy domain index was reparsed despite a valid cache"
+	POLICY_ACTIVE_PROFILE="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	build_policy_domain_index "$TMP/domain-cache.tsv"
+	[ "$(wc -l < "$DOMAIN_CACHE_CALLS")" -eq 2 ] ||
+		fail "profile switch did not invalidate the policy domain cache"
+)
 
 # Deterministic switch concurrency: an old-profile sample holds a shared
 # profile lock through merge/snapshot.  The manager's exclusive transaction
@@ -1224,10 +1359,15 @@ grep -Fq '最多检查 8 个有效载荷包' "$TRAFFIC_VIEW" &&
 	! grep -Fq '未知连接最多 %d 包' "$TRAFFIC_VIEW" ||
 	fail "recognition window UI does not describe payload-packet accounting"
 grep -Fq 'callFeatureActivate(id)' "$TRAFFIC_VIEW" &&
-	grep -Fq 'callFeatureRollback()' "$TRAFFIC_VIEW" &&
-	grep -Fq '爱快规则不会被打包到固件或自动下载' "$TRAFFIC_VIEW" ||
+	grep -Fq 'callFeatureRollback()' "$TRAFFIC_VIEW" ||
 	fail "LuCI does not expose safe user-controlled profile switching"
+if grep -Fq '支持 OpenAppFilter 官方 ZIP/.bin' "$TRAFFIC_VIEW" ||
+	grep -Fq '爱快规则不会被打包到固件或自动下载' "$TRAFFIC_VIEW" ||
+	grep -Fq 'HNAT 使用硬件 MIB 同步' "$TRAFFIC_VIEW"; then
+	fail "the removed feature-package/HNAT implementation notes are still visible"
+fi
 grep -Fq "method: 'feature_install_status'" "$TRAFFIC_VIEW" &&
+	grep -Fq "method: 'feature_install_ack'" "$TRAFFIC_VIEW" &&
 	grep -Fq "'id': 'c2000max-feature-job-banner'" "$TRAFFIC_VIEW" &&
 	grep -Fq '任务正在路由器后台执行，请勿断电' "$TRAFFIC_VIEW" &&
 	grep -Fq '重新进入本页仍会显示任务进度' "$TRAFFIC_VIEW" &&
@@ -1237,7 +1377,9 @@ grep -Fq "method: 'feature_install_status'" "$TRAFFIC_VIEW" &&
 	grep -Fq 'result.busy === true || result.accepted === false' "$TRAFFIC_VIEW" &&
 	grep -Fq "resolveFeatureJobStart(result, progress, '特征库切换失败')" "$TRAFFIC_VIEW" &&
 	grep -Fq "resolveFeatureJobStart(result, progress, '特征库回退失败')" "$TRAFFIC_VIEW" &&
-	grep -Fq 'return waitFeatureInstall(result.job_id, progress, 0)' "$TRAFFIC_VIEW" ||
+	grep -Fq 'return waitFeatureInstall(result.job_id, progress, 0)' "$TRAFFIC_VIEW" &&
+	grep -Fq 'function acknowledgeFeatureJob(jobId)' "$TRAFFIC_VIEW" &&
+	grep -Fq 'return acknowledgeFeatureJob(jobId).then(function() { return result; })' "$TRAFFIC_VIEW" ||
 	fail "LuCI feature operations do not expose persistent bounded background progress"
 if ! awk '
 	/o = s\.option\(form\.Button, ._upload_feature./ { upload_block = 1 }
@@ -1256,6 +1398,11 @@ fi
 grep -Fq '特征库操作任务被中断，请重试。' "$ROOT/root/usr/sbin/c2000max-feature-job" &&
 	! grep -Fq '特征库安装任务被中断' "$ROOT/root/usr/sbin/c2000max-feature-job" ||
 	fail "stale feature jobs still report an install-only recovery action"
+grep -Fq 'acknowledge)' "$ROOT/root/usr/sbin/c2000max-feature-job" &&
+	grep -Fq 'feature_install_ack)' "$ROOT/root/usr/libexec/rpcd/c2000max.traffic" &&
+	grep -Fq '"feature_install_ack"' \
+		"$ROOT/root/usr/share/rpcd/acl.d/luci-app-c2000max-traffic.json" ||
+	fail "terminal feature jobs cannot be acknowledged and cleared after refresh"
 grep -Fq 'var deferredStatus = { _deferred: true }' "$TRAFFIC_VIEW" &&
 	grep -Fq 'managementDeferred: !!(statusDeferred' "$TRAFFIC_VIEW" &&
 	grep -Fq 'var statusPollRequest = data.statusRequest || null' "$TRAFFIC_VIEW" &&
@@ -1300,8 +1447,15 @@ grep -q "option storage_limit_mb '100'" "$ROOT/root/etc/config/c2000max_traffic"
 	fail "traffic log storage does not default to a configurable 100 MB cap"
 grep -q "option control_mode 'seamless'" "$ROOT/root/etc/config/c2000max_traffic" &&
 	grep -Fq "o.value('force', '强力管控" "$TRAFFIC_VIEW" &&
-	grep -Fq '[ "$control_mode" != force ] || invalidate_acceleration_cache' "$TRAFFIC" ||
-	fail "application control does not expose seamless and force enforcement"
+	grep -Fq "o.value('strict', '选择性严格" "$TRAFFIC_VIEW" &&
+	grep -Fq "o.value('deep', '全局深度实验" "$TRAFFIC_VIEW" &&
+	grep -Fq 'force_recheck_policy_clients "$scope_file"' "$TRAFFIC" &&
+	grep -Fq 'compile_policy_bypass "$control_mode" "$scope_file"' "$TRAFFIC" &&
+	grep -Fq 'FLOW_BYPASS_MARK="0x00800000"' "$TRAFFIC" ||
+	fail "application control does not expose targeted and diagnostic enforcement"
+if grep -Fq '[ "$control_mode" != force ] || invalidate_acceleration_cache' "$TRAFFIC"; then
+	fail "targeted force mode still flushes the complete HNAT table"
+fi
 grep -q 'ct secmark & 0x1fff0000' "$TRAFFIC" &&
 	grep -q 'ct secmark & 0x0000ffff' "$TRAFFIC" ||
 	fail "application blocking is not keyed by the profile epoch and isolated OAF APP_ID"
@@ -1321,15 +1475,87 @@ if grep -Fq 'CTA_MARK, htonl(secmark)' "$SECMARK_PATCH"; then
 	fail "OAF APP_ID export collides with policy-routing conntrack marks"
 fi
 OAF_SOURCE="$ROOT/../c2000max-appfilter/src/oaf/app_filter.c"
-grep -q 'if (g_hold_acceleration)' "$OAF_SOURCE" &&
+grep -q 'g_hold_acceleration || policy_no_offload' "$OAF_SOURCE" &&
 	grep -q 'skb->mark |= OAF_ACCEL_BYPASS_MARK' "$OAF_SOURCE" ||
 	fail "OAF acceleration bypass is not controlled by the recognition profile"
+	grep -Fq 'mark |= OAF_CT_NO_OFFLOAD_MARK' "$OAF_SOURCE" &&
+	grep -Fq 'af_ct_set_no_offload(ct, !!g_hold_acceleration || policy_no_offload)' "$OAF_SOURCE" &&
+	grep -Fq 'af_ct_set_no_offload_locked(ct, drop)' "$OAF_SOURCE" &&
+	grep -Fq 'policy_no_offload = !!(skb->mark & OAF_ACCEL_BYPASS_MARK)' "$OAF_SOURCE" &&
+	grep -Fq 'skb->mark &= ~OAF_ACCEL_BYPASS_MARK' "$OAF_SOURCE" &&
+	grep -Fq 'af_skb_apply_terminal_offload(skb,' "$OAF_SOURCE" &&
+	grep -Fq 'policy_hold_published' "$OAF_SOURCE" ||
+	fail "OAF does not persist pending/BLOCK or release ALLOW acceleration state"
+grep -Fq 'ct mark set ct mark | %s meta mark set meta mark | %s' "$TRAFFIC" ||
+	fail "strict policy marks only the current skb instead of the conntrack"
+grep -Fq 'ct secmark & 0x0000ffff { %s } ct mark set ct mark | %s counter %s' "$TRAFFIC" ||
+	fail "blocked APPID verdict does not pin the per-flow accelerator guard"
+grep -Fq 'udp dport 443 ct mark set ct mark | %s counter reject comment "app_strict_quic_fallback"' "$TRAFFIC" ||
+	fail "strict policy does not force opaque QUIC flows back to inspectable TCP/TLS"
+grep -Fq 'POLICY_DOMAIN_CACHE_SCHEMA=2' "$TRAFFIC" &&
+	grep -Fq 'cache_key="${POLICY_DOMAIN_CACHE_SCHEMA}:${POLICY_ACTIVE_PROFILE}"' "$TRAFFIC" &&
+	grep -Fq 'POLICY_REFRESH_INTERVAL=60' "$TRAFFIC" &&
+	grep -Fq 'now - last_policy_refresh' "$TRAFFIC" ||
+	fail "periodic accounting still recompiles the 14k-feature policy every ten seconds"
+grep -Fq 'symbol_get(mtk_hnat_kick_conntrack)' "$OAF_SOURCE" &&
+	grep -Fq 'if (published && (drop || policy_no_offload))' "$OAF_SOURCE" &&
+	grep -Fq 'af_hnat_kick_conntrack(ct);' "$OAF_SOURCE" ||
+	fail "OAF BLOCK verdicts do not request an optional per-flow HNAT kick"
+HNAT_HOOK_SOURCE="$ROOT/../../../../target/linux/mediatek/files-6.12/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c"
+grep -Fq 'READ_ONCE(ct->mark) & HNAT_EXCEPTION_TAG' "$HNAT_HOOK_SOURCE" ||
+	fail "proprietary MediaTek HNAT does not honor the per-flow OAF guard"
+FLOWCTL_PATCH="$ROOT/../../../../target/linux/mediatek/patches-6.12/999-zzzz-6003-c2000max-hnat-per-flow-kick.patch"
+grep -Fq 'EXPORT_SYMBOL_GPL(mtk_hnat_kick_conntrack)' "$FLOWCTL_PATCH" &&
+	grep -Fq '#define HNAT_FLOWCTL_COLLISION_SLOTS' "$FLOWCTL_PATCH" &&
+	grep -Fq 'hnat_get_ppe_hash_by_count(&key, entry_count)' "$FLOWCTL_PATCH" &&
+	grep -Fq 'entry->ipv4_hnapt.sport == tuple->sport' "$FLOWCTL_PATCH" &&
+	grep -Fq 'entry->ipv4_hnapt.dport == tuple->dport' "$FLOWCTL_PATCH" &&
+	grep -Fq 'spin_lock_bh(&h->entry_lock)' "$FLOWCTL_PATCH" &&
+	grep -Fq '__entry_delete(h, entry)' "$FLOWCTL_PATCH" ||
+	fail "HNAT flowctl does not tuple-verify a bounded collision bucket before KICK"
+grep -Fq 'hnat_cache_clr(ppe_index)' "$FLOWCTL_PATCH" &&
+	grep -Fq 'hnat_flowctl_flush(h)' "$FLOWCTL_PATCH" &&
+	grep -Fq 'hnat_flowctl_deinit(h)' "$FLOWCTL_PATCH" &&
+	grep -Fq 'debugfs_create_file("flowctl_status"' "$FLOWCTL_PATCH" ||
+	fail "HNAT flowctl lacks cache commit, lifecycle drain, or diagnostics"
+if grep -Fq 'foe_clear_all_bind_entries' "$FLOWCTL_PATCH"; then
+	fail "per-flow HNAT KICK unexpectedly clears the global FOE table"
+fi
+PPE_MARK_PATCH="$ROOT/../../../../target/linux/mediatek/patches-6.12/999-ppe-36-mtk_ppe-add-binding-bypass-by-ct-mark-0x99.patch"
+grep -Eq '^\+#define MTK_PPE_NO_OFFLOAD_MASK[[:space:]]+0x00800000' "$PPE_MARK_PATCH" &&
+	grep -Fq 'ct->mark & MTK_PPE_NO_OFFLOAD_MASK' "$PPE_MARK_PATCH" ||
+	fail "generic MediaTek PPE does not honor the per-flow OAF guard"
 grep -q 'payload_count > g_max_dpi_packets' "$OAF_SOURCE" ||
 	fail "OAF DPI packet window is still compile-time only"
-grep -Fq 'af_dpi_global_try_enter()' "$OAF_SOURCE" &&
+grep -Fq 'af_dpi_global_try_enter(urgent_http)' "$OAF_SOURCE" &&
 	grep -Fq 'atomic_cmpxchg(&af_dpi_global_owner, 0, 1)' "$OAF_SOURCE" &&
-	grep -Fq 'af_dpi_global_leave()' "$OAF_SOURCE" ||
+grep -Fq 'af_dpi_global_leave()' "$OAF_SOURCE" ||
 	fail "large native DPI bursts can still monopolize both router CPUs"
+grep -Fq 'ensure_audit_engine' "$TRAFFIC" &&
+	grep -Fq '/etc/init.d/c2000max-appfilter start' "$TRAFFIC" &&
+	grep -Fq 'audit-engine-sync' "$ROOT/root/etc/init.d/c2000max-traffic" ||
+	fail "enabling audit after boot does not start OAF before policy compilation"
+grep -Fq 'slot->ct == ct && !slot->complete' "$OAF_SOURCE" &&
+	grep -Fq 'flow->dir != AF_IK_DIR_ORIGINAL' "$OAF_SOURCE" &&
+	grep -Fq 'atomic64_inc(&af_http_stats.prefix_restarted)' "$OAF_SOURCE" &&
+	grep -A8 -F 'if (terminal) {' "$OAF_SOURCE" | grep -Fq 'af_http_prefix_forget(ct)' &&
+	grep -A8 -F 'if (published)' "$OAF_SOURCE" | grep -Fq 'af_http_prefix_forget(ct)' ||
+	fail "terminal generic keep-alive requests can still reuse a stale HTTP prefix"
+grep -Fq 'af_get_app_status_fast(node->app_id)' "$OAF_SOURCE" &&
+	grep -Fq 'priority_budget_expired' "$OAF_SOURCE" &&
+	grep -Fq 'field_prefilter_reject' "$OAF_SOURCE" &&
+	grep -Fq 'proc_create("oaf_http_match_recent"' "$OAF_SOURCE" &&
+	grep -Fq 'sync_oaf_priority_apps "$priority_app_build_file"' "$TRAFFIC" &&
+	grep -Fq 'mv -f "$priority_app_build_file" "$priority_app_file"' "$TRAFFIC" ||
+	fail "active policy APPIDs are not protected from native matcher budget starvation"
+grep -Fq '#define AF_TLS_PREFIX_MAX 8192U' "$OAF_SOURCE" &&
+	grep -Fq 'af_tls_client_hello_prefix(flow.l4_data, flow.l4_len)' "$OAF_SOURCE" &&
+	grep -Fq 'atomic64_inc(&af_http_stats.tls_prefix_complete)' "$OAF_SOURCE" &&
+	grep -Fq 'proc_create("oaf_sni_recent"' "$OAF_SOURCE" &&
+	grep -Fq 'sni_heads[0] = &db->heads[proto][AF_FEATURE_FAMILY_SNI]' "$OAF_SOURCE" &&
+	grep -Fq 'atomic64_inc(&af_http_stats.sni_prepass_match)' "$OAF_SOURCE" &&
+	grep -Fq 'proc_create("oaf_sni_match_recent"' "$OAF_SOURCE" ||
+	fail "split desktop TLS ClientHello/SNI does not have bounded reassembly and diagnostics"
 grep -Fq 'kzalloc(sizeof(char) * (size + 1), GFP_KERNEL)' "$OAF_SOURCE" ||
 	fail "OAF boot feature parser still reads beyond its exact-size buffer"
 grep -Fq 'if (!skb || !len || from > skb->len || len > skb->len - from)' "$OAF_SOURCE" &&
@@ -1360,6 +1586,11 @@ grep -Fq 'list_add_tail(&node->head' "$OAF_SOURCE" &&
 	grep -Fq 'cond_resched()' "$OAF_SOURCE" ||
 	fail "large native libraries still use quadratic/non-yielding feature insertion"
 OAF_CLIENT_SOURCE="$ROOT/../c2000max-appfilter/src/oaf/af_client.c"
+OAF_UTILS_SOURCE="$ROOT/../c2000max-appfilter/src/oaf/af_utils.c"
+grep -Fq 'state->in ? state->in : skb->dev' "$OAF_CLIENT_SOURCE" &&
+	grep -Fq 'netdev_master_upper_dev_get_rcu' "$OAF_UTILS_SOURCE" &&
+	grep -Fq 'af_netdev_is_lan(in, g_lan_ifname)' "$OAF_SOURCE" ||
+	fail "wired DSA/bridge clients can still be mistaken for WAN traffic"
 grep -Fq 'alloc_ordered_workqueue("oaf_work", WQ_MEM_RECLAIM)' "$OAF_CLIENT_SOURCE" &&
 	grep -Fq 'INIT_DELAYED_WORK(&client->client_work, client_work_handler)' "$OAF_CLIENT_SOURCE" &&
 	grep -Fq 'cancel_delayed_work_sync(&client->client_work)' "$OAF_CLIENT_SOURCE" ||
@@ -1399,6 +1630,10 @@ fi
 grep -q 'c2000max-traffic sample' "$APPFILTER_INIT" &&
 	grep -q 'traffic_run audit-rebaseline' "$ROOT/root/usr/sbin/c2000max-feature-manager" ||
 	fail "audit startup/profile switching does not establish a non-destructive counter baseline"
+grep -Fq 'ik-compiler.error' "$FEATURE_MANAGER" &&
+	grep -Fq 'feature_reload_errno' "$FEATURE_MANAGER" &&
+	grep -Fq '内核内存不足' "$FEATURE_MANAGER" ||
+	fail "feature imports still hide compiler or kernel reload diagnostics"
 reload_block="$(sed -n '/^reload_service()/,/^}/p' "$APPFILTER_INIT")"
 printf '%s\n' "$reload_block" | grep -Fq 'pidof c2000max-oafd' &&
 	printf '%s\n' "$reload_block" | grep -Fq 'apply_recognition_profile' ||
@@ -1420,26 +1655,28 @@ grep -q '^#version v26\.4\.10$' "$ROOT/../c2000max-appfilter/files/feature.cfg" 
 	fail "the supplied current OAF feature library is not bundled"
 grep -Fq 'if (ret < 0)' "$ROOT/../c2000max-appfilter/src/oafd/appfilter_netlink.c" ||
 	fail "OAF userspace still treats failed netlink sends as successful"
-awk '
-/^apply_recognition_profile\(\)/ { copy=1 }
-copy { print }
-copy && /^}/ { copy=0 }
-' "$APPFILTER_INIT" > "$TMP/recognition-profile.sh"
+{
+	sed -n '/^apply_lan_device_profile()/,/^}/p' "$APPFILTER_INIT"
+	sed -n '/^apply_recognition_profile()/,/^}/p' "$APPFILTER_INIT"
+} > "$TMP/recognition-profile.sh"
 . "$TMP/recognition-profile.sh"
 OAF_SYSCTL_DIR="$TMP/oaf-sysctl"
 mkdir -p "$OAF_SYSCTL_DIR"
 : > "$OAF_SYSCTL_DIR/hold_acceleration"
 : > "$OAF_SYSCTL_DIR/max_dpi_packets"
+: > "$OAF_SYSCTL_DIR/lan_ifname"
 uci() { printf '%s\n' "$PROFILE_MODE"; }
 PROFILE_MODE=seamless
 apply_recognition_profile
 [ "$(cat "$OAF_SYSCTL_DIR/hold_acceleration")" = 0 ] &&
-	[ "$(cat "$OAF_SYSCTL_DIR/max_dpi_packets")" = 8 ] ||
+	[ "$(cat "$OAF_SYSCTL_DIR/max_dpi_packets")" = 8 ] &&
+	[ "$(cat "$OAF_SYSCTL_DIR/lan_ifname")" = br-lan ] ||
 	fail "seamless profile does not preserve immediate acceleration"
 PROFILE_MODE=balanced
 apply_recognition_profile
 [ "$(cat "$OAF_SYSCTL_DIR/hold_acceleration")" = 1 ] &&
-	[ "$(cat "$OAF_SYSCTL_DIR/max_dpi_packets")" = 8 ] ||
+	[ "$(cat "$OAF_SYSCTL_DIR/max_dpi_packets")" = 8 ] &&
+	[ "$(cat "$OAF_SYSCTL_DIR/lan_ifname")" = br-lan ] ||
 	fail "balanced profile does not use the short DPI window"
 PROFILE_MODE=precise
 apply_recognition_profile

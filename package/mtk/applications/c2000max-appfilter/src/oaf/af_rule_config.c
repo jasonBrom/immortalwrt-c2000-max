@@ -19,6 +19,7 @@ DEFINE_RWLOCK(af_rule_lock);
 extern u_int32_t g_update_jiffies;
 
 char g_app_id_array[AF_MAX_APP_TYPE_NUM][AF_MAX_APP_ID_NUM] = {0};
+static atomic_t af_active_app_count = ATOMIC_INIT(0);
 
 
 static int af_change_app_status(cJSON *data_obj, int status)
@@ -50,7 +51,13 @@ static int af_change_app_status(cJSON *data_obj, int status)
 		id = AF_APP_ID_INDEX(appid_obj->valueint);
 		type = AF_APP_TYPE_INDEX(appid_obj->valueint);
 		af_rule_write_lock();
-		g_app_id_array[type][id] = status;
+		if (g_app_id_array[type][id] != status) {
+			if (status)
+				atomic_inc(&af_active_app_count);
+			else
+				atomic_dec(&af_active_app_count);
+			g_app_id_array[type][id] = status;
+		}
 		af_rule_write_unlock();
 	}
 
@@ -61,17 +68,10 @@ static int af_change_app_status(cJSON *data_obj, int status)
 
 void af_init_app_status(void)
 {
-	int i, j;
-
-	for (i = 0; i < AF_MAX_APP_TYPE_NUM; i++)
-	{
-		for (j = 0; j < AF_MAX_APP_ID_NUM; j++)
-		{
-			af_rule_write_lock();
-			g_app_id_array[i][j] = AF_FALSE;
-			af_rule_write_unlock();
-		}
-	}
+	af_rule_write_lock();
+	memset(g_app_id_array, 0, sizeof(g_app_id_array));
+	atomic_set(&af_active_app_count, 0);
+	af_rule_write_unlock();
 }
 int af_get_app_status(int appid)
 {
@@ -88,6 +88,27 @@ int af_get_app_status(int appid)
 	status = g_app_id_array[type][id];
 	af_rule_read_unlock();
 	return status;
+}
+
+/* Packet classification only needs a current priority hint.  A byte-sized
+ * READ_ONCE is sufficient here: configuration writes are atomic, and a rule
+ * update racing one packet may at worst defer the fast-path match to the next
+ * payload.  The verdict path still uses the locked accessor above. */
+int af_get_app_status_fast(int appid)
+{
+	int id;
+	int type;
+
+	if (!af_appid_valid(appid))
+		return AF_FALSE;
+	id = AF_APP_ID_INDEX(appid);
+	type = AF_APP_TYPE_INDEX(appid);
+	return READ_ONCE(g_app_id_array[type][id]);
+}
+
+bool af_has_app_status(void)
+{
+	return atomic_read(&af_active_app_count) > 0;
 }
 
 int af_config_add_appid(cJSON *data)

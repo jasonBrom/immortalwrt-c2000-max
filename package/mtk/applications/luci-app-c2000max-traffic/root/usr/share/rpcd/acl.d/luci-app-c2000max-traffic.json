@@ -13,7 +13,7 @@
 				"/tmp/c2000max-feature-upload": [ "write" ]
 			},
 			"ubus": {
-				"c2000max.traffic": [ "sample", "reset", "feature_install", "feature_activate", "feature_rollback", "policy_reload" ]
+				"c2000max.traffic": [ "sample", "reset", "feature_install", "feature_install_ack", "feature_activate", "feature_rollback", "policy_reload" ]
 			},
 			"uci": [ "c2000max_traffic" ]
 		}

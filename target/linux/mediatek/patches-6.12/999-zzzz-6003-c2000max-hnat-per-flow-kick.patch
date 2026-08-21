@@ -1,0 +1,496 @@
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
+@@ -18,6 +18,7 @@
+ #include <linux/if.h>
+ #include <linux/if_ether.h>
+ #include <linux/mutex.h>
++#include <linux/workqueue.h>
+ #include <net/dsa.h>
+ #include <net/netevent.h>
+ #include <net/netfilter/nf_conntrack_zones.h>
+@@ -1118,6 +1119,7 @@
+ 	struct list_head	mcast_blist_list;
+ 	spinlock_t		cah_lock;
+ 	spinlock_t		entry_lock;
++	spinlock_t		flowctl_lock;
+ 	spinlock_t		flow_entry_lock;
+ 	spinlock_t		mib_lock[MAX_PPE_NUM];
+ 	spinlock_t		reg_lock[MAX_PPE_NUM];
+@@ -1151,6 +1153,13 @@
+ 	bool flow_work_started;
+ 	bool debugfs_ready;
+ 	bool fe_irq_registered;
++	struct workqueue_struct *flowctl_wq;
++	atomic64_t flowctl_admission_denied;
++	atomic64_t flowctl_kick_queued;
++	atomic64_t flowctl_kick_deleted;
++	atomic64_t flowctl_kick_miss;
++	atomic64_t flowctl_kick_alloc_fail;
++	atomic64_t flowctl_kick_unsupported;
+ 	int fe_irq2;
+ };
+ 
+@@ -1601,6 +1610,12 @@
+ }
+ 
+ struct foe_entry *hnat_get_foe_entry(u32 ppe_id, u32 index);
++struct nf_conn;
++int mtk_hnat_kick_conntrack(struct nf_conn *ct);
++int hnat_flowctl_init(struct mtk_hnat *h);
++void hnat_flowctl_deinit(struct mtk_hnat *h);
++void hnat_flowctl_flush(struct mtk_hnat *h);
++void hnat_flowctl_note_admission_denied(struct mtk_hnat *h);
+ bool hnat_is_wan_dev(const struct net_device *dev);
+ bool hnat_is_lan_dev(const struct net_device *dev);
+ bool hnat_dsa_user_on_internal_gmac(struct mtk_hnat *h,
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_api.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_api.c
+@@ -5,6 +5,8 @@
+  */
+ 
+ #include <linux/debugfs.h>
++#include <linux/slab.h>
++#include <net/netfilter/nf_conntrack.h>
+ 
+ #include "hnat.h"
+ #include "hnat_api.h"
+@@ -28,6 +30,339 @@
+ 	       READ_ONCE(h->foe_etry_num_ppe[ppe_index]);
+ }
+ 
++#define HNAT_FLOWCTL_COLLISION_SLOTS	4
++
++struct hnat_flowctl_tuple {
++	u8 family;
++	u8 protonum;
++	u16 sport;
++	u16 dport;
++	union {
++		struct {
++			u32 src;
++			u32 dst;
++		} v4;
++		struct {
++			u32 src[4];
++			u32 dst[4];
++		} v6;
++	};
++};
++
++struct hnat_flowctl_work {
++	struct work_struct work;
++	struct mtk_hnat *h;
++	u8 tuple_count;
++	struct hnat_flowctl_tuple tuple[IP_CT_DIR_MAX];
++};
++
++static bool
++hnat_flowctl_tuple_copy(const struct nf_conntrack_tuple *src,
++			struct hnat_flowctl_tuple *dst)
++{
++	int i;
++
++	if (!src || !dst ||
++	    (src->dst.protonum != IPPROTO_TCP &&
++	     src->dst.protonum != IPPROTO_UDP))
++		return false;
++
++	memset(dst, 0, sizeof(*dst));
++	dst->family = src->src.l3num;
++	dst->protonum = src->dst.protonum;
++	dst->sport = ntohs(src->src.u.all);
++	dst->dport = ntohs(src->dst.u.all);
++
++	switch (dst->family) {
++	case AF_INET:
++		dst->v4.src = ntohl(src->src.u3.ip);
++		dst->v4.dst = ntohl(src->dst.u3.ip);
++		return true;
++	case AF_INET6:
++		for (i = 0; i < ARRAY_SIZE(dst->v6.src); i++) {
++			dst->v6.src[i] = ntohl(src->src.u3.ip6[i]);
++			dst->v6.dst[i] = ntohl(src->dst.u3.ip6[i]);
++		}
++		return true;
++	default:
++		return false;
++	}
++}
++
++static void hnat_flowctl_hash_key(const struct hnat_flowctl_tuple *tuple,
++				  struct foe_entry *key)
++{
++	memset(key, 0, sizeof(*key));
++	key->bfib1.udp = tuple->protonum == IPPROTO_UDP;
++
++	if (tuple->family == AF_INET) {
++		key->bfib1.pkt_type = IPV4_HNAPT;
++		key->ipv4_hnapt.sip = tuple->v4.src;
++		key->ipv4_hnapt.dip = tuple->v4.dst;
++		key->ipv4_hnapt.sport = tuple->sport;
++		key->ipv4_hnapt.dport = tuple->dport;
++		return;
++	}
++
++	key->bfib1.pkt_type = IPV6_5T_ROUTE;
++	key->ipv6_5t_route.ipv6_sip0 = tuple->v6.src[0];
++	key->ipv6_5t_route.ipv6_sip1 = tuple->v6.src[1];
++	key->ipv6_5t_route.ipv6_sip2 = tuple->v6.src[2];
++	key->ipv6_5t_route.ipv6_sip3 = tuple->v6.src[3];
++	key->ipv6_5t_route.ipv6_dip0 = tuple->v6.dst[0];
++	key->ipv6_5t_route.ipv6_dip1 = tuple->v6.dst[1];
++	key->ipv6_5t_route.ipv6_dip2 = tuple->v6.dst[2];
++	key->ipv6_5t_route.ipv6_dip3 = tuple->v6.dst[3];
++	key->ipv6_5t_route.sport = tuple->sport;
++	key->ipv6_5t_route.dport = tuple->dport;
++}
++
++static bool hnat_flowctl_proto_match(const struct foe_entry *entry,
++				     const struct hnat_flowctl_tuple *tuple)
++{
++	return !!entry->bfib1.udp == (tuple->protonum == IPPROTO_UDP);
++}
++
++static bool hnat_flowctl_v6_5t_match(const struct foe_entry *entry,
++				     const struct hnat_flowctl_tuple *tuple)
++{
++	return entry->ipv6_5t_route.ipv6_sip0 == tuple->v6.src[0] &&
++	       entry->ipv6_5t_route.ipv6_sip1 == tuple->v6.src[1] &&
++	       entry->ipv6_5t_route.ipv6_sip2 == tuple->v6.src[2] &&
++	       entry->ipv6_5t_route.ipv6_sip3 == tuple->v6.src[3] &&
++	       entry->ipv6_5t_route.ipv6_dip0 == tuple->v6.dst[0] &&
++	       entry->ipv6_5t_route.ipv6_dip1 == tuple->v6.dst[1] &&
++	       entry->ipv6_5t_route.ipv6_dip2 == tuple->v6.dst[2] &&
++	       entry->ipv6_5t_route.ipv6_dip3 == tuple->v6.dst[3] &&
++	       entry->ipv6_5t_route.sport == tuple->sport &&
++	       entry->ipv6_5t_route.dport == tuple->dport;
++}
++
++static bool hnat_flowctl_v6_hnapt_match(const struct foe_entry *entry,
++				       const struct hnat_flowctl_tuple *tuple)
++{
++	return entry->ipv6_hnapt.ipv6_sip0 == tuple->v6.src[0] &&
++	       entry->ipv6_hnapt.ipv6_sip1 == tuple->v6.src[1] &&
++	       entry->ipv6_hnapt.ipv6_sip2 == tuple->v6.src[2] &&
++	       entry->ipv6_hnapt.ipv6_sip3 == tuple->v6.src[3] &&
++	       entry->ipv6_hnapt.ipv6_dip0 == tuple->v6.dst[0] &&
++	       entry->ipv6_hnapt.ipv6_dip1 == tuple->v6.dst[1] &&
++	       entry->ipv6_hnapt.ipv6_dip2 == tuple->v6.dst[2] &&
++	       entry->ipv6_hnapt.ipv6_dip3 == tuple->v6.dst[3] &&
++	       entry->ipv6_hnapt.sport == tuple->sport &&
++	       entry->ipv6_hnapt.dport == tuple->dport;
++}
++
++/* The hash identifies only one four-entry collision bucket.  Revalidate the
++ * complete ingress tuple while holding entry_lock before invalidating a BIND
++ * entry; this prevents a stale index or hash collision from evicting an
++ * unrelated accelerated connection. */
++static bool hnat_flowctl_entry_match(const struct foe_entry *entry,
++				     const struct hnat_flowctl_tuple *tuple)
++{
++	if (entry->bfib1.state != BIND ||
++	    !hnat_flowctl_proto_match(entry, tuple))
++		return false;
++
++	if (tuple->family == AF_INET)
++		return entry->bfib1.pkt_type == IPV4_HNAPT &&
++		       entry->ipv4_hnapt.sip == tuple->v4.src &&
++		       entry->ipv4_hnapt.dip == tuple->v4.dst &&
++		       entry->ipv4_hnapt.sport == tuple->sport &&
++		       entry->ipv4_hnapt.dport == tuple->dport;
++
++	if (tuple->family != AF_INET6)
++		return false;
++
++	switch (entry->bfib1.pkt_type) {
++	case IPV6_5T_ROUTE:
++		return hnat_flowctl_v6_5t_match(entry, tuple);
++	case IPV6_HNAPT:
++	case IPV6_HNAT:
++		return hnat_flowctl_v6_hnapt_match(entry, tuple);
++	default:
++		return false;
++	}
++}
++
++static unsigned int
++hnat_flowctl_kick_tuple(struct mtk_hnat *h, u32 ppe_index,
++			const struct hnat_flowctl_tuple *tuple)
++{
++	struct foe_entry key;
++	struct foe_entry *entry;
++	u32 entry_count;
++	u32 hash;
++	u32 slot;
++	unsigned int deleted = 0;
++
++	if (!hnat_api_ppe_ready(h, ppe_index))
++		return 0;
++
++	entry_count = READ_ONCE(h->foe_etry_num_ppe[ppe_index]);
++	hnat_flowctl_hash_key(tuple, &key);
++	hash = hnat_get_ppe_hash_by_count(&key, entry_count);
++	hash &= ~(HNAT_FLOWCTL_COLLISION_SLOTS - 1);
++
++	spin_lock_bh(&h->entry_lock);
++	for (slot = 0; slot < HNAT_FLOWCTL_COLLISION_SLOTS &&
++	     hash + slot < entry_count; slot++) {
++		entry = h->foe_table_cpu[ppe_index] + hash + slot;
++		if (!hnat_flowctl_entry_match(entry, tuple))
++			continue;
++		__entry_delete(h, entry);
++		deleted++;
++	}
++	spin_unlock_bh(&h->entry_lock);
++
++	return deleted;
++}
++
++static void hnat_flowctl_kick_work(struct work_struct *work)
++{
++	struct hnat_flowctl_work *request =
++		container_of(work, struct hnat_flowctl_work, work);
++	struct mtk_hnat *h = request->h;
++	unsigned int total = 0;
++	unsigned int deleted;
++	u32 ppe_index;
++	u8 tuple_index;
++
++	if (!hnat_api_ready(h))
++		goto out;
++
++	for (ppe_index = 0; ppe_index < READ_ONCE(h->ppe_num); ppe_index++) {
++		deleted = 0;
++		for (tuple_index = 0; tuple_index < request->tuple_count;
++		     tuple_index++)
++			deleted += hnat_flowctl_kick_tuple(h, ppe_index,
++						       &request->tuple[tuple_index]);
++		if (deleted)
++			hnat_cache_clr(ppe_index);
++		total += deleted;
++	}
++
++	if (total)
++		atomic64_add(total, &h->flowctl_kick_deleted);
++	else
++		atomic64_inc(&h->flowctl_kick_miss);
++out:
++	kfree(request);
++}
++
++int mtk_hnat_kick_conntrack(struct nf_conn *ct)
++{
++	struct hnat_flowctl_work *request;
++	struct workqueue_struct *wq;
++	struct mtk_hnat *h;
++	u8 count = 0;
++	int direction;
++	int ret = 0;
++
++	if (!ct)
++		return -EINVAL;
++
++	h = READ_ONCE(hnat_priv);
++	if (!hnat_api_ready(h))
++		return -ENODEV;
++
++	request = kzalloc(sizeof(*request), GFP_ATOMIC);
++	if (!request) {
++		atomic64_inc(&h->flowctl_kick_alloc_fail);
++		return -ENOMEM;
++	}
++
++	for (direction = IP_CT_DIR_ORIGINAL;
++	     direction < IP_CT_DIR_MAX; direction++) {
++		if (hnat_flowctl_tuple_copy(
++			    &ct->tuplehash[direction].tuple,
++			    &request->tuple[count]))
++			count++;
++	}
++	if (!count) {
++		atomic64_inc(&h->flowctl_kick_unsupported);
++		kfree(request);
++		return -EOPNOTSUPP;
++	}
++
++	INIT_WORK(&request->work, hnat_flowctl_kick_work);
++	request->h = h;
++	request->tuple_count = count;
++
++	/* Serialize queue_work() against teardown swapping the private queue to
++	 * NULL.  The ready check is repeated under the same lock so an API caller
++	 * that raced with warm reset cannot touch a destroyed workqueue. */
++	spin_lock_bh(&h->flowctl_lock);
++	wq = READ_ONCE(h->flowctl_wq);
++	if (!hnat_api_ready(h) || !wq) {
++		ret = -ESHUTDOWN;
++	} else if (!queue_work(wq, &request->work)) {
++		ret = -EBUSY;
++	} else {
++		atomic64_inc(&h->flowctl_kick_queued);
++	}
++	spin_unlock_bh(&h->flowctl_lock);
++
++	if (ret)
++		kfree(request);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mtk_hnat_kick_conntrack);
++
++int hnat_flowctl_init(struct mtk_hnat *h)
++{
++	struct workqueue_struct *wq;
++
++	if (!h)
++		return -EINVAL;
++	wq = alloc_ordered_workqueue("mtk_hnat_flowctl", WQ_MEM_RECLAIM);
++	if (!wq)
++		return -ENOMEM;
++
++	spin_lock_bh(&h->flowctl_lock);
++	if (WARN_ON_ONCE(h->flowctl_wq)) {
++		spin_unlock_bh(&h->flowctl_lock);
++		destroy_workqueue(wq);
++		return -EALREADY;
++	}
++	WRITE_ONCE(h->flowctl_wq, wq);
++	spin_unlock_bh(&h->flowctl_lock);
++	return 0;
++}
++
++void hnat_flowctl_flush(struct mtk_hnat *h)
++{
++	struct workqueue_struct *wq;
++
++	if (!h)
++		return;
++	spin_lock_bh(&h->flowctl_lock);
++	wq = READ_ONCE(h->flowctl_wq);
++	spin_unlock_bh(&h->flowctl_lock);
++	if (wq)
++		flush_workqueue(wq);
++}
++
++void hnat_flowctl_deinit(struct mtk_hnat *h)
++{
++	struct workqueue_struct *wq;
++
++	if (!h)
++		return;
++	spin_lock_bh(&h->flowctl_lock);
++	wq = READ_ONCE(h->flowctl_wq);
++	WRITE_ONCE(h->flowctl_wq, NULL);
++	spin_unlock_bh(&h->flowctl_lock);
++	if (wq)
++		destroy_workqueue(wq);
++}
++
++void hnat_flowctl_note_admission_denied(struct mtk_hnat *h)
++{
++	if (h)
++		atomic64_inc(&h->flowctl_admission_denied);
++}
++
+ static int hnat_api_ppe_for_dev(struct mtk_hnat *h,
+ 				struct net_device *dev, u16 *ppe_index)
+ {
+@@ -1456,8 +1791,47 @@
+ 	.release = single_release,
+ };
+ 
++static int hnat_flowctl_status_show(struct seq_file *m, void *private)
++{
++	struct mtk_hnat *h = m->private;
++
++	if (!h)
++		return -ENODEV;
++	seq_puts(m, "architecture=per-flow-p1\n");
++	seq_printf(m, "ready=%u\n", hnat_api_ready(h));
++	seq_printf(m, "workqueue=%s\n",
++		   READ_ONCE(h->flowctl_wq) ? "active" : "disabled");
++	seq_printf(m, "admission_denied=%lld\n",
++		   atomic64_read(&h->flowctl_admission_denied));
++	seq_printf(m, "kick_queued=%lld\n",
++		   atomic64_read(&h->flowctl_kick_queued));
++	seq_printf(m, "kick_deleted=%lld\n",
++		   atomic64_read(&h->flowctl_kick_deleted));
++	seq_printf(m, "kick_miss=%lld\n",
++		   atomic64_read(&h->flowctl_kick_miss));
++	seq_printf(m, "kick_alloc_fail=%lld\n",
++		   atomic64_read(&h->flowctl_kick_alloc_fail));
++	seq_printf(m, "kick_unsupported=%lld\n",
++		   atomic64_read(&h->flowctl_kick_unsupported));
++	return 0;
++}
++
++static int hnat_flowctl_status_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, hnat_flowctl_status_show, inode->i_private);
++}
++
++static const struct file_operations hnat_flowctl_status_fops = {
++	.open = hnat_flowctl_status_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++
+ void hnat_api_init_debugfs(struct dentry *root, struct mtk_hnat *h)
+ {
+ 	debugfs_create_file("manual_api", 0600, root, h,
+ 			    &hnat_manual_api_fops);
++	debugfs_create_file("flowctl_status", 0400, root, h,
++			    &hnat_flowctl_status_fops);
+ }
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
+@@ -2003,6 +2003,8 @@
+ 	 * above drain readers that passed the gate before teardown began.
+ 	 */
+ 	synchronize_rcu();
++	synchronize_net();
++	hnat_flowctl_deinit(h);
+ 	hnat_xlat_cleanup(h);
+ 
+ 	if (h->fe_base)
+@@ -2131,6 +2133,7 @@
+ 	 */
+ 	synchronize_rcu();
+ 	synchronize_net();
++	hnat_flowctl_flush(h);
+ 
+ 	for (i = 0; i < h->ppe_num; i++) {
+ 		if (!READ_ONCE(h->ppe_started[i]) || !h->foe_table_cpu[i])
+@@ -2291,6 +2294,7 @@
+ 
+ 	spin_lock_init(&h->cah_lock);
+ 	spin_lock_init(&h->entry_lock);
++	spin_lock_init(&h->flowctl_lock);
+ 	spin_lock_init(&h->flow_entry_lock);
+ 	for (i = 0; i < MAX_PPE_NUM; i++) {
+ 		spin_lock_init(&h->mib_lock[i]);
+@@ -2567,6 +2571,10 @@
+ 		mtk_set_ppe_pse_port_state(i, i < h->ppe_num);
+ 	}
+ 
++	err = hnat_flowctl_init(h);
++	if (err)
++		goto err_teardown;
++
+ 	if (h->data->whnat) {
+ 		err = whnat_adjust_nf_hooks();
+ 		if (err)
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -3043,8 +3043,10 @@
+ 	 * to bind to PPE normally. */
+ #if IS_ENABLED(CONFIG_NF_CONNTRACK_MARK)
+ 	ct = nf_ct_get(skb, &ctinfo);
+-	if (ct && unlikely(READ_ONCE(ct->mark) & HNAT_EXCEPTION_TAG))
++	if (ct && unlikely(READ_ONCE(ct->mark) & HNAT_EXCEPTION_TAG)) {
++		hnat_flowctl_note_admission_denied(h);
+ 		return -1;
++	}
+ #endif
+ 
+ 	ret = hnat_offload_engine_done(skb, hw_path);

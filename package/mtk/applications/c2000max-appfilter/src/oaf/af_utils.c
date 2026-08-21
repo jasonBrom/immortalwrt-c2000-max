@@ -3,10 +3,60 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/ctype.h>
+#include <linux/netdevice.h>
+#include <linux/rcupdate.h>
 #include <linux/string.h>
 #include <linux/version.h>
 #include "af_utils.h"
 #define MAX_DUMP_STR_LEN 256
+
+static bool af_ifname_matches_lan(const char *name, const char *lan_ifname)
+{
+	size_t len;
+
+	if (!name || !lan_ifname || !*lan_ifname)
+		return false;
+	if (!strcmp(name, lan_ifname))
+		return true;
+
+	/* Treat br-lan.<vid> as part of br-lan, without the old substring match
+	 * accidentally accepting unrelated names such as not-br-lan. */
+	len = strlen(lan_ifname);
+	if (len >= IFNAMSIZ)
+		return false;
+	return !strncmp(name, lan_ifname, len) && name[len] == '.';
+}
+
+bool af_netdev_is_lan(const struct net_device *dev, const char *lan_ifname)
+{
+	const struct net_device *cursor = dev;
+	const struct net_device *master;
+	bool matched = false;
+	int depth;
+
+	if (!cursor || !lan_ifname || !*lan_ifname)
+		return false;
+	if (af_ifname_matches_lan(cursor->name, lan_ifname))
+		return true;
+
+	/* FORWARD state->in can be a DSA port, bond member or bridge slave rather
+	 * than br-lan itself.  Walk a short master chain under RCU so wired clients
+	 * are classified exactly like wireless clients behind the same bridge. */
+	rcu_read_lock();
+	for (depth = 0; depth < 4; depth++) {
+		master = netdev_master_upper_dev_get_rcu((struct net_device *)cursor);
+		if (!master || master == cursor)
+			break;
+		if (af_ifname_matches_lan(master->name, lan_ifname)) {
+			matched = true;
+			break;
+		}
+		cursor = master;
+	}
+	rcu_read_unlock();
+
+	return matched;
+}
 
 u_int32_t af_get_timestamp_sec(void)
 {
