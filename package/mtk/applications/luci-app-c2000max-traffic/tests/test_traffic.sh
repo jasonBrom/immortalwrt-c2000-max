@@ -1332,10 +1332,12 @@ if grep -Fq 'callTrafficCatalog()' "$TRAFFIC_VIEW"; then
 	fail "traffic page still downloads the complete application catalog"
 fi
 grep -Fq "data-tab-title': '概览'" "$TRAFFIC_VIEW" &&
-	grep -Fq "data-tab-title': '设备流量'" "$TRAFFIC_VIEW" &&
 	grep -Fq "data-tab-title': '应用审计'" "$TRAFFIC_VIEW" &&
 	grep -Fq "data-tab-title': '实时应用'" "$TRAFFIC_VIEW" &&
-	grep -Fq "data-tab-title': '管控与设置'" "$TRAFFIC_VIEW" ||
+	grep -Fq "data-tab-title': '管控规则'" "$TRAFFIC_VIEW" &&
+	grep -Fq "data-tab-title': '设置'" "$TRAFFIC_VIEW" &&
+	! grep -Fq "data-tab-title': '设备流量'" "$TRAFFIC_VIEW" &&
+	! grep -Fq "data-tab-title': '管控与设置'" "$TRAFFIC_VIEW" ||
 	fail "traffic statistics were not split into focused tabs"
 grep -Fq "method: 'recent_audit'" "$TRAFFIC_VIEW" &&
 	grep -Fq 'var pageSize = 50' "$TRAFFIC_VIEW" &&
@@ -1403,7 +1405,8 @@ grep -Fq 'acknowledge)' "$ROOT/root/usr/sbin/c2000max-feature-job" &&
 	grep -Fq '"feature_install_ack"' \
 		"$ROOT/root/usr/share/rpcd/acl.d/luci-app-c2000max-traffic.json" ||
 	fail "terminal feature jobs cannot be acknowledged and cleared after refresh"
-grep -Fq 'var deferredStatus = { _deferred: true }' "$TRAFFIC_VIEW" &&
+grep -Fq 'var deferredStatus = {' "$TRAFFIC_VIEW" &&
+	grep -Fq '_deferred: true' "$TRAFFIC_VIEW" &&
 	grep -Fq 'managementDeferred: !!(statusDeferred' "$TRAFFIC_VIEW" &&
 	grep -Fq 'var statusPollRequest = data.statusRequest || null' "$TRAFFIC_VIEW" &&
 	grep -Fq 'var rulesetOption = o = s.option' "$TRAFFIC_VIEW" &&
@@ -1424,8 +1427,8 @@ grep -Fq 'var featureInstallInProgress = false' "$TRAFFIC_VIEW" &&
 	grep -Fq 'pendingProfileId = String(nextStatus.feature_profile)' "$TRAFFIC_VIEW" ||
 	fail "an asynchronous feature switch can reload LuCI before reaching a terminal state"
 grep -Fq 'var managementOpened = false' "$TRAFFIC_VIEW" &&
-	grep -Fq "if (tabName === 'traffic-manage')" "$TRAFFIC_VIEW" &&
-	grep -Fq "managementPane.getAttribute('data-tab-active') === 'true'" "$TRAFFIC_VIEW" &&
+	grep -Fq "tabName === 'traffic-rules' || tabName === 'traffic-settings'" "$TRAFFIC_VIEW" &&
+	grep -Fq "[data-tab=\"traffic-rules\"][data-tab-active=\"true\"], [data-tab=\"traffic-settings\"][data-tab-active=\"true\"]" "$TRAFFIC_VIEW" &&
 	grep -Fq 'if (!managementOpened || !managementReady || managementRenderStarted)' "$TRAFFIC_VIEW" ||
 	fail "the management form is still rendered before its tab is first opened"
 grep -Fq '+coreutils-od' "$ROOT/Makefile" &&
