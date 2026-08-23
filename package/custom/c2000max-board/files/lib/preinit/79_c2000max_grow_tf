@@ -1,0 +1,30 @@
+#!/bin/sh
+
+c2000max_grow_tf()
+{
+	local disk=/dev/mmcblk0 part=/dev/mmcblk0p6
+	local disk_sectors part_start part_sectors free_sectors
+
+	[ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = nradio,c2000-max ] || return 0
+	[ -b "$disk" ] && [ -b "$part" ] || return 0
+	disk_sectors="$(cat /sys/class/block/mmcblk0/size 2>/dev/null)"
+	part_start="$(cat /sys/class/block/mmcblk0p6/start 2>/dev/null)"
+	part_sectors="$(cat /sys/class/block/mmcblk0p6/size 2>/dev/null)"
+	case "$disk_sectors:$part_start:$part_sectors" in *[!0-9:]*) return 0 ;; esac
+	# Partition 6 and its fixed start are part of the verified OEM layout.
+	[ "$part_start" = 87040 ] || return 0
+	free_sectors=$((disk_sectors - part_start - part_sectors))
+	# Ignore normal GPT tail/alignment slack; grow only when at least 8 MiB is free.
+	[ "$free_sectors" -gt 16384 ] || return 0
+
+	echo "C2000MAX: expanding rootfs partition to TF card capacity before first mount"
+	if printf ',+\n' | sfdisk --force --no-reread -N 6 "$disk" >/tmp/c2000max-grow-tf.log 2>&1; then
+		sync
+		echo "C2000MAX: partition expanded; rebooting once to create full-size rootfs_data"
+		reboot -f
+		sleep 10
+	fi
+	echo "C2000MAX: automatic TF expansion failed; continuing with the safe initial size"
+}
+
+boot_hook_add preinit_main c2000max_grow_tf

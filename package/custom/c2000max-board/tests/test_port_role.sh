@@ -157,6 +157,7 @@ reset_lan()
 		[turboacc.config.fastpath]=mediatek_hnat
 		[turboacc.config.fastpath_mh_bind_rate]=30
 		[turboacc.config.fastpath_mh_update_nfct]=0
+		[c2000max_traffic.config.enabled]=0
 		[eqos.config.enabled]=0
 		[qmodem.main]=main
 		[qmodem.main.enable_dial]=1
@@ -719,15 +720,21 @@ reset_runtime_fixture lan
 apply_mode_locked ||
 	fail "healthy HNAT path did not initialize its settings readback"
 [[ "$(cat "$C2000_HNAT_SETTINGS_EFFECTIVE")" == \
-	"bind_rate=30 update_nfct=1" ]] ||
+	"bind_rate=30 update_nfct=0" ]] ||
 	fail "initial HNAT settings readback is wrong"
 DB[turboacc.config.fastpath_mh_bind_rate]=5
 DB[turboacc.config.fastpath_mh_update_nfct]=1
 apply_mode_locked ||
 	fail "healthy HNAT path did not synchronize changed settings"
 [[ "$(cat "$C2000_HNAT_SETTINGS_EFFECTIVE")" == \
+	"bind_rate=5 update_nfct=0" ]] ||
+	fail "disabled statistics did not suppress the conntrack counter bridge"
+DB[c2000max_traffic.config.enabled]=1
+apply_mode_locked ||
+	fail "enabling statistics did not synchronize HNAT counters"
+[[ "$(cat "$C2000_HNAT_SETTINGS_EFFECTIVE")" == \
 	"bind_rate=5 update_nfct=1" ]] ||
-	fail "healthy HNAT path falsely reported stale settings"
+	fail "enabled statistics did not own the conntrack counter bridge"
 [[ "$(cat "$HNAT_DIR/hnat_setting")" == "7 1" ]] ||
 	fail "healthy HNAT path did not issue the final update_nfct command"
 
@@ -2023,19 +2030,12 @@ assert_argon_v31_resources()
 
 CUSTOM_ARGON_HEADER="$ROOT/../luci-theme-argon/ucode/template/themes/argon/header.ut"
 assert_argon_v31_resources "$CUSTOM_ARGON_HEADER" "selected custom"
-FEED_ARGON_HEADER="$ROOT/../../../feeds/luci/themes/luci-theme-argon/ucode/template/themes/argon/header.ut"
-if [[ -f "$FEED_ARGON_HEADER" ]]; then
-	assert_argon_v31_resources "$FEED_ARGON_HEADER" "feed"
-fi
-
-FEED_BASE_HEADER="$ROOT/../../../feeds/luci/modules/luci-base/ucode/template/header.ut"
-if [[ -f "$FEED_BASE_HEADER" ]]; then
-	grep -Fq '{{ resource }}/luci.js?v={# PKG_VERSION #}-{{ pkgs_update_time }}-c2000max-v36.01' \
-		"$FEED_BASE_HEADER" ||
-		fail "feed LuCI base header is missing the c2000max-v36.01 cache token"
-	if grep -Eq 'c2000max-v(21|22|23|24|25|26|31|34|35)([^0-9]|$)' "$FEED_BASE_HEADER"; then
-		fail "feed LuCI base header still contains a stale cache token"
-	fi
+CUSTOM_BASE_HEADER="$ROOT/../luci-base/ucode/template/header.ut"
+grep -Fq '{{ resource }}/luci.js?v={# PKG_VERSION #}-{{ pkgs_update_time }}-c2000max-v36.01' \
+	"$CUSTOM_BASE_HEADER" ||
+	fail "selected custom LuCI base header is missing the c2000max-v36.01 cache token"
+if grep -Eq 'c2000max-v(21|22|23|24|25|26|31|34|35)([^0-9]|$)' "$CUSTOM_BASE_HEADER"; then
+	fail "selected custom LuCI base header still contains a stale cache token"
 fi
 
 echo 'C2000-MAX port role topology and fault-injection tests passed'

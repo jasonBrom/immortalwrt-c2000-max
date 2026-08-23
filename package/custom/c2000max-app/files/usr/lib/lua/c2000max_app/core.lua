@@ -1109,6 +1109,14 @@ local function denied_station_macs()
 			end
 		end)
 	end
+	if tostring(uci:get("c2000max", "access_control", "enabled") or "0") == "1" and
+			tostring(uci:get("c2000max", "access_control", "mode") or "blacklist") == "blacklist" then
+		uci:foreach("c2000max", "access_device", function(section)
+			if tostring(section.enabled or "1") ~= "0" then
+				add(section.mac)
+			end
+		end)
+	end
 	table.sort(result)
 	if #result == 0 then
 		result[1] = ""
@@ -1136,6 +1144,50 @@ function M.station_status()
 	end
 	if #list == 0 then list[1] = "" end
 	return { list = list, deny = denied_station_macs() }
+end
+
+function M.set_device_internet(mac, allowed)
+	if not valid_mac_address(mac) then
+		return { code = "2", errcode = "2", message = "invalid mac" }
+	end
+	mac = tostring(mac):upper()
+	uci:load("c2000max")
+	if not uci:get("c2000max", "access_control") then
+		uci:section("c2000max", "access", "access_control", {
+			enabled = "1", mode = "blacklist", lan_device = "auto"
+		})
+	else
+		uci:set("c2000max", "access_control", "enabled", "1")
+		uci:set("c2000max", "access_control", "mode", "blacklist")
+	end
+
+	local matches = {}
+	uci:foreach("c2000max", "access_device", function(section)
+		if tostring(section.mac or ""):upper() == mac then
+			matches[#matches + 1] = section[".name"]
+		end
+	end)
+	if #matches == 0 and not allowed then
+		local name = "app_" .. mac:gsub(":", ""):lower()
+		uci:section("c2000max", "access_device", name, {
+			mac = mac, enabled = "1", source = "official_app"
+		})
+	else
+		for _, section in ipairs(matches) do
+			uci:set("c2000max", section, "enabled", allowed and "0" or "1")
+		end
+	end
+	if not uci:commit("c2000max") then
+		return { code = "2", errcode = "2", message = "commit failed" }
+	end
+	local rc = sys.call("/usr/sbin/c2000max-access apply >/dev/null 2>&1")
+	if rc ~= 0 then
+		return { code = "2", errcode = "2", message = "apply failed" }
+	end
+	return {
+		code = "0", errcode = "0", mac = mac,
+		switch = allowed and 1 or 0, switch_off = allowed and 0 or 1
+	}
 end
 
 local function apn_info()

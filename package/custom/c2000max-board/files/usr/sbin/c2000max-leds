@@ -3,14 +3,29 @@
 LED_BLUE="blue:sig1"
 LED_GREEN="blue:sig2"
 LED_RED="blue:sig3"
+LED_ROOT="${C2000MAX_LED_SYSFS:-/sys/class/leds}"
+
+led_user_forced_off() {
+	local wanted="$1" suffix section sysfs trigger default
+	suffix="${wanted##*:}"
+	for section in $(uci -q show system 2>/dev/null |
+		sed -n "s/^system\.\([^=]*\)=\{0,1\}'\{0,1\}led'\{0,1\}$/\1/p"); do
+		sysfs="$(uci -q get "system.$section.sysfs")"
+		[ "$sysfs" = "$wanted" ] || [ "${sysfs##*:}" = "$suffix" ] || continue
+		trigger="$(uci -q get "system.$section.trigger")"
+		default="$(uci -q get "system.$section.default")"
+		[ "$trigger" = none ] && [ "${default:-0}" != 1 ] && return 0
+	done
+	return 1
+}
 
 led_dir() {
 	local name="$1" path
-	[ -d "/sys/class/leds/$name" ] && {
-		echo "/sys/class/leds/$name"
+	[ -d "$LED_ROOT/$name" ] && {
+		echo "$LED_ROOT/$name"
 		return
 	}
-	for path in /sys/class/leds/*:"${name#*:}"; do
+	for path in "$LED_ROOT"/*:"${name#*:}"; do
 		[ -d "$path" ] && {
 			echo "$path"
 			return
@@ -19,15 +34,20 @@ led_dir() {
 }
 
 set_led() {
-	local dir
+	local dir value="$2"
+	led_user_forced_off "$1" && value=0
 	dir="$(led_dir "$1")"
 	[ -n "$dir" ] || return 0
 	echo none > "$dir/trigger" 2>/dev/null
-	echo "$2" > "$dir/brightness" 2>/dev/null
+	echo "$value" > "$dir/brightness" 2>/dev/null
 }
 
 blink_led() {
 	local dir="$1" delay="${2:-500}"
+	if led_user_forced_off "$dir"; then
+		set_led "$dir" 0
+		return 0
+	fi
 	dir="$(led_dir "$dir")"
 	[ -n "$dir" ] || return 0
 	echo timer > "$dir/trigger" 2>/dev/null
@@ -40,6 +60,28 @@ set_rgb() {
 	set_led "$LED_GREEN" "$2"
 	set_led "$LED_RED" "$3"
 }
+
+force_all_off() {
+	local dir
+	for dir in "$LED_ROOT"/*; do
+		[ -d "$dir" ] || continue
+		[ ! -w "$dir/trigger" ] || echo none > "$dir/trigger" 2>/dev/null
+		[ ! -w "$dir/brightness" ] || echo 0 > "$dir/brightness" 2>/dev/null
+	done
+}
+
+if [ "${1:-}" = off-lock ]; then
+	# LED triggers belong to several independent services.  Keep a very cheap
+	# board-level lock active while the user requests all LEDs off, so a later
+	# netdev/modem event cannot silently light them again.
+	trap 'force_all_off; exit 0' EXIT INT TERM
+	while [ "$(uci -q get c2000max.led.enabled)" = 0 ]; do
+		force_all_off
+		sleep 2
+	done
+	force_all_off
+	exit 0
+fi
 
 first_qmodem_section() {
 	uci -q show qmodem 2>/dev/null |
@@ -95,6 +137,7 @@ case "$good" in -[0-9]*) ;; *) good=-80 ;; esac
 # thresholds here and issue at most one serialized QModem status read per
 # interval instead of reparsing all configuration every five seconds.
 while :; do
+	[ "$(uci -q get c2000max.led.enabled)" != 0 ] || exit 0
 
 	section="$(first_qmodem_section)"
 	if [ -z "$section" ]; then

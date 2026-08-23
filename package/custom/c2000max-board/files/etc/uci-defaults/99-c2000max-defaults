@@ -245,7 +245,14 @@ case "$fastpath" in
 esac
 uci -q set turboacc.config.fastpath="$fastpath"
 uci -q set turboacc.config.fastpath_fo_hw='0'
-uci -q set turboacc.config.fastpath_mh_update_nfct='1'
+# HNAT's conntrack counter bridge is useful only while the C2000MAX traffic
+# collector is enabled.  Leaving it on with statistics disabled adds CPU work
+# without producing samples; c2000max-hnat reapplies this value on every toggle.
+if [ "$(uci -q get c2000max_traffic.config.enabled)" = 1 ]; then
+	uci -q set turboacc.config.fastpath_mh_update_nfct='1'
+else
+	uci -q set turboacc.config.fastpath_mh_update_nfct='0'
+fi
 uci -q set turboacc.config.fullcone='1'
 uci -q set turboacc.config.tcpcca='cubic'
 
@@ -397,16 +404,12 @@ if [ "$(uci -q get c2000max.migration.cpu_defaults_v16)" != '1' ]; then
 	uci -q set c2000max.migration.cpu_defaults_v16='1'
 fi
 
-# The former factory profile pinned both A53 cores at 2 GHz while leaving the
-# board fan disabled.  A reboot report from that build measured both thermal
-# zones around 85 C within one minute.  Migrate only the exact old CPU profile
-# and exact old fan profile; preserve any deliberately customised values.
+# The former factory profile left the board fan disabled.  A reboot report from
+# that build measured both thermal zones around 85 C within one minute.  Keep
+# the safe fan migration, but do not change the CPU governor here: the kernel
+# thermal cooling maps still override performance when a real trip point is
+# reached, while normal operation should remain at the requested 2 GHz.
 if [ "$(uci -q get c2000max.migration.thermal_defaults_v37)" != '1' ]; then
-	if [ "$(uci -q get cpufreq.cpufreq.governor0)" = 'performance' ] &&
-	   [ "$(uci -q get cpufreq.cpufreq.minfreq0)" = '500000' ] &&
-	   [ "$(uci -q get cpufreq.cpufreq.maxfreq0)" = '2000000' ]; then
-		uci -q set cpufreq.cpufreq.governor0='schedutil'
-	fi
 	if [ "$(uci -q get c2000max.fan.enabled)" = '0' ] &&
 	   [ "$(uci -q get c2000max.fan.mode)" = 'smart' ] &&
 	   [ "$(uci -q get c2000max.fan.temp_low)" = '55' ] &&
@@ -416,6 +419,21 @@ if [ "$(uci -q get c2000max.migration.thermal_defaults_v37)" != '1' ]; then
 	fi
 	uci -q set c2000max.migration='migration'
 	uci -q set c2000max.migration.thermal_defaults_v37='1'
+fi
+
+# V37 changed the exact maintained factory CPU profile from performance to
+# schedutil.  Restore only that exact affected profile once; custom frequency
+# limits and any other governor remain untouched.  Kernel thermal throttling
+# and the smart fan continue to protect the board independently.
+if [ "$(uci -q get c2000max.migration.cpu_performance_v38)" != '1' ]; then
+	if [ "$(uci -q get c2000max.migration.thermal_defaults_v37)" = '1' ] &&
+	   [ "$(uci -q get cpufreq.cpufreq.governor0)" = 'schedutil' ] &&
+	   [ "$(uci -q get cpufreq.cpufreq.minfreq0)" = '500000' ] &&
+	   [ "$(uci -q get cpufreq.cpufreq.maxfreq0)" = '2000000' ]; then
+		uci -q set cpufreq.cpufreq.governor0='performance'
+	fi
+	uci -q set c2000max.migration='migration'
+	uci -q set c2000max.migration.cpu_performance_v38='1'
 fi
 
 # Remove the V14/V15 module URLs.  Besides cleaning a possible overlay copy,

@@ -59,7 +59,15 @@ for symbol in \
 	CONFIG_PACKAGE_qmodem=y \
 	CONFIG_PACKAGE_luci-app-qmodem-next=y \
 	CONFIG_PACKAGE_uboot-envtools=y \
-	CONFIG_PACKAGE_xz-utils=y
+	CONFIG_PACKAGE_xz-utils=y \
+	CONFIG_PACKAGE_daed=y \
+	CONFIG_PACKAGE_kmod-sched-bpf=y \
+	CONFIG_PACKAGE_kmod-veth=y \
+	CONFIG_PACKAGE_kmod-xdp-sockets-diag=y \
+	CONFIG_PACKAGE_sfdisk=y \
+	CONFIG_KERNEL_DEBUG_INFO_BTF=y \
+	CONFIG_KERNEL_BPF_EVENTS=y \
+	CONFIG_KERNEL_XDP_SOCKETS=y
 do
 	require_fixed "$CONFIG" "$symbol" "missing saved-config selection: $symbol"
 done
@@ -73,10 +81,17 @@ if [ -f "$ROOT/.config" ]; then
 		"generated config will not set the base LAN address from preinit"
 	require_fixed "$ROOT/.config" 'CONFIG_PREINITOPT=y' \
 		"generated config disabled custom preinit options"
+	require_fixed "$ROOT/.config" 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' \
+		"generated config disabled BTF required by daed CO-RE"
+	require_fixed "$ROOT/.config" 'CONFIG_KERNEL_BPF_EVENTS=y' \
+		"generated config disabled BPF events required by daed"
+	require_fixed "$ROOT/.config" 'CONFIG_KERNEL_XDP_SOCKETS=y' \
+		"generated config disabled AF_XDP required by daed"
 	for package in \
 		c2000max-board luci-app-c2000max-traffic c2000max-appfilter \
 		kmod-c2000max-oaf mt5700-web-go luci-app-mt5700-web \
-		luci-app-qmodem-next uboot-envtools xz-utils
+		luci-app-qmodem-next uboot-envtools xz-utils daed \
+		kmod-sched-bpf kmod-veth kmod-xdp-sockets-diag sfdisk
 	do
 		grep -Fqx "CONFIG_PACKAGE_${package}=y" "$ROOT/.config" ||
 			fail "generated config omits $package"
@@ -97,6 +112,16 @@ require_contains "$BOARD/files/etc/uci-defaults/99-c2000max-defaults" \
 	"network.lan.ipaddr='192.168.66.1'" "board defaults do not set LAN to 192.168.66.1"
 require_contains "$BOARD/Makefile" '+uboot-envtools' \
 	"board package does not require U-Boot environment tools"
+require_contains "$BOARD/Makefile" '+sfdisk' \
+	"board package does not require the first-boot expansion tool"
+require_contains "$BOARD/Makefile" '79_c2000max_grow_tf' \
+	"board package does not install the first-boot expansion hook"
+require_contains "$ROOT/target/linux/mediatek/patches-6.12/999-zzzz-6004-c2000max-conntrack-pernet-sysctls.patch" \
+	'table[NF_SYSCTL_CT_QOS].data = &net->ct.sysctl_qos' \
+	"conntrack QoS sysctl is not bound per network namespace"
+require_contains "$ROOT/target/linux/mediatek/patches-6.12/999-zzzz-6004-c2000max-conntrack-pernet-sysctls.patch" \
+	'XASSIGN(NO_WINDOW_CHECK, &tn->tcp_no_window_check)' \
+	"TCP no-window-check sysctl is not bound per network namespace"
 require_contains "$ROOT/target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh" \
 	'/usr/sbin/c2000max-sim persist' "sysupgrade does not persist the SIM slot"
 require_contains "$ROOT/package/custom/qmodem/application/qmodem/files/etc/init.d/qmodem_reboot" \
@@ -168,7 +193,8 @@ if [ -n "$MANIFEST" ]; then
 		kmod-c2000max-oaf mt5700-web-go luci-app-mt5700-web qmodem \
 		luci-app-qmodem-next uboot-envtools luci-app-eqos-mtk \
 		luci-app-turboacc-mtk c2000max-app luci-app-c2000max-app \
-		coreutils-od coreutils-sort coreutils-stat ucode ucode-mod-fs
+		coreutils-od coreutils-sort coreutils-stat ucode ucode-mod-fs \
+		daed kmod-sched-bpf kmod-veth kmod-xdp-sockets-diag sfdisk
 	do
 		grep -Eq "^${package} - " "$MANIFEST" || fail "firmware manifest omits $package"
 	done
@@ -206,10 +232,40 @@ if [ -n "$ROOTFS" ]; then
 		usr/bin/ucode \
 		usr/lib/ucode/fs.so \
 		etc/init.d/mt5700-web \
-		www/luci-static/resources/view/mt5700-web/status_v8.js
+		www/luci-static/resources/view/mt5700-web/status_v8.js \
+		lib/preinit/79_c2000max_grow_tf \
+		usr/bin/daed
 	do
 		require_rootfs_path "$path"
 	done
+
+	for module_name in \
+		act_bpf.ko cls_bpf.ko veth.ko xsk_diag.ko \
+		mtk_hwifi.ko connac_if.ko mt7993.ko mtk_pci.ko mtk_wed.ko
+	do
+		find "$ROOTFS/lib/modules" -type f -name "$module_name" -print -quit |
+			grep -q . || fail "rootfs omits kernel module $module_name"
+	done
+
+	# Every loadable module must have been built against the same generated
+	# struct module layout.  This catches the stale mt_hwifi objects that still
+	# carried the pre-BTF 0x2c0 layout while their APK metadata claimed the new
+	# kernel ABI.
+	module_layout_size=
+	module_count=0
+	for module in $(find "$ROOTFS/lib/modules" -type f -name '*.ko' | sort); do
+		this_module_size="$(readelf -SW "$module" 2>/dev/null |
+			awk '$2 == ".gnu.linkonce.this_module" { print $6; exit }')"
+		[ -n "$this_module_size" ] ||
+			fail "cannot read .gnu.linkonce.this_module from $module"
+		if [ -z "$module_layout_size" ]; then
+			module_layout_size="$this_module_size"
+		elif [ "$this_module_size" != "$module_layout_size" ]; then
+			fail "mixed kernel module layouts: $module is $this_module_size, expected $module_layout_size"
+		fi
+		module_count=$((module_count + 1))
+	done
+	[ "$module_count" -gt 0 ] || fail "rootfs contains no kernel modules"
 
 	oaf_module="$(find "$ROOTFS/lib/modules" -type f -name oaf.ko -print -quit 2>/dev/null)"
 	[ -n "$oaf_module" ] || fail "rootfs omits the OAF kernel module"

@@ -45,20 +45,40 @@ last_siminserted=""
 last_netstat=""
 poll_counter=0
 
+led_user_forced_off() {
+	local wanted="$1" suffix section sysfs trigger default
+	suffix="${wanted##*:}"
+	for section in $(uci -q show system 2>/dev/null |
+		sed -n "s/^system\.\([^=]*\)=\{0,1\}'\{0,1\}led'\{0,1\}$/\1/p"); do
+		sysfs="$(uci -q get "system.$section.sysfs")"
+		[ "$sysfs" = "$wanted" ] || [ "${sysfs##*:}" = "$suffix" ] || continue
+		trigger="$(uci -q get "system.$section.trigger")"
+		default="$(uci -q get "system.$section.default")"
+		[ "$trigger" = none ] && [ "${default:-0}" != 1 ] && return 0
+	done
+	return 1
+}
+
 led_turn() {
 	local path="/sys/class/leds/$1"
 	local value="$2"
 	max_brightness=$(cat "$path/max_brightness")
-	if [ "$value" = "1" ]; then
+	if [ "$value" = "1" ] && ! led_user_forced_off "$1"; then
 		brightness=$max_brightness
 	else
 		brightness="0"
+		echo "none" > "$path/trigger" 2>/dev/null
 	fi
 	echo "$brightness" > "$path/brightness"
 }
 
 led_heartbeat() {
 	local path="/sys/class/leds/$1"
+	if led_user_forced_off "$1" || c2000max_led_locked; then
+		echo "none" > "$path/trigger" 2>/dev/null
+		echo "0" > "$path/brightness" 2>/dev/null
+		return 0
+	fi
 	max_brightness=$(cat "$path/max_brightness")
 
 	echo "$max_brightness" > "$path/brightness"
@@ -68,6 +88,11 @@ led_heartbeat() {
 led_netdev() {
 	local path="/sys/class/leds/$1"
 	local device="$2"
+	if led_user_forced_off "$1" || c2000max_led_locked; then
+		echo "none" > "$path/trigger" 2>/dev/null
+		echo "0" > "$path/brightness" 2>/dev/null
+		return 0
+	fi
 
 	echo "1" > "$path/brightness"
 	echo "netdev" > "$path/trigger"
@@ -81,6 +106,10 @@ led_off_all() {
 	led_turn "${LED_SIG1}" "0"
 	led_turn "${LED_SIG2}" "0"
 	led_turn "${LED_SIG3}" "0"
+}
+
+c2000max_led_locked() {
+	[ "$(uci -q get c2000max.led.enabled)" = 0 ]
 }
 
 sim_inserted() {
@@ -205,11 +234,19 @@ polling_display() {
 
 # Loop forever
 update_cfg
+if c2000max_led_locked; then
+	led_off_all
+	exit 0
+fi
 if [ "$ON_OFF" = "off" ]; then
 	led_off_all
 	exit 0
 fi
 while true; do
+	if c2000max_led_locked; then
+		led_off_all
+		exit 0
+	fi
 	update_netdev
 	
 	# 检查是否进入轮询模式

@@ -3,13 +3,14 @@
 . /lib/functions.sh
 
 TAG="c2000max-access"
-TABLE="c2000max_access"
 LOCK="${C2000_ACCESS_LOCK:-/var/lock/c2000max-access.lock}"
+FIREWALL_INIT="${C2000_ACCESS_FIREWALL_INIT:-/etc/init.d/firewall}"
+HNAT_ENTRY="${C2000_ACCESS_HNAT_ENTRY:-/sys/kernel/debug/hnat/hnat_entry}"
 NFT="${C2000_ACCESS_NFT:-nft}"
-HNAT_INIT="${C2000_ACCESS_HNAT_INIT:-/etc/init.d/c2000max-hnat}"
-HNAT_EFFECTIVE="${C2000_HNAT_EFFECTIVE:-/var/run/c2000max-hnat-effective}"
-HNAT_HOOK="${C2000_HNAT_HOOK:-/sys/kernel/debug/hnat/hook_toggle}"
-NFT_SCRIPT="${C2000_ACCESS_NFT_SCRIPT:-/tmp/c2000max-access.nft}"
+IP="${C2000_ACCESS_IP:-ip}"
+CONNTRACK="${C2000_ACCESS_CONNTRACK:-conntrack}"
+RULE_ALLOW="c2000max_access_allow"
+RULE_BLOCK="c2000max_access_block"
 ACCESS_MACS=""
 ACCESS_COUNT=0
 ACCESS_INVALID=""
@@ -19,7 +20,7 @@ json_escape()
 	printf '%s' "$1" | sed \
 		-e 's/\\/\\\\/g' \
 		-e 's/"/\\"/g' \
-		-e 's/	/\\t/g' \
+		-e 's/\t/\\t/g' \
 		-e ':a;N;$!ba;s/\n/\\n/g'
 }
 
@@ -35,17 +36,20 @@ normalize_mac()
 	local mac first
 	mac="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
 	case "$mac" in
-		[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F])
-			;;
-		*)
-			return 1
-			;;
+		[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]) ;;
+		*) return 1 ;;
 	esac
 	[ "$mac" != "00:00:00:00:00:00" ] &&
 		[ "$mac" != "FF:FF:FF:FF:FF:FF" ] || return 1
 	first="${mac%%:*}"
 	[ $((0x$first & 1)) -eq 0 ] || return 1
 	printf '%s\n' "$mac"
+}
+
+mac_selected()
+{
+	case " $ACCESS_MACS " in *" $1 "*) return 0 ;; esac
+	return 1
 }
 
 collect_device()
@@ -58,9 +62,7 @@ collect_device()
 		ACCESS_INVALID="${ACCESS_INVALID}${ACCESS_INVALID:+, }${mac:-（空）}"
 		return 0
 	}
-	case " $ACCESS_MACS " in
-		*" $normalized "*) return 0 ;;
-	esac
+	mac_selected "$normalized" && return 0
 	ACCESS_MACS="${ACCESS_MACS}${ACCESS_MACS:+ }$normalized"
 	ACCESS_COUNT=$((ACCESS_COUNT + 1))
 }
@@ -71,10 +73,7 @@ load_policy()
 	config_get_bool ACCESS_ENABLED access_control enabled 0
 	config_get ACCESS_MODE access_control mode blacklist
 	config_get ACCESS_LAN access_control lan_device auto
-	case "$ACCESS_MODE" in
-		blacklist|whitelist) ;;
-		*) ACCESS_MODE=invalid ;;
-	esac
+	case "$ACCESS_MODE" in blacklist|whitelist) ;; *) ACCESS_MODE=invalid ;; esac
 	ACCESS_MACS=""
 	ACCESS_COUNT=0
 	ACCESS_INVALID=""
@@ -91,166 +90,166 @@ resolve_lan_device()
 			jsonfilter -e '@.l3_device' 2>/dev/null)"
 		[ -n "$device" ] || device=br-lan
 	fi
-	case "$device" in
-		*[!A-Za-z0-9_.:-]*|'') return 1 ;;
-	esac
+	case "$device" in *[!A-Za-z0-9_.:-]*|'') return 1 ;; esac
 	printf '%s\n' "$device"
 }
 
-table_active()
+delete_managed_rules()
 {
-	"$NFT" list table inet "$TABLE" >/dev/null 2>&1
+	uci -q delete "firewall.$RULE_ALLOW" || true
+	uci -q delete "firewall.$RULE_BLOCK" || true
 }
 
-acceleration_suspended()
+add_rule_header()
 {
-	local flow_sw flow_hw hook effective
-	flow_sw="$(uci -q get firewall.@defaults[0].flow_offloading)"
-	flow_hw="$(uci -q get firewall.@defaults[0].flow_offloading_hw)"
-	effective="$(cat "$HNAT_EFFECTIVE" 2>/dev/null)"
-	hook=disabled
-	[ ! -r "$HNAT_HOOK" ] || hook="$(cat "$HNAT_HOOK" 2>/dev/null)"
-	[ "$flow_sw" = 0 ] &&
-		[ "$flow_hw" = 0 ] &&
-		[ "$hook" != enabled ] &&
-		[ "$hook" != 1 ] &&
-		[ "$effective" = disabled ]
+	local section="$1" name="$2" target="$3"
+	uci -q set "firewall.$section=rule" || return 1
+	uci -q set "firewall.$section.name=$name" || return 1
+	uci -q set "firewall.$section.family=any" || return 1
+	uci -q set "firewall.$section.proto=all" || return 1
+	uci -q set "firewall.$section.src=lan" || return 1
+	uci -q set "firewall.$section.dest=wan" || return 1
+	uci -q set "firewall.$section.target=$target" || return 1
+	uci -q set "firewall.$section.enabled=1" || return 1
+	uci -q set "firewall.$section.c2000max_access=1" || return 1
 }
 
-write_ruleset()
+write_firewall_policy()
 {
-	local lan="$1" mac first=1
-	{
-		if table_active; then
-			printf 'delete table inet %s\n' "$TABLE"
-		fi
-		printf 'add table inet %s\n' "$TABLE"
-		printf 'add set inet %s devices { type ether_addr; }\n' "$TABLE"
-		if [ "$ACCESS_COUNT" -gt 0 ]; then
-			printf 'add element inet %s devices { ' "$TABLE"
+	local mac
+	delete_managed_rules
+	[ "$ACCESS_ENABLED" = 1 ] || return 0
+
+	case "$ACCESS_MODE" in
+		blacklist)
+			[ "$ACCESS_COUNT" -gt 0 ] || return 0
+			add_rule_header "$RULE_BLOCK" "C2000MAX 设备黑名单" REJECT || return 1
 			for mac in $ACCESS_MACS; do
-				[ "$first" = 1 ] || printf ', '
-				printf '%s' "$mac"
-				first=0
+				uci -q add_list "firewall.$RULE_BLOCK.src_mac=$mac" || return 1
 			done
-			printf ' }\n'
-		fi
-		printf 'add chain inet %s forward { type filter hook forward priority -10; policy accept; }\n' "$TABLE"
-		case "$ACCESS_MODE" in
-			blacklist)
-				printf 'add rule inet %s forward iifname "%s" ether saddr @devices counter drop\n' \
-					"$TABLE" "$lan"
-				;;
-			whitelist)
-				if [ "$ACCESS_COUNT" -gt 0 ]; then
-					printf 'add rule inet %s forward iifname "%s" ether saddr @devices counter return\n' \
-						"$TABLE" "$lan"
-				fi
-				printf 'add rule inet %s forward iifname "%s" counter drop\n' \
-					"$TABLE" "$lan"
-				;;
-		esac
-	} > "${NFT_SCRIPT}.$$" || return 1
-	"$NFT" -f "${NFT_SCRIPT}.$$"
-	rc=$?
-	[ "${C2000_ACCESS_KEEP_SCRIPT:-0}" = 1 ] ||
-		rm -f "${NFT_SCRIPT}.$$"
-	return "$rc"
+			;;
+		whitelist)
+			if [ "$ACCESS_COUNT" -gt 0 ]; then
+				add_rule_header "$RULE_ALLOW" "C2000MAX 设备白名单放行" ACCEPT || return 1
+				for mac in $ACCESS_MACS; do
+					uci -q add_list "firewall.$RULE_ALLOW.src_mac=$mac" || return 1
+				done
+			fi
+			# The reject rule follows the allow rule. These are standard fw4
+			# communication rules, never a private nft hook or HNAT mode switch.
+			add_rule_header "$RULE_BLOCK" "C2000MAX 非白名单设备拒绝" REJECT || return 1
+			;;
+	esac
 }
 
-delete_table()
+kick_mac_flows()
 {
-	table_active || return 0
-	"$NFT" delete table inet "$TABLE" >/dev/null 2>&1
+	local mac="$1" lan="$2" line ipaddr neigh_mac normalized
+	[ -w "$HNAT_ENTRY" ] && printf '8 %s\n' "$mac" > "$HNAT_ENTRY" 2>/dev/null || true
+	command -v "$CONNTRACK" >/dev/null 2>&1 || return 0
+	while read -r line; do
+		set -- $line
+		ipaddr="$1"
+		neigh_mac="${line#* lladdr }"
+		neigh_mac="${neigh_mac%% *}"
+		normalized="$(normalize_mac "$neigh_mac" 2>/dev/null)" || continue
+		[ "$normalized" = "$mac" ] || continue
+		"$CONNTRACK" -D -s "$ipaddr" >/dev/null 2>&1 || true
+		"$CONNTRACK" -D -d "$ipaddr" >/dev/null 2>&1 || true
+	done <<-EOF
+	$("$IP" neigh show dev "$lan" 2>/dev/null)
+	EOF
 }
 
-reload_hnat()
+invalidate_affected_flows()
 {
-	[ -x "$HNAT_INIT" ] || return 1
-	"$HNAT_INIT" reload >/dev/null 2>&1
+	local lan="$1" mac line neigh_mac normalized
+	# This is a transient cache flush, not an accelerator configuration change.
+	"$NFT" flush flowtable inet fw4 ft >/dev/null 2>&1 || true
+	if [ "$ACCESS_MODE" = blacklist ]; then
+		for mac in $ACCESS_MACS; do kick_mac_flows "$mac" "$lan"; done
+		return 0
+	fi
+	while read -r line; do
+		neigh_mac="${line#* lladdr }"
+		neigh_mac="${neigh_mac%% *}"
+		normalized="$(normalize_mac "$neigh_mac" 2>/dev/null)" || continue
+		mac_selected "$normalized" || kick_mac_flows "$normalized" "$lan"
+	done <<-EOF
+	$("$IP" neigh show dev "$lan" 2>/dev/null)
+	EOF
+}
+
+firewall_rules_active()
+{
+	local block allow
+	block="$(uci -q get "firewall.$RULE_BLOCK.c2000max_access")"
+	allow="$(uci -q get "firewall.$RULE_ALLOW.c2000max_access")"
+	if [ "$ACCESS_ENABLED" != 1 ]; then
+		[ -z "$block" ] && [ -z "$allow" ]
+	elif [ "$ACCESS_MODE" = blacklist ]; then
+		[ "$ACCESS_COUNT" -eq 0 ] || [ "$block" = 1 ]
+	else
+		[ "$block" = 1 ] && { [ "$ACCESS_COUNT" -eq 0 ] || [ "$allow" = 1 ]; }
+	fi
 }
 
 apply_policy()
 {
-	local lan rc=0
+	local backup lan
 	load_policy
-	[ "$ACCESS_MODE" != invalid ] || {
-		json_result false "上网控制模式无效"
-		return 1
-	}
+	[ "$ACCESS_MODE" != invalid ] || { json_result false "上网控制模式无效"; return 1; }
 	[ -z "$ACCESS_INVALID" ] || {
 		json_result false "存在无效或非单播 MAC 地址：$ACCESS_INVALID"
 		return 1
 	}
-
-	if [ "$ACCESS_ENABLED" != 1 ]; then
-		delete_table || rc=1
-		reload_hnat || rc=1
-		if [ "$rc" = 0 ]; then
-			json_result true "设备上网控制已关闭"
-		else
-			json_result false "规则已关闭，但网络加速状态恢复失败"
-		fi
-		return "$rc"
+	lan="$(resolve_lan_device)" || { json_result false "无法确定安全的 LAN 设备名称"; return 1; }
+	backup="/tmp/c2000max-access-firewall.$$"
+	uci -q export firewall > "$backup" || { json_result false "无法备份防火墙配置"; return 1; }
+	if ! write_firewall_policy || ! uci -q commit firewall ||
+	   ! "$FIREWALL_INIT" reload >/dev/null 2>&1; then
+		uci -q import firewall < "$backup" >/dev/null 2>&1 || true
+		uci -q commit firewall >/dev/null 2>&1 || true
+		"$FIREWALL_INIT" reload >/dev/null 2>&1 || true
+		rm -f "$backup"
+		json_result false "fw4 通信规则应用失败，已恢复原防火墙配置"
+		return 1
 	fi
-
-	lan="$(resolve_lan_device)" || {
-		json_result false "无法确定安全的 LAN 设备名称"
-		return 1
-	}
-
-	# First tear down and flush every acceleration path. If this fails, still
-	# install the nft policy but return an error instead of claiming that the
-	# access list cannot be bypassed.
-	reload_hnat || rc=1
-	write_ruleset "$lan" || {
-		json_result false "nftables 规则加载失败"
-		return 1
-	}
-	acceleration_suspended || rc=1
-	if [ "$rc" = 0 ]; then
-		json_result true "设备上网控制规则已生效"
+	rm -f "$backup"
+	invalidate_affected_flows "$lan"
+	if [ "$ACCESS_ENABLED" = 1 ]; then
+		json_result true "设备黑白名单已通过 fw4 通信规则生效，HNAT 保持启用"
 	else
-		json_result false "规则已加载，但无法确认网络加速已安全暂停"
+		json_result true "设备上网控制已关闭，托管的 fw4 规则已移除"
 	fi
-	return "$rc"
 }
 
 status_policy()
 {
-	local active=false suspended=false lan
+	local active=false lan
 	load_policy
-	table_active && active=true
-	acceleration_suspended && suspended=true
+	firewall_rules_active && active=true
 	lan="$(resolve_lan_device 2>/dev/null || printf 'br-lan')"
 	printf '{"success":true,"enabled":%s,"mode":"%s","entry_count":%s,' \
 		"$([ "$ACCESS_ENABLED" = 1 ] && printf true || printf false)" \
 		"$ACCESS_MODE" "$ACCESS_COUNT"
-	printf '"table_active":%s,"acceleration_suspended":%s,"lan_device":"%s",' \
-		"$active" "$suspended" "$(json_escape "$lan")"
+	printf '"rules_active":%s,"acceleration_preserved":true,"lan_device":"%s",' \
+		"$active" "$(json_escape "$lan")"
 	printf '"invalid_entries":"%s"}\n' "$(json_escape "$ACCESS_INVALID")"
 }
 
 mkdir -p "${LOCK%/*}"
-: >> "$LOCK" || {
-	json_result false "无法创建上网控制锁"
-	exit 1
-}
+: >> "$LOCK" || { json_result false "无法创建上网控制锁"; exit 1; }
 exec 9<>"$LOCK" || exit 1
 flock -x 9 || exit 1
 
 case "${1:-status}" in
-	apply|reload)
-		apply_policy
-		;;
+	apply|reload) apply_policy ;;
 	stop)
-		delete_table
+		delete_managed_rules
+		uci -q commit firewall >/dev/null 2>&1 || true
+		"$FIREWALL_INIT" reload >/dev/null 2>&1 || true
 		;;
-	status)
-		status_policy
-		;;
-	*)
-		json_result false "不支持的操作"
-		exit 1
-		;;
+	status) status_policy ;;
+	*) json_result false "不支持的操作"; exit 1 ;;
 esac

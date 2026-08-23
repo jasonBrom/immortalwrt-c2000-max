@@ -1,0 +1,24 @@
+diff --git a/net/daed/Makefile b/net/daed/Makefile
+index f50da4a..7de2b1f 100644
+--- a/net/daed/Makefile
++++ b/net/daed/Makefile
+@@ -23,6 +23,11 @@ PKG_BUILD_PARALLEL:=1
+ PKG_BUILD_FLAGS:=no-mips16
+ 
+ GO_PKG:=github.com/daeuniverse/dae-wing
++GO_PKG_INSTALL_EXTRA:= \
++	dae-core/control/bpf_subobjects.tmpl \
++	dae-core/control/bpf_.*[.]o \
++	dae-core/trace/bpf_.*[.]o \
++	webrender/web
+ GO_PKG_LDFLAGS:= \
+ 	-X '$(GO_PKG)/db.AppDescription=$(PKG_NAME) is a integration solution of dae, API and UI.'
+ GO_PKG_LDFLAGS_X= \
+@@ -129,6 +134,7 @@ define Build/Compile
+ 		go generate control/control.go ; \
+ 		go generate trace/trace.go ; \
+ 		popd ; \
++		$(call GoPackage/Build/Configure) ; \
+ 		$(call GoPackage/Build/Compile) ; \
+ 	)
+ endef

@@ -14,7 +14,13 @@ extra_command "resolved_state" "print resolved LED configuration"
 
 service_triggers()
 {
-	procd_add_reload_trigger qmodem qmodem_led
+	procd_add_reload_trigger qmodem qmodem_led c2000max system
+}
+
+c2000max_led_locked()
+{
+	[ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = nradio,c2000-max ] || return 1
+	[ "$(uci -q get c2000max.led.enabled)" = 0 ]
 }
 
 modem_path_present()
@@ -290,6 +296,7 @@ led_state_needs_watcher()
 
 start_service()
 {
+	c2000max_led_locked && return 0
 	save_led_state
 	config_load qmodem_led
 	config_foreach start_network_detect_instance network_detect
@@ -379,6 +386,12 @@ stop_service()
 reload_service()
 {
 	local current_state saved_state
+	if c2000max_led_locked; then
+		stop_saved_led_instances
+		turn_off_saved_leds
+		rm -f "$LED_STATE_FILE"
+		return 0
+	fi
 
 	current_state="$(get_led_state)"
 	saved_state="$(cat "$LED_STATE_FILE" 2>/dev/null)"

@@ -1,7 +1,7 @@
 config eqos 'config'
 	option enabled      0
-	option download     100
-	option upload       20
+	option download     -1
+	option upload       -1
 
 # Per-device bandwidth is kbit/s.
 # The queue option is a stable rule ID, not a hardware QID. Under MediaTek

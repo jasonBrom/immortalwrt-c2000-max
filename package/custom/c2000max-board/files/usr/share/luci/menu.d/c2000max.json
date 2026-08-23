@@ -43,9 +43,9 @@
 			"acl": [ "c2000max" ]
 		}
 	},
-	"admin/network/c2000max-access": {
+	"admin/services/c2000max-access": {
 		"title": "设备上网控制",
-		"order": 91,
+		"order": 80,
 		"action": {
 			"type": "view",
 			"path": "c2000max/access_v352"

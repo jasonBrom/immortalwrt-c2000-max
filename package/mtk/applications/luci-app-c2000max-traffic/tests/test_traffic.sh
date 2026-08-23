@@ -400,7 +400,7 @@ recent_rpc_pid=$!
 tries=0
 while [ ! -f "$TMP/recent-rpc-done" ]; do
 	tries=$((tries + 1))
-	if [ "$tries" -ge 100 ]; then
+	if [ "$tries" -ge 500 ]; then
 		: > "$TMP/recent-lock-release"
 		kill "$recent_rpc_pid" 2>/dev/null || true
 		wait "$recent_rpc_pid" 2>/dev/null || true
@@ -1683,12 +1683,12 @@ apply_recognition_profile
 [ "$(cat "$OAF_SYSCTL_DIR/hold_acceleration")" = 1 ] &&
 	[ "$(cat "$OAF_SYSCTL_DIR/max_dpi_packets")" = 64 ] ||
 	fail "precise profile does not retain the full DPI window"
-grep -q "option recognition_mode 'balanced'" \
+grep -q "option recognition_mode 'seamless'" \
 	"$ROOT/root/etc/config/c2000max_traffic" ||
-	fail "balanced recognition is not the accuracy-safe default"
-grep -Fq "accuracy_default_v42" \
+	fail "seamless recognition is not the acceleration-safe default"
+grep -Fq "off_state_v43" \
 	"$ROOT/root/etc/uci-defaults/luci-c2000max-traffic" ||
-	fail "the previous seamless default is not migrated once"
+	fail "disabled audit state is not migrated explicitly"
 grep -q "value('balanced'.*8 个有效载荷包后恢复硬件加速" \
 	"$ROOT/htdocs/luci-static/resources/view/c2000max/traffic.js" ||
 	fail "LuCI does not expose the balanced recognition profile"

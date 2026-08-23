@@ -485,7 +485,7 @@ assert_contains "$REPORTER" '"report_interval"'
 MAKEFILE="$ROOT/Makefile"
 assert_contains "$MAKEFILE" '+mosquitto-nossl'
 assert_contains "$MAKEFILE" 'PKG_VERSION:=1.10.0'
-assert_contains "$MAKEFILE" 'PKG_RELEASE:=2'
+assert_contains "$MAKEFILE" 'PKG_RELEASE:=5'
 for dependency in '+flock' '+blkid' '+ip-full' '+iw' '+uclient-fetch'; do
 	assert_contains "$MAKEFILE" "$dependency"
 done

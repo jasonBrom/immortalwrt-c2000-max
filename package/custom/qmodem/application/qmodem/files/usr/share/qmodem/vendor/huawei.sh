@@ -773,7 +773,47 @@ cell_info()
 }
 
 function network_info() {
-    return 0
+    local netdev rx_bytes tx_bytes now state_file old_time old_rx old_tx
+    local rx_rate=0 tx_rate=0 elapsed
+
+    # MT5700 does not provide the QNWCFG speed command used by Quectel
+    # modems.  Its USB ECM/NCM interface counters are authoritative and also
+    # include accelerated traffic, so derive the live rate from two samples.
+    netdev=$(uci -q get "qmodem.${config_section}.network")
+    [ -n "$netdev" ] && [ -d "/sys/class/net/${netdev}" ] || netdev=""
+    if [ -z "$netdev" ] && [ -n "$modem_path" ]; then
+        netdev=$(find "$modem_path" -type d -name net 2>/dev/null |
+            while read -r netdir; do
+                ls "$netdir" 2>/dev/null
+            done | head -n1)
+    fi
+    [ -n "$netdev" ] || return 0
+
+    rx_bytes=$(cat "/sys/class/net/${netdev}/statistics/rx_bytes" 2>/dev/null)
+    tx_bytes=$(cat "/sys/class/net/${netdev}/statistics/tx_bytes" 2>/dev/null)
+    case "$rx_bytes" in ''|*[!0-9]*) return 0 ;; esac
+    case "$tx_bytes" in ''|*[!0-9]*) return 0 ;; esac
+
+    now=$(date +%s)
+    state_file="/tmp/qmodem_huawei_speed_${config_section}"
+    if [ -r "$state_file" ]; then
+        read -r old_time old_rx old_tx < "$state_file" || true
+        case "$old_time:$old_rx:$old_tx" in
+            *[!0-9:]*) old_time=0; old_rx=0; old_tx=0 ;;
+        esac
+        elapsed=$((now - old_time))
+        if [ "$elapsed" -gt 0 ] && [ "$elapsed" -le 120 ] &&
+           [ "$rx_bytes" -ge "$old_rx" ] && [ "$tx_bytes" -ge "$old_tx" ]; then
+            rx_rate=$(((rx_bytes - old_rx) / elapsed))
+            tx_rate=$(((tx_bytes - old_tx) / elapsed))
+        fi
+    fi
+    ( umask 077; printf '%s %s %s\n' "$now" "$rx_bytes" "$tx_bytes" > "${state_file}.$$" ) &&
+        mv -f "${state_file}.$$" "$state_file"
+
+    class="Network Information"
+    add_speed_entry rx "$rx_rate"
+    add_speed_entry tx "$tx_rate"
 }
 
 function _get_lockband_nr(){

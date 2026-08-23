@@ -8,6 +8,11 @@ USE_PROCD=1
 
 QDMA_RATE_MAX=1000000
 TOTAL_RATE_MAX=1000
+# A tc parent is still required for the selected clients when the user leaves
+# the aggregate uncapped. Use a ceiling far above any C2000MAX interface;
+# only explicitly selected child classes are shaped and unrelated HNAT flows
+# never traverse this software parent.
+TC_UNLIMITED_RATE_MBIT=100000
 RULE_ID_MAX=4094
 HNAT_PROFILE_MAX=31
 TOTAL_DOWNLOAD_KBIT=$QDMA_RATE_MAX
@@ -55,6 +60,11 @@ is_uinteger() {
 	esac
 
 	return 0
+}
+
+valid_total_rate() {
+	[ "$1" = -1 ] && return 0
+	is_uinteger "$1" && [ "$1" -ge 1 ] && [ "$1" -le "$TOTAL_RATE_MAX" ]
 }
 
 valid_mac() {
@@ -295,8 +305,8 @@ parse_device() {
 	config_get download "$cfg" download 0
 	config_get upload "$cfg" upload 0
 	config_get rule_id "$cfg" queue
-	config_get total_download config download
-	config_get total_upload config upload
+	total_download=$((TOTAL_DOWNLOAD_KBIT / 1000))
+	total_upload=$((TOTAL_UPLOAD_KBIT / 1000))
 	[ -n "$rule_id" ] || config_get rule_id "$cfg" comment
 
 	allocate_hnat_profile up "$upload" || {
@@ -363,18 +373,28 @@ eqos_start_service_locked() {
 	fi
 	export EQOS_BACKEND
 
-	local download upload
+	local download upload effective_download effective_upload
 	config_get download config download
 	config_get upload config upload
 
-	if ! is_uinteger "$download" || ! is_uinteger "$upload" ||
-	   [ "$download" -lt 1 ] || [ "$upload" -lt 1 ] ||
-	   [ "$download" -gt "$TOTAL_RATE_MAX" ] || [ "$upload" -gt "$TOTAL_RATE_MAX" ]; then
-		echo "eqos: total download and upload rates must be between 1 and $TOTAL_RATE_MAX Mbit/s" >&2
+	if ! valid_total_rate "$download" || ! valid_total_rate "$upload"; then
+		echo "eqos: total download and upload rates must be -1 (unlimited) or between 1 and $TOTAL_RATE_MAX Mbit/s" >&2
 		return 1
 	fi
-	TOTAL_DOWNLOAD_KBIT=$((download * 1000))
-	TOTAL_UPLOAD_KBIT=$((upload * 1000))
+
+	# QDMA HQoS necessarily programs an aggregate scheduler. When either
+	# direction is unlimited, keep unrelated traffic fully on HNAT and shape
+	# only selected clients with the existing selective tc path instead.
+	if [ "$EQOS_BACKEND" = hnat ] && { [ "$download" = -1 ] || [ "$upload" = -1 ]; }; then
+		EQOS_BACKEND=hybrid
+		export EQOS_BACKEND
+	fi
+	effective_download="$download"
+	effective_upload="$upload"
+	[ "$effective_download" != -1 ] || effective_download="$TC_UNLIMITED_RATE_MBIT"
+	[ "$effective_upload" != -1 ] || effective_upload="$TC_UNLIMITED_RATE_MBIT"
+	TOTAL_DOWNLOAD_KBIT=$((effective_download * 1000))
+	TOTAL_UPLOAD_KBIT=$((effective_upload * 1000))
 
 	CONFIG_ERROR=0
 	USED_RULE_IDS=" "
@@ -394,7 +414,7 @@ eqos_start_service_locked() {
 	[ ! -x /usr/sbin/c2000max-traffic ] ||
 		/usr/sbin/c2000max-traffic sample >/dev/null 2>&1 || true
 
-	if ! eqos start "$EQOS_BACKEND" "$download" "$upload"; then
+	if ! eqos start "$EQOS_BACKEND" "$effective_download" "$effective_upload"; then
 		echo "eqos: failed to initialize the $EQOS_BACKEND limiter backend" >&2
 		eqos stop >/dev/null 2>&1
 		return 1

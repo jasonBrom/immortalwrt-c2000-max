@@ -612,6 +612,11 @@ audit_enabled()
 	[ "$(uci -q get c2000max_traffic.audit.enabled)" = 1 ]
 }
 
+statistics_enabled()
+{
+	[ "$(uci -q get c2000max_traffic.config.enabled)" = 1 ]
+}
+
 ensure_audit_engine()
 {
 	local waited=0
@@ -812,6 +817,12 @@ build_mark_map()
 sync_hardware_mib()
 {
 	local counter_node lock_held=0
+
+	# Reading the MediaTek MIB is a read-clear walk over live FOE entries.  It is
+	# useful only for traffic accounting and must not run merely because audit or
+	# application control is enabled.  Keeping this hard gate here also protects
+	# explicit mib-sync calls made by acceleration lifecycle scripts.
+	statistics_enabled || return 0
 
 	if [ "${C2000MAX_ACCEL_LOCKS_HELD:-0}" != 1 ]; then
 		exec 8> /var/lock/c2000max-hnat.lock || return 1
@@ -1156,21 +1167,52 @@ time_to_minutes()
 
 schedule_active_now()
 {
-	local section="$1" enabled days start end start_min end_min
-	local today yesterday now_min hour minute
+	local section="$1" enabled days start end start_min end_min windows window
+	local window_day window_range window_start window_end today yesterday now_min
+	local hour minute matched=1
 
 	config_get_bool enabled "$section" enabled 1
 	[ "$enabled" -eq 1 ] || return 1
-	config_get days "$section" days "0 1 2 3 4 5 6"
-	config_get start "$section" start "00:00"
-	config_get end "$section" end "00:00"
-	time_to_minutes "$start" || return 1; start_min="$TIME_MINUTES"
-	time_to_minutes "$end" || return 1; end_min="$TIME_MINUTES"
 	today="$(date +%w)"; yesterday=$(((today + 6) % 7))
 	hour="$(date +%H)"; minute="$(date +%M)"
 	hour="${hour#0}"; minute="${minute#0}"
 	[ -n "$hour" ] || hour=0; [ -n "$minute" ] || minute=0
 	now_min=$((hour * 60 + minute))
+
+	# New rules store one or more independent weekday intervals as
+	#   <weekday>@HH:MM-HH:MM
+	# This represents e.g. Monday 10:00-12:00 and Tuesday 01:00-05:00 in one
+	# rule.  Cross-midnight intervals use the previous selected weekday after
+	# midnight.  Legacy days/start/end options remain a lossless fallback.
+	config_get windows "$section" time_windows ""
+	if [ -n "$windows" ]; then
+		for window in $windows; do
+			window_day="${window%%@*}"
+			window_range="${window#*@}"
+			window_start="${window_range%%-*}"
+			window_end="${window_range#*-}"
+			case "$window_day" in [0-6]) ;; *) continue ;; esac
+			time_to_minutes "$window_start" || continue; start_min="$TIME_MINUTES"
+			time_to_minutes "$window_end" || continue; end_min="$TIME_MINUTES"
+			if [ "$start_min" -eq "$end_min" ]; then
+				[ "$window_day" = "$today" ] && return 0
+			elif [ "$start_min" -lt "$end_min" ]; then
+				[ "$window_day" = "$today" ] &&
+					[ "$now_min" -ge "$start_min" ] &&
+					[ "$now_min" -lt "$end_min" ] && return 0
+			elif [ "$window_day" = "$today" ] && [ "$now_min" -ge "$start_min" ]; then
+				return 0
+			elif [ "$window_day" = "$yesterday" ] && [ "$now_min" -lt "$end_min" ]; then
+				return 0
+			fi
+		done
+		return 1
+	fi
+	config_get days "$section" days "0 1 2 3 4 5 6"
+	config_get start "$section" start "00:00"
+	config_get end "$section" end "00:00"
+	time_to_minutes "$start" || return 1; start_min="$TIME_MINUTES"
+	time_to_minutes "$end" || return 1; end_min="$TIME_MINUTES"
 
 	# Equal endpoints mean the whole selected day. Cross-midnight rules use
 	# yesterday's selection for their after-midnight segment.
@@ -1330,13 +1372,15 @@ compile_schedule()
 		case "$category" in ''|*[!0-9]*) continue ;; esac
 		category_ids="$category_ids $category"
 	done
-	if [ -n "$category_ids" ] && [ -r "$POLICY_FEATURE_FILE" ]; then
-		expanded="$(awk -v wanted="$category_ids" '
+	if [ -n "$category_ids" ] && [ -r "${POLICY_CATALOG_FILE:-}" ]; then
+		# Native iKuai profiles expose semantic category IDs which are deliberately
+		# different from their internal OAF storage shard.  Expand from the same
+		# immutable catalog used by LuCI, never from #class in feature.cfg.
+		expanded="$(awk -F '\t' -v wanted="$category_ids" '
 			function valid(id,type,idx) { type=int(id/1000); idx=id%1000; return type>=1 && type<=32 && idx>=1 && idx<=512 }
-			BEGIN { n=split(wanted, ids, /[[:space:]]+/); for (i=1;i<=n;i++) if (ids[i]!="") selected[ids[i]]=1 }
-			/^#class[[:space:]]+/ { active=(($3+0) in selected); next }
-			active && /^[0-9]+[[:space:]]+[^:]+:\[/ && valid($1+0) { print $1 }
-		' "$POLICY_FEATURE_FILE")"
+			BEGIN { n=split(wanted, ids, /[[:space:]]+/); for (i=1;i<=n;i++) if (ids[i]!="") selected[ids[i]+0]=1 }
+			NF >= 4 && (($3+0) in selected) && valid($1+0) && !seen[$1]++ { print $1 }
+		' "$POLICY_CATALOG_FILE")"
 		apps="$apps $expanded"
 	fi
 	[ -n "$apps" ] || return 0
@@ -1897,11 +1941,18 @@ apply_audit_policy_locked()
 	POLICY_ACTIVE_PROFILE="$(active_feature_profile 2>/dev/null)"
 	current_profile_sha="$(feature_file_sha "$FEATURE_FILE" 2>/dev/null)"
 	POLICY_FEATURE_FILE=""
+	POLICY_CATALOG_FILE=""
 	if [ -n "$POLICY_ACTIVE_EPOCH_HEX" ] &&
 	   [ "$POLICY_ACTIVE_PROFILE" = "$current_profile_sha" ] &&
 	   valid_profile_id "$POLICY_ACTIVE_PROFILE" &&
 	   profile_feature_file "$POLICY_ACTIVE_PROFILE"; then
 		POLICY_FEATURE_FILE="$PROFILE_FEATURE_FILE"
+		if load_profile_catalog "$POLICY_ACTIVE_PROFILE"; then
+			POLICY_CATALOG_FILE="$PROFILE_CATALOG_FILE"
+		else
+			POLICY_ACTIVE_PROFILE=""
+			POLICY_FEATURE_FILE=""
+		fi
 	else
 		POLICY_ACTIVE_PROFILE=""
 	fi
@@ -2544,6 +2595,12 @@ recent_audit_json()
 	local profile version timestamp device_id device_ip device_name profile_id profile_version
 	local appid app_name class_id class_name display_name profile_owned=0 collector_owned=0
 
+	if ! audit_enabled; then
+		printf '{"success":true,"disabled":true,"window":%s,"total":0,"offset":0,"limit":50,"updated":0,"stale":false,"has_more":false,"items":[]}\n' \
+			"$RECENT_AUDIT_WINDOW"
+		return 0
+	fi
+
 	[ -n "$offset" ] || offset=0
 	[ -n "$limit" ] || limit=50
 	valid_uint_arg "$offset" && [ "$offset" -le "$RECENT_AUDIT_WINDOW" ] 2>/dev/null || {
@@ -2588,6 +2645,15 @@ recent_audit_json()
 		collector_lock_release collector_owned
 		profile_lock_release profile_owned
 	fi
+	# Keep pagination globally newest-first even when recovering a cache written
+	# by an older build or serving the previous atomic generation mid-update.
+	# The window is bounded to 150 rows, so this is constant and inexpensive.
+	if ! LC_ALL=C sort -t "$(printf '\t')" -k1,1nr -k2,2nr -k3,3 \
+		-k7,7 -k6,6n -o "$snapshot" "$snapshot"; then
+		rm -f "$snapshot"
+		catalog_error_json 'audit history unavailable'
+		return 1
+	fi
 
 	total="$(wc -l < "$snapshot" 2>/dev/null)"
 	case "$total" in ''|*[!0-9]*) total=0 ;; esac
@@ -2598,14 +2664,22 @@ recent_audit_json()
 		NR > offset && emitted < limit { print; emitted++ }
 	' "$snapshot" > "$page"; then
 		rm -f "$snapshot" "$page"
+		catalog_error_json 'audit history unavailable'
 		return 1
 	fi
 	awk -F '\t' 'NF>=7 && !seen[$7]++ {print $7}' "$page" > "$profiles"
 	awk -F '\t' -v OFS='\t' 'NF>=7 && !seen[$7 SUBSEP $6]++ {print $7,$6}' \
 		"$page" > "$requested"
 	rm -f "$snapshot"
-	: > "$catalog_map" || return 1
-	: > "$profile_meta" || return 1
+	: > "$catalog_map" || {
+		catalog_error_json 'audit history unavailable'
+		return 1
+	}
+	: > "$profile_meta" || {
+		rm -f "$catalog_map"
+		catalog_error_json 'audit history unavailable'
+		return 1
+	}
 	while IFS= read -r profile; do
 		valid_profile_id "$profile" || continue
 		version=未知
@@ -2634,6 +2708,7 @@ recent_audit_json()
 		}
 	' "$profile_meta" "$catalog_map" "$page" > "$rows" || {
 		rm -f "$page" "$profiles" "$requested" "$catalog_map" "$profile_meta" "$rows"
+		catalog_error_json 'audit history unavailable'
 		return 1
 	}
 
@@ -2692,6 +2767,11 @@ audit_json()
 	local catalog_map profile_meta app_rows category_rows bucket_rows profile version
 	local profile_id profile_version appid name class_id class_name fu fd ou od uu ud total bucket up down
 	local total_up=0 total_down=0
+
+	if ! audit_enabled; then
+		printf '{"disabled":true,"apps":[],"categories":[],"buckets":[],"totals":{"upload":"0","download":"0"}}\n'
+		return 0
+	fi
 
 	ensure_runtime || return 1
 	[ -n "$device" ] || { printf '{"error":"device is required"}\n'; return 1; }
@@ -2836,7 +2916,7 @@ status_json()
 	local effective source updated active=0 key ip name fu fd ou od uu ud seen
 	local total_fu=0 total_fd=0 total_ou=0 total_od=0 total_uu=0 total_ud=0
 	local rows="$RUNTIME_DIR/status.$$.rows" history_rows="$RUNTIME_DIR/status.$$.history"
-	local daemon_pid audit_on=0 audit_active=0
+	local daemon_pid statistics_on=0 audit_on=0 audit_active=0
 	local feature_profile feature_version feature_format feature_apps policy_rules policy_dns_domains
 	local policy_bypass_clients policy_hnat_scope policy_error history_samples
 	local storage_limit storage_used
@@ -2864,6 +2944,7 @@ status_json()
 		flow_offloading) source=flowtable_conntrack ;;
 		*) source=conntrack ;;
 	esac
+	statistics_enabled && statistics_on=1
 	audit_enabled && audit_on=1
 	if [ "$audit_on" -eq 1 ]; then
 		audit_total="$(sed -n 's/^total=//p' "$AUDIT_DIAG_FILE" 2>/dev/null)"
@@ -2933,6 +3014,7 @@ status_json()
 	. "$JSHN_LIB"
 	json_init
 	json_add_boolean active "$active"
+	json_add_boolean statistics_enabled "$statistics_on"
 	json_add_string acceleration "${effective:-unknown}"
 	json_add_string counter_source "$source"
 	json_add_int updated "$updated"
@@ -3055,11 +3137,19 @@ daemon_loop()
 	printf '%s\n' "$$" > "$DAEMON_PID_FILE" || exit 1
 	trap 'flush_totals >/dev/null 2>&1; rm -f "$DAEMON_PID_FILE"; exit 0' HUP INT TERM
 	while :; do
-		sample_once nonblocking || logger -t c2000max-traffic "traffic sample failed"
-		interval="$(uci -q get c2000max_traffic.config.sample_interval)"
-		case "$interval" in ''|*[!0-9]*) interval=10 ;; esac
-		[ "$interval" -ge 5 ] 2>/dev/null || interval=5
-		[ "$interval" -le 300 ] 2>/dev/null || interval=300
+		if statistics_enabled; then
+			sample_once nonblocking || logger -t c2000max-traffic "traffic sample failed"
+			interval="$(uci -q get c2000max_traffic.config.sample_interval)"
+			case "$interval" in ''|*[!0-9]*) interval=10 ;; esac
+			[ "$interval" -ge 5 ] 2>/dev/null || interval=5
+			[ "$interval" -le 300 ] 2>/dev/null || interval=300
+		else
+			# Audit/control still needs schedule-boundary refresh while statistics is
+			# off, but this path performs no conntrack dump or HNAT MIB walk.
+			apply_audit_policy >/dev/null 2>&1 ||
+				logger -t c2000max-traffic "application policy update failed"
+			interval="$POLICY_REFRESH_INTERVAL"
+		fi
 		sleep "$interval" &
 		wait $!
 	done

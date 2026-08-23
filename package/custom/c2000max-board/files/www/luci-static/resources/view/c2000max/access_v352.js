@@ -6,6 +6,7 @@
 'require dom';
 'require ui';
 'require uci';
+'require network';
 
 const callStatus = rpc.declare({
 	object: 'c2000max',
@@ -23,9 +24,26 @@ function flag(value) {
 	return value === true || value === 1;
 }
 
+function collectMacChoices(hostHints) {
+	const hosts = hostHints ? hostHints.hosts || {} : {};
+	const choices = [];
+
+	Object.keys(hosts).forEach(function(mac) {
+		if (!/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/i.test(mac))
+			return;
+		const host = hosts[mac] || {};
+		const address = L.toArray(host.ipaddrs || host.ipv4)[0] ||
+			L.toArray(host.ip6addrs || host.ipv6)[0] || '';
+		const title = host.name || address || '当前设备';
+		choices.push([ mac.toUpperCase(), '%s（%s）'.format(title, mac.toUpperCase()) ]);
+	});
+
+	return choices.sort(function(a, b) { return a[1].localeCompare(b[1]); });
+}
+
 function renderStatus(data) {
 	let state = '已关闭';
-	if (flag(data.enabled) && flag(data.table_active) && flag(data.acceleration_suspended))
+	if (flag(data.enabled) && flag(data.rules_active))
 		state = '规则已生效';
 	else if (flag(data.enabled))
 		state = '配置已启用，但运行状态异常';
@@ -51,9 +69,8 @@ function renderStatus(data) {
 			]),
 			E('tr', {}, [
 				E('td', { 'class': 'td left' }, '网络加速'),
-				E('td', { 'class': 'td left' }, flag(data.enabled) ?
-					(flag(data.acceleration_suspended) ? '已安全暂停' : '未确认暂停') :
-					'按 TurboACC 原设置运行')
+				E('td', { 'class': 'td left' },
+					flag(data.acceleration_preserved) ? '保持 HNAT / TurboACC' : '状态未知')
 			])
 		]),
 		data.invalid_entries ? E('div', { 'class': 'alert-message warning' },
@@ -65,6 +82,7 @@ return view.extend({
 	load: function() {
 		return Promise.all([
 			uci.load('c2000max'),
+			L.resolveDefault(network.getHostHints(), { hosts: {} }),
 			L.resolveDefault(callStatus(), {})
 		]);
 	},
@@ -77,7 +95,8 @@ return view.extend({
 	},
 
 	render: function(data) {
-		const status = data[1] || {};
+		const hostChoices = collectMacChoices(data[1]);
+		const status = data[2] || {};
 		const m = new form.Map('c2000max', '设备上网控制',
 			'黑名单模式会禁止名单内设备通过路由器转发；白名单模式只允许名单内设备转发。' +
 			'规则同时覆盖 IPv4 和 IPv6，默认关闭。设备仍可访问路由器管理页，便于修正名单。');
@@ -112,6 +131,7 @@ return view.extend({
 		o.default = '1';
 		o.rmempty = false;
 		o.width = '10%';
+		o.editable = true;
 
 		o = s.option(form.Value, 'name', '设备备注');
 		o.placeholder = '例如：客厅电视';
@@ -121,14 +141,11 @@ return view.extend({
 		o.datatype = 'macaddr';
 		o.placeholder = 'AA:BB:CC:DD:EE:FF';
 		o.rmempty = false;
+		hostChoices.forEach(function(choice) { o.value(choice[0], choice[1]); });
 
 		const statusNode = E('div', { 'class': 'cbi-section' }, [
 			E('h3', {}, '实时状态'),
-			E('div', { 'id': 'c2000max-access-status' }, renderStatus(status)),
-			E('div', { 'class': 'alert-message warning' },
-				'启用黑/白名单时，系统会暂停 MediaTek HNAT 和软件流量分载，' +
-				'以防已建立连接绕过新规则。关闭后会自动恢复 TurboACC 中原来的选择。' +
-				'白名单为空时，所有 LAN 设备都不能访问外网。')
+			E('div', { 'id': 'c2000max-access-status' }, renderStatus(status))
 		]);
 
 		poll.add(this.refresh.bind(this), 5);

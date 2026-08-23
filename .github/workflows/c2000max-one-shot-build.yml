@@ -86,6 +86,8 @@ jobs:
           done
           git -C feeds/packages apply \
             "$GITHUB_WORKSPACE/scripts/c2000max/packages-go126-module-root.patch"
+          git -C feeds/packages apply \
+            "$GITHUB_WORKSPACE/scripts/c2000max/packages-daed-generated-assets.patch"
 
       - name: Generate C2000MAX configuration
         shell: bash
@@ -108,6 +110,10 @@ jobs:
       - name: Build firmware
         shell: bash
         run: |
+          # mt_hwifi contains out-of-tree modules whose package metadata can be
+          # regenerated without rebuilding the objects.  Always invalidate the
+          # entire driver family before a kernel-ABI-changing build.
+          make package/mtk/drivers/mt_hwifi/clean
           if ! make -j"$(nproc)" world; then
             make -j1 V=s world
           fi
@@ -155,7 +161,7 @@ jobs:
             c2000max-reference/reference.img \
             "c2000max-artifacts/${release_name}-sysupgrade.bin" \
             "c2000max-artifacts/${release_name}-sdcard.img" \
-            --overlay-mib 512 | tee c2000max-artifacts/sdcard-assembly.txt
+            --overlay-mib 64 | tee c2000max-artifacts/sdcard-assembly.txt
           gzip -n -9 "c2000max-artifacts/${release_name}-sdcard.img"
           gzip -t "c2000max-artifacts/${release_name}-sdcard.img.gz"
 

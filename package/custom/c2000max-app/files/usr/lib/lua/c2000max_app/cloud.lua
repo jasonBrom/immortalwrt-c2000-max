@@ -858,6 +858,28 @@ local function handle_develop(payload)
 	}, "develop"
 end
 
+local function terminal_control(payload)
+	local item = type(payload.client) == "table" and payload.client or
+		(type(payload.station) == "table" and payload.station or
+		(type(payload.terminal) == "table" and payload.terminal or
+		(type(payload.stacontrol) == "table" and payload.stacontrol or
+		(type(payload.sta_control) == "table" and payload.sta_control or payload))))
+	local mac = item.mac or item.client or item.real_mac or item.macaddr
+	if not mac then return nil end
+	local allowed
+	if item.switch_off ~= nil then
+		allowed = tonumber(item.switch_off) == 0
+	elseif item.switch ~= nil then
+		allowed = tonumber(item.switch) ~= 0
+	elseif item.online ~= nil then
+		allowed = tonumber(item.online) ~= 0
+	elseif item.deny ~= nil then
+		allowed = not (item.deny == true or tonumber(item.deny) == 1)
+	end
+	if allowed == nil then return nil end
+	return core.set_device_internet(mac, allowed)
+end
+
 function M.handle(event, payload)
 	payload = type(payload) == "table" and payload or {}
 	local result, reply_event, reply_expected = basic_result(event, payload)
@@ -865,7 +887,17 @@ function M.handle(event, payload)
 		return result, reply_event, reply_expected
 	end
 
-	if event == "client" or event == "terminal" then
+	local control_key = tostring(event or ""):lower():gsub("[^a-z0-9]", "")
+	local control_event = control_key == "stacontrol" or
+		control_key == "stationcontrol" or control_key == "clientcontrol" or
+		control_key == "terminalcontrol"
+	if control_event then
+		-- Remote access control is an authenticated command, not a periodic
+		-- terminal-tracking report.  It must remain actionable while tracking is
+		-- disabled; set_device_internet() enables and applies c2000max-access.
+		local control = terminal_control(payload)
+		return control or { code = "2", errcode = "2", message = "invalid control" }, event
+	elseif event == "client" or event == "terminal" then
 		if not core.feature_enabled("terminal_tracking_enable") then
 			return disabled("terminal tracking"), event
 		end

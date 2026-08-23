@@ -6,17 +6,37 @@ ERROR_FILE="$RUNTIME_DIR/last_error"
 status_json()
 {
 	local enabled backend effective active=0 reason error qos_state diagnostic
+	local configured_download configured_upload
 	local upload_profiles=0 download_profiles=0
 
 	enabled="$(uci -q get eqos.config.enabled)"
 	[ "$enabled" = 1 ] || enabled=0
 	backend="$(cat "$RUNTIME_DIR/backend" 2>/dev/null)"
 	effective="$(cat /var/run/c2000max-hnat-effective 2>/dev/null)"
+	configured_download="$(uci -q get eqos.config.download)"
+	configured_upload="$(uci -q get eqos.config.upload)"
 	error="$(cat "$ERROR_FILE" 2>/dev/null)"
 	upload_profiles="$(sed -n 's/^upload=//p' "$RUNTIME_DIR/profiles" 2>/dev/null)"
 	download_profiles="$(sed -n 's/^download=//p' "$RUNTIME_DIR/profiles" 2>/dev/null)"
 	case "$upload_profiles" in ''|*[!0-9]*) upload_profiles=0 ;; esac
 	case "$download_profiles" in ''|*[!0-9]*) download_profiles=0 ;; esac
+
+	# A transition from disabled or an older build may leave an hnat marker
+	# behind even though unlimited aggregate rates deliberately select the
+	# HNAT + selective-tc hybrid.  Prefer observable/configured state before
+	# diagnosing HQoS, otherwise LuCI reports a false fatal error while the
+	# expected qos_toggle mode is disabled.
+	if [ "$effective" = mediatek_hnat ]; then
+		if printf '%s\n' "$(cat /sys/kernel/debug/hnat/qos_toggle 2>/dev/null)" |
+			grep -Fq 'mode=disabled' &&
+		   tc qdisc show dev br-lan 2>/dev/null | grep -q 'qdisc htb 1:' &&
+		   tc qdisc show dev br-lan 2>/dev/null | grep -q 'qdisc ingress ffff:'; then
+			backend=hybrid
+		elif [ "$backend" = hnat ] &&
+		     { [ "$configured_download" = -1 ] || [ "$configured_upload" = -1 ]; }; then
+			backend=hybrid
+		fi
+	fi
 
 	if [ "$enabled" = 1 ]; then
 		case "$backend" in

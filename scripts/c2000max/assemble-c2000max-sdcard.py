@@ -355,8 +355,8 @@ def main() -> None:
     parser.add_argument(
         "--overlay-mib",
         type=int,
-        default=512,
-        help="writable rootfs_data space to reserve (default: 512 MiB)",
+        default=64,
+        help="initial rootfs_data space before first-boot expansion (default: 64 MiB)",
     )
     arguments = parser.parse_args()
     assemble(arguments.reference, arguments.sysupgrade, arguments.output, arguments.overlay_mib)

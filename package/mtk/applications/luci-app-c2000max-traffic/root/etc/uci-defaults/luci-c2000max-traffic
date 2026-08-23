@@ -17,30 +17,35 @@ fi
 [ "$(uci -q get c2000max_traffic.audit)" = audit ] || {
 	uci -q set c2000max_traffic.audit='audit'
 	uci -q set c2000max_traffic.audit.enabled='0'
-	uci -q set c2000max_traffic.audit.recognition_mode='balanced'
+	uci -q set c2000max_traffic.audit.recognition_mode='seamless'
 	uci -q set c2000max_traffic.audit.control_mode='seamless'
 	uci -q set c2000max_traffic.audit.retention_days='30'
 }
 [ -n "$(uci -q get c2000max_traffic.audit.recognition_mode)" ] || \
-	uci -q set c2000max_traffic.audit.recognition_mode='balanced'
+	uci -q set c2000max_traffic.audit.recognition_mode='seamless'
 [ -n "$(uci -q get c2000max_traffic.audit.control_mode)" ] || \
 	uci -q set c2000max_traffic.audit.control_mode='seamless'
 [ -n "$(uci -q get c2000max_traffic.config.storage_limit_mb)" ] || \
 	uci -q set c2000max_traffic.config.storage_limit_mb='100'
 
-# The original default was seamless, which allows PPE/HNAT to bind before an
-# application payload naturally reaches OAF.  That is unsuitable for the
-# packet-sequence and multi-header predicates in a native IK profile and was
-# the main reason a valid rule could remain completely unobserved.  Migrate
-# the old default once; users who explicitly need zero slow-path packets can
-# still choose seamless afterwards.  Balanced only holds each unknown flow
-# for at most eight application-payload packets, then hardware acceleration
-# resumes normally.
-if [ "$(uci -q get c2000max_traffic.audit.accuracy_default_v42)" != 1 ]; then
-	[ "$(uci -q get c2000max_traffic.audit.recognition_mode)" != seamless ] || \
-		uci -q set c2000max_traffic.audit.recognition_mode='balanced'
-	uci -q set c2000max_traffic.audit.accuracy_default_v42='1'
+# Older images shipped appfilter.record_enable=1 even when audit was disabled.
+# The module normally was not loaded, but a preserved runtime could therefore
+# keep recording after upgrade.  Make the off state explicit once without
+# changing an actively enabled audit configuration.
+if [ "$(uci -q get c2000max_traffic.audit.off_state_v43)" != 1 ]; then
+	if [ "$(uci -q get c2000max_traffic.audit.enabled)" != 1 ]; then
+		uci -q set appfilter.global.record_enable='0'
+		uci -q commit appfilter
+	fi
+	uci -q set c2000max_traffic.audit.off_state_v43='1'
 fi
+
+# R20.7 temporarily migrated fresh seamless installations to balanced mode.
+# The UI now makes the acceleration trade-off explicit and again defaults to
+# seamless.  Preserve every existing user choice; this marker only prevents an
+# older package from re-running its one-way default migration after downgrade.
+[ "$(uci -q get c2000max_traffic.audit.accuracy_default_v42)" = 1 ] || \
+	uci -q set c2000max_traffic.audit.accuracy_default_v42='1'
 
 # Adopt the currently installed feature database as the first immutable
 # profile. Existing numeric APPIDs must be bound to that profile before a

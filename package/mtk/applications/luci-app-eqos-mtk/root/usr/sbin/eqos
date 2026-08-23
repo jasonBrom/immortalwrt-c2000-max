@@ -21,6 +21,7 @@ FLOW_BYPASS_MARK="0x00800000"
 QDMA_QUEUE_COUNT=64
 QDMA_RATE_MAX=1000000
 TOTAL_RATE_MAX=1000
+TC_TOTAL_RATE_MAX=100000
 UP_SCH=2
 DL_SCH=3
 UP_QID_BASE=1
@@ -322,8 +323,8 @@ ensure_tc_qos() {
 	is_uinteger "$up" || die "upload rate must be an integer"
 	[ "$dl" -gt 0 ] || die "download rate must be greater than 0"
 	[ "$up" -gt 0 ] || die "upload rate must be greater than 0"
-	[ "$dl" -le "$TOTAL_RATE_MAX" ] && [ "$up" -le "$TOTAL_RATE_MAX" ] ||
-		die "total rate must not exceed $TOTAL_RATE_MAX Mbit/s"
+	[ "$dl" -le "$TC_TOTAL_RATE_MAX" ] && [ "$up" -le "$TC_TOTAL_RATE_MAX" ] ||
+		die "tc total rate must not exceed $TC_TOTAL_RATE_MAX Mbit/s"
 
 	if tc qdisc show dev "$dev" 2>/dev/null | grep -q "qdisc htb 1:" &&
 	   tc qdisc show dev "$dev" 2>/dev/null | grep -q "qdisc ingress ffff:"; then
@@ -919,8 +920,13 @@ start_all() {
 	is_uinteger "$up" || die "upload rate must be an integer"
 	[ "$dl" -gt 0 ] || die "download rate must be greater than 0"
 	[ "$up" -gt 0 ] || die "upload rate must be greater than 0"
-	[ "$dl" -le "$TOTAL_RATE_MAX" ] && [ "$up" -le "$TOTAL_RATE_MAX" ] ||
-		die "total rate must not exceed $TOTAL_RATE_MAX Mbit/s"
+	if [ "$backend" = hnat ]; then
+		[ "$dl" -le "$TOTAL_RATE_MAX" ] && [ "$up" -le "$TOTAL_RATE_MAX" ] ||
+			die "HNAT total rate must not exceed $TOTAL_RATE_MAX Mbit/s"
+	else
+		[ "$dl" -le "$TC_TOTAL_RATE_MAX" ] && [ "$up" -le "$TC_TOTAL_RATE_MAX" ] ||
+			die "tc total rate must not exceed $TC_TOTAL_RATE_MAX Mbit/s"
+	fi
 
 	stop_qos "$dev"
 	nft_stop

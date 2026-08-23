@@ -66,13 +66,20 @@ c2000_desired_hnat_settings()
 	esac
 	[ "$bind_rate" -ge 1 ] 2>/dev/null &&
 		[ "$bind_rate" -le 30 ] 2>/dev/null || bind_rate=30
-	update_nfct="$(uci -q get turboacc.config.fastpath_mh_update_nfct)"
-	[ "$update_nfct" = 1 ] || update_nfct=0
-	# The traffic collector consumes hardware MIB deltas through conntrack.
-	# Keep this driver bridge enabled whenever statistics are enabled, even if
-	# an older saved TurboACC configuration had disabled the optional counter.
+	# Type 7 copies every hardware MIB delta into conntrack.  It is required by
+	# the traffic collector, but keeping it enabled while statistics are off
+	# adds per-flow CPU work without producing any user-visible samples.  Make
+	# the board-integrated collector the sole owner of this switch.  Only fall
+	# back to TurboACC's legacy preference when the traffic package is absent.
 	statistics_enabled="$(uci -q get c2000max_traffic.config.enabled)"
-	[ "$statistics_enabled" = 0 ] || update_nfct=1
+	case "$statistics_enabled" in
+		1) update_nfct=1 ;;
+		0) update_nfct=0 ;;
+		*)
+			update_nfct="$(uci -q get turboacc.config.fastpath_mh_update_nfct)"
+			[ "$update_nfct" = 1 ] || update_nfct=0
+			;;
+	esac
 	printf 'bind_rate=%s update_nfct=%s\n' "$bind_rate" "$update_nfct"
 }
 
@@ -330,11 +337,12 @@ hnat_signal_abort()
 
 apply_mode_locked()
 {
-	local requested fastpath role access_enabled sw_changed=0
+	local requested fastpath role sw_changed=0
 
 	# All callers own HNAT here. Settle the last hardware MIB delta directly
 	# into conntrack without taking the collector lock; a concurrent sampler can
 	# safely consume it after this acceleration transaction completes.
+	[ "$(uci -q get c2000max_traffic.config.enabled)" != 1 ] ||
 	[ ! -x /usr/sbin/c2000max-traffic ] ||
 		C2000MAX_ACCEL_LOCKS_HELD=1 \
 		/usr/sbin/c2000max-traffic mib-sync >/dev/null 2>&1 || true
@@ -354,16 +362,6 @@ apply_mode_locked()
 			;;
 	esac
 	fastpath="$(c2000_effective_fastpath "$role" "$requested")"
-
-	# Device access control is enforced in nftables before fw4's forward hook.
-	# MediaTek PPE and generic flowtables can retain or bypass established
-	# flows, so suspend both while the policy is enabled. The user's TurboACC
-	# selection remains untouched and is restored when access control is off.
-	access_enabled="$(uci -q get c2000max.access_control.enabled)"
-	if [ "$access_enabled" = 1 ]; then
-		converge_non_hnat disabled
-		return $?
-	fi
 
 	case "$fastpath" in
 		disabled|flow_offloading)

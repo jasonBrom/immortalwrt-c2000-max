@@ -86,7 +86,7 @@ jobs:
             reference/reference.img \
             "release-files/${RELEASE_NAME}-sysupgrade.bin" \
             "release-files/${RELEASE_NAME}-sdcard.img" \
-            --overlay-mib 512 | tee release-files/sdcard-assembly.txt
+            --overlay-mib 64 | tee release-files/sdcard-assembly.txt
           gzip -n -9 "release-files/${RELEASE_NAME}-sdcard.img"
           gzip -t "release-files/${RELEASE_NAME}-sdcard.img.gz"
           tar -tf "release-files/${RELEASE_NAME}-sysupgrade.bin" >/dev/null

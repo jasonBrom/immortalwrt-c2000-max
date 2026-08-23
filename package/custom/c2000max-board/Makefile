@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=c2000max-board
 PKG_VERSION:=2.36.01
-PKG_RELEASE:=5
+PKG_RELEASE:=11
 PKG_LICENSE:=GPL-2.0-or-later
 
 include $(INCLUDE_DIR)/package.mk
@@ -16,7 +16,7 @@ define Package/c2000max-board
 	+kmod-dummy +kmod-mediatek_hnat +mtkhnat_util +hnat-detect \
 	+luci-app-turboacc-mtk +luci-app-eqos-mtk +luci-app-c2000max-traffic \
 	+mwan3 +coreutils-timeout \
-	+flock +uboot-envtools +zram-swap +gawk +grep +sed +coreutils-sort \
+	+flock +uboot-envtools +zram-swap +gawk +grep +sed +coreutils-sort +sfdisk \
 	+luci-app-netbird +netbird
 endef
 
@@ -33,7 +33,7 @@ define Build/Compile
 endef
 
 define Package/c2000max-board/install
-	$(INSTALL_DIR) $(1)/etc/config $(1)/etc/init.d $(1)/etc/uci-defaults $(1)/etc/rc.d
+	$(INSTALL_DIR) $(1)/etc/config $(1)/etc/init.d $(1)/etc/uci-defaults $(1)/etc/rc.d $(1)/lib/preinit
 	$(INSTALL_DATA) ./files/etc/c2000max-build $(1)/etc/c2000max-build
 	$(INSTALL_CONF) ./files/etc/config/c2000max $(1)/etc/config/c2000max
 	$(INSTALL_BIN) ./files/etc/init.d/c2000max-sim $(1)/etc/init.d/c2000max-sim
@@ -49,6 +49,7 @@ define Package/c2000max-board/install
 	$(INSTALL_BIN) ./files/etc/uci-defaults/99-c2000max-defaults $(1)/etc/uci-defaults/99-c2000max-defaults
 	$(INSTALL_BIN) ./files/etc/uci-defaults/99-y-c2000max-v3601-services $(1)/etc/uci-defaults/99-y-c2000max-v3601-services
 	$(INSTALL_BIN) ./files/etc/uci-defaults/99-z-c2000max-feed-fix $(1)/etc/uci-defaults/99-z-c2000max-feed-fix
+	$(INSTALL_BIN) ./files/lib/preinit/79_c2000max_grow_tf $(1)/lib/preinit/79_c2000max_grow_tf
 	ln -sf ../init.d/c2000max-hnat $(1)/etc/rc.d/S91c2000max-hnat
 	ln -sf ../init.d/eqos $(1)/etc/rc.d/S99eqos
 	$(INSTALL_DIR) $(1)/usr/sbin
