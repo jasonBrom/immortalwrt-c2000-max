@@ -3,6 +3,8 @@
 START=91
 STOP=89
 USE_PROCD=1
+EXTRA_COMMANDS="quiesce"
+EXTRA_HELP="\tquiesce\tFlush PPE flows and temporarily keep HNAT off for daed startup"
 
 HNAT_LOCK="${C2000_HNAT_LOCK:-/var/lock/c2000max-hnat.lock}"
 ROLE_LOCK="${C2000_ROLE_LOCK:-/var/lock/c2000max-port-role.lock}"
@@ -521,6 +523,61 @@ apply_mode()
 	return "$rc"
 }
 
+quiesce_mode_locked()
+{
+	# daed must see the first packets of every connection before a direct flow
+	# may be learned by PPE.  Turning the hook off is also the driver's atomic
+	# flush barrier for all existing BIND entries.
+	disable_hnat_hook || {
+		set_effective_state unknown
+		return 1
+	}
+	set_whnat_state inactive
+	set_effective_state daed_quiesced
+	return 0
+}
+
+quiesce_mode()
+{
+	local rc role_held=0
+
+	if [ "${C2000MAX_ACCEL_LOCKS_HELD:-0}" = 1 ]; then
+		quiesce_mode_locked
+		return $?
+	fi
+	trap hnat_signal_abort HUP INT TERM
+	if [ "${C2000MAX_PORT_SWITCH:-0}" != 1 ]; then
+		flock -x 4 || {
+			trap - HUP INT TERM
+			return 1
+		}
+		role_held=1
+		HNAT_ROLE_HELD=1
+	fi
+	if ! flock -x 5; then
+		[ "$role_held" = 0 ] || flock -u 4
+		HNAT_ROLE_HELD=0
+		trap - HUP INT TERM
+		return 1
+	fi
+	HNAT_LOCK_HELD=1
+	quiesce_mode_locked
+	rc=$?
+	flock -u 5
+	HNAT_LOCK_HELD=0
+	if [ "$role_held" = 1 ]; then
+		flock -u 4
+		HNAT_ROLE_HELD=0
+	fi
+	trap - HUP INT TERM
+	return "$rc"
+}
+
+quiesce()
+{
+	quiesce_mode
+}
+
 start_service()
 {
 	apply_mode || return $?
@@ -528,6 +585,7 @@ start_service()
 	# limiter backend after the effective fast path is published. Port-role
 	# transactions already reconcile EQoS while holding their ordered locks.
 	if [ "${C2000MAX_ACCEL_LOCKS_HELD:-0}" != 1 ] &&
+	   [ "${C2000MAX_DAED_HYBRID:-0}" != 1 ] &&
 	   [ -d /sys/class/net/br-lan ] && [ -x /etc/init.d/eqos ]; then
 		/etc/init.d/eqos reload
 	fi

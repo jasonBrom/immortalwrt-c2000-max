@@ -84,7 +84,7 @@ run_mwctl()
 
 	if [[ "${2-}" == show && "${3-}" == lpinfo ]]; then
 		printf 'L1ss: %s\n' "$RUNTIME_PCI"
-		printf 'Profile LPOption: (2:1)\n'
+		printf 'Profile LPOption: (%s:%s)\n' "$RUNTIME_LP_SELECT" "$RUNTIME_LP_VALUE"
 		printf 'Last LPOption: (%s,%s,0,0)\n' "$RUNTIME_LP_SELECT" "$RUNTIME_LP_VALUE"
 		return 0
 	fi
@@ -99,6 +99,7 @@ grep -qx 'LpOption=2:0' "$PROFILE" || fail 'low-power features were not disabled
 [[ " ${MWCTL_CALLS[*]} " == *' ra0 set PciL1ss=0 '* ]] || fail 'runtime L1SS command missing'
 [[ " ${MWCTL_CALLS[*]} " == *' ra0 set LpOption=2:0 '* ]] || fail 'runtime LP command missing'
 grep -Fq '"$MWCTL_BIN" dev "$@"' "$SCRIPT" || fail 'mwctl scripting form does not identify the netdev explicitly'
+grep -Fq 'Last LPOption:' "$SCRIPT" || fail 'runtime verification does not read back the applied LP state'
 
 set_mode 0
 [[ "$MODE" == 0 ]] || fail 'normal mode was not restored'

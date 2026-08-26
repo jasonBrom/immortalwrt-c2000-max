@@ -1,5 +1,5 @@
 REQUIRE_IMAGE_METADATA=1
-RAMFS_COPY_BIN='fitblk fit_check_sign'
+RAMFS_COPY_BIN='fitblk fit_check_sign sha256sum'
 
 asus_initial_setup()
 {
@@ -43,6 +43,204 @@ jiorouter_initial_setup()
 	fw_setenv bootcmd 'ubi read 46000000 kernel;fdt addr $(fdtcontroladdr);fdt rm /signature;bootm 0x46000000'
 	fw_setenv bootdelay 0
 	fw_setenv ipaddr ''
+}
+
+# C2000MAX uses fixed GPT kernel/rootfs partitions on eMMC.  The generic
+# emmc helper treats a missing partition or an empty tar stream as success and
+# the stage2 upgrade process then reboots into the untouched old system.  Keep
+# this board-specific path deliberately strict: resolve and validate both GPT
+# labels, bound every write by the partition size, and verify the padded image
+# hash from eMMC before the reboot is allowed to continue.
+c2000max_find_emmc_part()
+{
+	local label="$1" candidate partname
+
+	candidate="$(find_mmc_part "$label" "$CI_ROOTDEV")"
+	[ -n "$candidate" ] && {
+		printf '%s\n' "$candidate"
+		return 0
+	}
+
+	# CI_ROOTDEV is not guaranteed to survive every sysupgrade ramfs handoff.
+	# Fall back to the GPT PARTNAME exposed by the kernel, never to a guessed
+	# partition number.
+	for candidate in /sys/class/block/mmcblk*p*; do
+		[ -r "$candidate/uevent" ] || continue
+		partname="$(sed -n 's/^PARTNAME=//p' "$candidate/uevent")"
+		[ "$partname" = "$label" ] || continue
+		printf '/dev/%s\n' "${candidate##*/}"
+		return 0
+	done
+
+	return 1
+}
+
+c2000max_validate_emmc_part()
+{
+	local dev="$1" label="$2" node
+
+	case "$dev" in
+	/dev/mmcblk*p*) ;;
+	*) return 1 ;;
+	esac
+	[ -b "$dev" ] || return 1
+	node="${dev##*/}"
+	[ -r "/sys/class/block/$node/uevent" ] || return 1
+	grep -qx "PARTNAME=$label" "/sys/class/block/$node/uevent"
+}
+
+c2000max_emmc_sectors()
+{
+	local node="${1##*/}"
+	cat "/sys/class/block/$node/size" 2>/dev/null
+}
+
+c2000max_tar_member_bytes()
+{
+	tar x${C2000MAX_UPGRADE_GZ}f "$1" "$2" -O | wc -c | awk '{print $1}'
+}
+
+c2000max_tar_member_padded_hash()
+{
+	local tar_file="$1" member="$2" bytes="$3" blocks="$4" padding
+	padding=$((blocks * 512 - bytes))
+	(
+		tar x${C2000MAX_UPGRADE_GZ}f "$tar_file" "$member" -O
+		[ "$padding" -eq 0 ] ||
+			dd if=/dev/zero bs=1 count="$padding" 2>/dev/null
+	) | sha256sum | awk '{print $1}'
+}
+
+c2000max_emmc_padded_hash()
+{
+	local dev="$1" blocks="$2" large tail
+	large=$((blocks / 128))
+	tail=$((blocks % 128))
+	(
+		[ "$large" -eq 0 ] ||
+			dd if="$dev" bs=65536 count="$large" 2>/dev/null
+		[ "$tail" -eq 0 ] ||
+			dd if="$dev" bs=512 skip=$((large * 128)) count="$tail" 2>/dev/null
+	) |
+		sha256sum | awk '{print $1}'
+}
+
+c2000max_emmc_write_member()
+{
+	local tar_file="$1" member="$2" dev="$3" bytes="$4" blocks="$5"
+	local expected actual
+
+	expected="$(c2000max_tar_member_padded_hash \
+		"$tar_file" "$member" "$bytes" "$blocks")"
+	[ "${#expected}" -eq 64 ] || return 1
+
+	tar x${C2000MAX_UPGRADE_GZ}f "$tar_file" "$member" -O |
+		dd of="$dev" bs=65536 conv=notrunc || return 1
+	sync
+
+	actual="$(c2000max_emmc_padded_hash "$dev" "$blocks")"
+	[ "$actual" = "$expected" ]
+}
+
+c2000max_emmc_upgrade_tar()
+{
+	local tar_file="$1" board_dir kernel_member root_member
+	local kernel_bytes root_bytes kernel_blocks root_blocks root_aligned
+	local kernel_sectors root_sectors root_wipe_blocks
+
+	C2000MAX_UPGRADE_GZ=
+	[ "$(identify_magic_long "$(get_magic_long "$tar_file" cat)")" = gzip ] &&
+		C2000MAX_UPGRADE_GZ=z
+	board_dir="$(tar t${C2000MAX_UPGRADE_GZ}f "$tar_file" |
+		sed -n '/^sysupgrade-[^/]*\/$/{s#/$##;p;q;}')"
+	[ -n "$board_dir" ] || {
+		echo 'C2000MAX upgrade: sysupgrade directory is missing.' >&2
+		return 1
+	}
+
+	kernel_member="$board_dir/kernel"
+	root_member="$board_dir/root"
+	tar t${C2000MAX_UPGRADE_GZ}f "$tar_file" "$kernel_member" >/dev/null 2>&1 &&
+		tar t${C2000MAX_UPGRADE_GZ}f "$tar_file" "$root_member" >/dev/null 2>&1 || {
+		echo 'C2000MAX upgrade: kernel or root image is missing.' >&2
+		return 1
+	}
+
+	EMMC_KERN_DEV="$(c2000max_find_emmc_part kernel)" || return 1
+	EMMC_ROOT_DEV="$(c2000max_find_emmc_part rootfs)" || return 1
+	export EMMC_KERN_DEV EMMC_ROOT_DEV
+	c2000max_validate_emmc_part "$EMMC_KERN_DEV" kernel &&
+		c2000max_validate_emmc_part "$EMMC_ROOT_DEV" rootfs &&
+		[ "$EMMC_KERN_DEV" != "$EMMC_ROOT_DEV" ] || {
+		echo 'C2000MAX upgrade: GPT kernel/rootfs targets are invalid.' >&2
+		return 1
+	}
+
+	kernel_bytes="$(c2000max_tar_member_bytes "$tar_file" "$kernel_member")"
+	root_bytes="$(c2000max_tar_member_bytes "$tar_file" "$root_member")"
+	case "$kernel_bytes:$root_bytes" in
+	*[!0-9:]*|0:*|*:0|'')
+		echo 'C2000MAX upgrade: image size validation failed.' >&2
+		return 1
+		;;
+	esac
+	kernel_blocks=$(((kernel_bytes + 511) / 512))
+	root_blocks=$(((root_bytes + 511) / 512))
+	root_aligned=$(((root_blocks + 127) & ~127))
+	kernel_sectors="$(c2000max_emmc_sectors "$EMMC_KERN_DEV")"
+	root_sectors="$(c2000max_emmc_sectors "$EMMC_ROOT_DEV")"
+	case "$kernel_sectors:$root_sectors" in
+	*[!0-9:]*|0:*|*:0|'') return 1 ;;
+	esac
+	[ "$kernel_blocks" -le "$kernel_sectors" ] &&
+		[ "$root_aligned" -lt "$root_sectors" ] || {
+		echo 'C2000MAX upgrade: image exceeds its GPT partition.' >&2
+		return 1
+	}
+
+	echo "Writing C2000MAX rootfs to $EMMC_ROOT_DEV ..."
+	c2000max_emmc_write_member "$tar_file" "$root_member" \
+		"$EMMC_ROOT_DEV" "$root_bytes" "$root_blocks" || {
+		echo 'C2000MAX upgrade: rootfs readback verification failed.' >&2
+		return 1
+	}
+	export EMMC_ROOTFS_BLOCKS="$root_aligned"
+
+	# Invalidate the old kernel only after the new rootfs has passed readback.
+	dd if=/dev/zero of="$EMMC_KERN_DEV" bs=512 count=8 conv=notrunc || return 1
+	sync
+	echo "Writing C2000MAX kernel to $EMMC_KERN_DEV ..."
+	c2000max_emmc_write_member "$tar_file" "$kernel_member" \
+		"$EMMC_KERN_DEV" "$kernel_bytes" "$kernel_blocks" || {
+		echo 'C2000MAX upgrade: kernel readback verification failed.' >&2
+		return 1
+	}
+	export EMMC_KERNEL_BLOCKS="$kernel_blocks"
+
+	# With -n, destroy a full MiB at the aligned overlay start.  This clears
+	# both F2FS superblock copies, so stale settings cannot reappear even when
+	# the new squashfs happens to have the same length as the old one.
+	if [ -z "$UPGRADE_BACKUP" ]; then
+		root_wipe_blocks=$((root_sectors - root_aligned))
+		[ "$root_wipe_blocks" -gt 2048 ] && root_wipe_blocks=2048
+		[ "$root_wipe_blocks" -ge 8 ] || return 1
+		dd if=/dev/zero of="$EMMC_ROOT_DEV" bs=512 \
+			seek="$root_aligned" count="$root_wipe_blocks" conv=notrunc || return 1
+		sync
+	fi
+
+	return 0
+}
+
+c2000max_emmc_do_upgrade()
+{
+	local file_type
+	file_type="$(identify_magic_long "$(get_magic_long "$1")")"
+	[ "$file_type" != fit ] || {
+		echo 'C2000MAX upgrade: a sysupgrade tar image is required.' >&2
+		return 1
+	}
+	c2000max_emmc_upgrade_tar "$1"
 }
 
 xiaomi_initial_setup()
@@ -175,7 +373,6 @@ platform_do_upgrade() {
 	glinet,gl-xe3000|\
 	huasifei,wh3000-emmc|\
 	huasifei,wh3000-pro-emmc|\
-	nradio,c2000-max|\
 	sl,3000-emmc|\
 	smartrg,sdg-8612|\
 	smartrg,sdg-8614|\
@@ -187,6 +384,14 @@ platform_do_upgrade() {
 		CI_KERNPART="kernel"
 		CI_ROOTPART="rootfs"
 		emmc_do_upgrade "$1"
+		;;
+	nradio,c2000-max)
+		CI_KERNPART="kernel"
+		CI_ROOTPART="rootfs"
+		c2000max_emmc_do_upgrade "$1" || {
+			echo 'C2000MAX system upgrade stopped; the device will not reboot.' >&2
+			exit 1
+		}
 		;;
 	asus,rt-ax52|\
 	asus,rt-ax57m|\

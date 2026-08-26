@@ -1,0 +1,141 @@
+#!/bin/sh
+
+# Coordinate daed's TC-BPF classifier with MediaTek PPE.  Existing PPE BIND
+# entries must be flushed before daed attaches, otherwise those connections
+# can bypass a newly enabled proxy policy.  Once the BPF topology is stable,
+# the configured accelerator is restored: direct flows may then enter HNAT,
+# while redirected/proxied flows continue through dae0 and userspace.
+
+HNAT_INIT="${C2000MAX_DAED_HNAT_INIT:-/etc/init.d/c2000max-hnat}"
+HNAT_HOOK="${C2000MAX_DAED_HNAT_HOOK:-/sys/kernel/debug/hnat/hook_toggle}"
+STATE_FILE="${C2000MAX_DAED_HYBRID_STATE:-/var/run/c2000max-daed-hybrid}"
+EFFECTIVE_STATE="${C2000MAX_HNAT_EFFECTIVE:-/var/run/c2000max-hnat-effective}"
+SYS_CLASS_NET="${C2000MAX_DAED_SYS_CLASS_NET:-/sys/class/net}"
+TC_BIN="${C2000MAX_DAED_TC:-/sbin/tc}"
+PIDOF_BIN="${C2000MAX_DAED_PIDOF:-pidof}"
+WATCH_LOOPS="${C2000MAX_DAED_WATCH_LOOPS:-100}"
+WATCH_INTERVAL="${C2000MAX_DAED_WATCH_INTERVAL:-0.2}"
+
+set_state()
+{
+	local tmp="${STATE_FILE}.$$"
+	printf '%s\n' "$1" > "$tmp" && mv "$tmp" "$STATE_FILE"
+}
+
+daed_running()
+{
+	"$PIDOF_BIN" daed >/dev/null 2>&1
+}
+
+bpf_filter_count()
+{
+	local path ifname output count=0 matches
+
+	for path in "$SYS_CLASS_NET"/*; do
+		[ -e "$path" ] || continue
+		ifname="${path##*/}"
+		output="$("$TC_BIN" filter show dev "$ifname" ingress 2>/dev/null || true)"
+		matches="$(printf '%s\n' "$output" |
+			grep -Eic '(^|[[:space:]])bpf([[:space:]]|$)|daed|dae[-_]?wing')"
+		count=$((count + matches))
+	done
+	printf '%s\n' "$count"
+}
+
+prepare_hybrid()
+{
+	[ -x "$HNAT_INIT" ] || {
+		set_state unavailable
+		return 0
+	}
+	# A user may deliberately run without the MediaTek HNAT module.  In that
+	# case daed has nothing to synchronize with and must still be allowed to
+	# start normally.
+	[ -e "$HNAT_HOOK" ] || {
+		set_state unavailable
+		return 0
+	}
+	"$HNAT_INIT" quiesce || {
+		logger -t c2000max-daed-hybrid '无法清空 PPE 流表，拒绝在可能绕过策略的状态下启动 daed'
+		return 1
+	}
+	set_state preparing
+}
+
+restore_acceleration()
+{
+	rm -f "$STATE_FILE"
+	[ -x "$HNAT_INIT" ] || return 0
+	[ -e "$HNAT_HOOK" ] || return 0
+	"$HNAT_INIT" reload
+}
+
+watch_and_restore()
+{
+	local i=0 seen_daed=0 count=0 previous=-1 stable=0
+
+	while [ "$i" -lt "$WATCH_LOOPS" ]; do
+		if daed_running; then
+			seen_daed=1
+		elif [ "$seen_daed" = 1 ]; then
+			logger -t c2000max-daed-hybrid 'daed 在 BPF 就绪前退出，恢复原加速设置'
+			restore_acceleration >/dev/null 2>&1 || true
+			return 1
+		fi
+
+		if [ "$seen_daed" = 1 ] && [ -d "$SYS_CLASS_NET/dae0" ]; then
+			count="$(bpf_filter_count)"
+			case "$count" in ''|*[!0-9]*) count=0 ;; esac
+			if [ "$count" -gt 0 ] && [ "$count" = "$previous" ]; then
+				stable=$((stable + 1))
+			else
+				stable=0
+			fi
+			previous="$count"
+			if [ "$stable" -ge 2 ]; then
+				if C2000MAX_DAED_HYBRID=1 "$HNAT_INIT" reload; then
+					set_state "active bpf_filters=$count effective=$(cat "$EFFECTIVE_STATE" 2>/dev/null)"
+					logger -t c2000max-daed-hybrid \
+						"daed BPF 已就绪，直连流量恢复配置的硬件/软件加速（filters=$count）"
+					return 0
+				fi
+				set_state reload_failed
+				logger -t c2000max-daed-hybrid '加速恢复失败，PPE 保持关闭以避免绕过 daed'
+				return 1
+			fi
+		fi
+
+		sleep "$WATCH_INTERVAL"
+		i=$((i + 1))
+	done
+
+	set_state timeout
+	logger -t c2000max-daed-hybrid '等待 daed BPF 拓扑超时，PPE 保持关闭'
+	return 1
+}
+
+run_daed()
+{
+	shift
+	[ "$#" -gt 0 ] || return 2
+	prepare_hybrid || return 1
+	if [ "$(cat "$STATE_FILE" 2>/dev/null)" != unavailable ]; then
+		"$0" watch >/dev/null 2>&1 &
+	fi
+	exec "$@"
+}
+
+case "${1:-}" in
+	prepare) prepare_hybrid ;;
+	watch) watch_and_restore ;;
+	restore) restore_acceleration ;;
+	run) run_daed "$@" ;;
+	status)
+		printf 'state=%s\n' "$(cat "$STATE_FILE" 2>/dev/null || echo inactive)"
+		printf 'hnat=%s\n' "$(cat "$EFFECTIVE_STATE" 2>/dev/null || echo unknown)"
+		;;
+	*)
+		echo "Usage: $0 {prepare|watch|restore|run|status} [daed command...]" >&2
+		exit 2
+		;;
+esac

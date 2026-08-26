@@ -54,8 +54,25 @@ run_mwctl()
 
 runtime_info()
 {
-	local ifname="$1"
-	run_mwctl "$ifname" show lpinfo 2>/dev/null
+	local ifname="$1" info
+
+	# Some mt_wifi7 builds return lpinfo on stdout, while the C2000MAX driver
+	# emits it exclusively through printk.  Support both forms; otherwise the
+	# UI reports a failed switch even though the private command took effect.
+	info="$(run_mwctl "$ifname" show lpinfo 2>/dev/null || true)"
+	if [ -n "$info" ]; then
+		printf '%s\n' "$info"
+		return 0
+	fi
+	dmesg 2>/dev/null | tail -n 120 | awk '
+		/L1ss:[[:space:]]*[01]([[:space:]]|$)/ { l1ss = $0 }
+		/Profile LPOption:/ { profile = $0 }
+		/Last LPOption:/ { last = $0 }
+		END {
+			if (l1ss != "") print l1ss
+			if (profile != "") print profile
+			if (last != "") print last
+		}'
 }
 
 runtime_matches()

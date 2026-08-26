@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=c2000max-board
 PKG_VERSION:=2.36.10
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 PKG_LICENSE:=GPL-2.0-or-later
 
 include $(INCLUDE_DIR)/package.mk
@@ -69,6 +69,7 @@ define Package/c2000max-board/install
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-swap $(1)/usr/sbin/c2000max-swap
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-adblock-compat $(1)/usr/sbin/c2000max-adblock-compat
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-daed-cleanup $(1)/usr/sbin/c2000max-daed-cleanup
+	$(INSTALL_BIN) ./files/usr/sbin/c2000max-daed-hybrid $(1)/usr/sbin/c2000max-daed-hybrid
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-boot-official-once $(1)/usr/sbin/c2000max-boot-official-once
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-factory $(1)/usr/sbin/c2000max-factory
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-mlo-interlock $(1)/usr/sbin/c2000max-mlo-interlock

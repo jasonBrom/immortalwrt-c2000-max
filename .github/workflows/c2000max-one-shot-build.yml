@@ -57,6 +57,9 @@ jobs:
           bash scripts/c2000max/verify-c2000max-firmware.sh
           package/mtk/applications/luci-app-c2000max-traffic/tests/test_traffic.sh
           bash package/custom/c2000max-board/tests/test_sim_switch.sh
+          bash package/custom/c2000max-board/tests/test_sysupgrade_emmc.sh
+          bash package/custom/c2000max-board/tests/test_wifi_performance.sh
+          bash package/custom/c2000max-board/tests/test_daed_hybrid.sh
           node --check package/mtk/applications/luci-app-eqos-mtk/htdocs/luci-static/resources/view/eqos.js
           node --check package/mtk/applications/luci-app-c2000max-traffic/htdocs/luci-static/resources/view/c2000max/traffic.js
 
