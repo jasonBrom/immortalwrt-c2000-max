@@ -22,14 +22,20 @@ sed -n '/partition@40000/,/};/p' "$DTS" | grep -Fq 'reg = <0x040000 0x010000>' |
 	fail 'dedicated 64 KiB SPI-NOR U-Boot environment partition is missing'
 grep -Fq "ENV_LABEL='u-boot-env'" "$HELPER" &&
 grep -Fq 'fw_printenv -c "$ENV_CONFIG"' "$HELPER" &&
-grep -Fq 'fw_setenv -c "$ENV_CONFIG" -s "$batch"' "$HELPER" ||
+grep -Fq 'fw_setenv -c "$ENV_CONFIG" -s "$ENV_BATCH"' "$HELPER" ||
 	fail 'helper does not use an isolated verified fw_env configuration'
 if grep -Fq '/etc/fw_env.config' "$HELPER"; then
 	fail 'helper can overwrite the SD-card SIM environment'
 fi
-grep -Fq 'setenv bootcmd ${c2000max_bootcmd_saved}' "$HELPER" &&
-grep -Fq 'saveenv; mtkboardboot' "$HELPER" ||
-	fail 'one-shot command does not restore TF-card boot before factory boot'
+if grep -Eq 'env_get bootcmd|setenv bootcmd|c2000max_bootcmd_saved' "$HELPER"; then
+	fail 'helper still relies on bootcmd, which the vendor mtkautoboot path ignores'
+fi
+grep -Fq "MENU_VAR='bootmenu_0'" "$HELPER" &&
+grep -Fq "SOURCE_VAR='boot_from_sd'" "$HELPER" &&
+grep -Fq 'setenv boot_from_sd 1; setenv bootmenu_0; saveenv; setenv boot_from_sd 0; mtkboardboot' "$HELPER" ||
+	fail 'one-shot menu does not persist TF boot before its RAM-only factory boot'
+grep -Fq '检测到自定义 bootmenu_0' "$HELPER" ||
+	fail 'helper can overwrite a user-defined vendor boot menu'
 
 grep -Fq 'official_boot_status' "$RPC" && grep -Fq 'official_boot_once' "$RPC" ||
 	fail 'official boot RPC methods are missing'

@@ -1,0 +1,159 @@
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -1287,16 +1287,16 @@
+ 		vlan_tci = skb->vlan_tci;
+ 		hnat_ppd_xmit(skb, ppdev);
+ 		if (debug_level >= 7) {
+-			trace_printk("%s: vlan_prot=0x%x, vlan_tci=%x, in->name=%s, skb->dev->name=%s\n",
++			pr_debug("%s: vlan_prot=0x%x, vlan_tci=%x, in->name=%s, skb->dev->name=%s\n",
+ 				     __func__, vlan_proto, vlan_tci,
+ 				     in->name, ppdev->name);
+-			trace_printk("%s: called from %s successfully\n", __func__, func);
++			pr_debug("%s: called from %s successfully\n", __func__, func);
+ 		}
+ 		return 0;
+ 	}
+ 
+ 	if (debug_level >= 7)
+-		trace_printk("%s: called from %s fail\n", __func__, func);
++		pr_debug("%s: called from %s fail\n", __func__, func);
+ 	return -1;
+ }
+ 
+@@ -1310,7 +1310,7 @@
+ 	u32 ppe;
+ 
+ 	if (debug_level >= 7)
+-		trace_printk("%s: vlan_prot=0x%x, vlan_tci=%x\n", __func__,
++		pr_debug("%s: vlan_prot=0x%x, vlan_tci=%x\n", __func__,
+ 			     ntohs(skb->vlan_proto), skb->vlan_tci);
+ 
+ 	if (!hnat_skb_foe_valid_priv(h, skb, &ppe))
+@@ -1350,7 +1350,7 @@
+ 		fix_skb_packet_type(skb, skb->dev, eth);
+ 		netif_rx(skb);
+ 		if (debug_level >= 7)
+-			trace_printk("%s: called from %s successfully\n", __func__,
++			pr_debug("%s: called from %s successfully\n", __func__,
+ 				     func);
+ 	} else {
+ 		/* MapE WAN --> LAN/WLAN PingPong. */
+@@ -1370,7 +1370,7 @@
+ 			}
+ 		}
+ 		if (debug_level >= 7)
+-			trace_printk("%s: called from %s fail\n", __func__, func);
++			pr_debug("%s: called from %s fail\n", __func__, func);
+ 		return -1;
+ 	}
+ 
+@@ -1458,7 +1458,7 @@
+ 		skb_push(skb, ETH_HLEN);
+ 		dev_queue_xmit(skb);
+ 		if (debug_level >= 7)
+-			trace_printk("%s: called from %s successfully\n", __func__,
++			pr_debug("%s: called from %s successfully\n", __func__,
+ 				     func);
+ 		return HNAT_XMIT_CONSUMED;
+ 	}
+@@ -1476,7 +1476,7 @@
+ 				return HNAT_XMIT_CONSUMED;
+ 			}
+ 			if (debug_level >= 7)
+-				trace_printk("%s: called from %s fail[MapE]\n", __func__,
++				pr_debug("%s: called from %s fail[MapE]\n", __func__,
+ 					     func);
+ 			return HNAT_XMIT_DROP;
+ 		}
+@@ -1489,7 +1489,7 @@
+ 		return HNAT_XMIT_DROP;
+ 	memset(skb_hnat_info(skb), 0, FOE_INFO_LEN);
+ 	if (debug_level >= 7)
+-		trace_printk("%s: called from %s bypass, token=%x\n", __func__,
++		pr_debug("%s: called from %s bypass, token=%x\n", __func__,
+ 			     func, token);
+ 	return HNAT_XMIT_BYPASS;
+ }
+@@ -1498,7 +1498,7 @@
+ 			      const struct net_device *out, const char *func)
+ {
+ 	if (debug_level >= 7)
+-		trace_printk(
++		pr_debug(
+ 			"[%s]: %s(iif=0x%x CB2=0x%x)-->%s (ppe_hash=0x%x) sport=0x%x reason=0x%x alg=0x%x from %s\n",
+ 			__func__, in->name, skb_hnat_iface(skb),
+ 			HNAT_SKB_CB2(skb)->magic, out->name, skb_hnat_entry(skb),
+@@ -1510,7 +1510,7 @@
+ 			       const struct net_device *out, const char *func)
+ {
+ 	if (debug_level >= 7)
+-		trace_printk(
++		pr_debug(
+ 			"[%s]: %s(iif=0x%x, CB2=0x%x)-->%s (ppe_hash=0x%x) sport=0x%x reason=0x%x alg=0x%x from %s\n",
+ 			__func__, in->name, skb_hnat_iface(skb),
+ 			HNAT_SKB_CB2(skb)->magic, out->name, skb_hnat_entry(skb),
+@@ -3234,7 +3234,7 @@
+ 			return -1;
+ 		}
+ 		if (debug_level >= 7)
+-			trace_printk(
++			pr_debug(
+ 				"[%s]skb->head=%p, skb->data=%p,ip_hdr=%p, skb->len=%d, skb->data_len=%d\n",
+ 				__func__, skb->head, skb->data, iph, skb->len,
+ 				skb->data_len);
+@@ -3476,7 +3476,7 @@
+ 			return -1;
+ 		}
+ 		if (debug_level >= 7)
+-			trace_printk(
++			pr_debug(
+ 				"[%s]skb->head=%p, skb->data=%p,ipv6_hdr=%p, skb->len=%d, skb->data_len=%d\n",
+ 				__func__, skb->head, skb->data, ip6h, skb->len,
+ 				skb->data_len);
+@@ -3562,7 +3562,7 @@
+ 		}
+ 
+ 		if (debug_level >= 7)
+-			trace_printk("learn of lan or wan(iif=%x) --> %s(ext)\n",
++			pr_debug("learn of lan or wan(iif=%x) --> %s(ext)\n",
+ 				     skb_hnat_iface(skb), dev->name);
+ 		/* To CPU then stolen by pre-routing hant hook of LAN/WAN
+ 		 * Current setting is PDMA RX.
+@@ -3867,7 +3867,7 @@
+ 		return NF_ACCEPT;
+ 
+ 	if (debug_level >= 7)
+-		trace_printk(
++		pr_debug(
+ 			"[%s]entry=%x reason=%x gmac_no=%x wdmaid=%x rxid=%x wcid=%x bssid=%x\n",
+ 			__func__, skb_hnat_entry(skb), skb_hnat_reason(skb), gmac_no,
+ 			skb_hnat_wdma_id(skb), skb_hnat_bss_id(skb),
+@@ -4821,7 +4821,7 @@
+ 		return 0;
+ 
+ 	if (debug_level >= 7)
+-		trace_printk("[%s] case hit, %x-->%s, reason=%x\n", __func__,
++		pr_debug("[%s] case hit, %x-->%s, reason=%x\n", __func__,
+ 			     skb_hnat_iface(skb), out->name, skb_hnat_reason(skb));
+ 
+ 	if (!skb_hnat_is_hashed(skb))
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -2973,7 +2973,7 @@
+ 			skb_hnat_set_is_decrypt(skb, (skb_hnat_cdrt(skb) ? 1 : 0));
+ 
+ 			if (skb_hnat_reason(skb) == HIT_BIND_FORCE_TO_CPU) {
+-				trace_printk("[%s] reason=0x%x(force to CPU) from WAN to Ext\n",
++				pr_debug("[%s] reason=0x%x(force to CPU) from WAN to Ext\n",
+ 					     __func__, skb_hnat_reason(skb));
+ 				skb->pkt_type = PACKET_HOST;
+ 				/* sanity check, just handle WDMA ports */
+@@ -2984,7 +2984,7 @@
+ 					to_ppd = true;
+ 			}
+ 
+-			trace_printk("[%s] rxd:(entry=%x,sport=%x,reason=%x,alg=%x\n",
++			pr_debug("[%s] rxd:(entry=%x,sport=%x,reason=%x,alg=%x\n",
+ 				     __func__, skb_hnat_entry(skb), skb_hnat_sport(skb),
+ 				     skb_hnat_reason(skb), skb_hnat_alg(skb));
+ #endif

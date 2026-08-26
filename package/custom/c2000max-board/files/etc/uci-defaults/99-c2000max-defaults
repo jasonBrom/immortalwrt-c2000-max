@@ -161,6 +161,20 @@ rm -f /etc/init.d/c2000max-service-worker \
 	/usr/share/rpcd/acl.d/zzzz-c2000max-netbird.json \
 	/www/luci-static/resources/view/c2000max/netbird_async_v353.js
 
+# These generic services were accidentally selected globally.  HAProxy was
+# running its sample listeners as a master/worker pair, smartd monitored the
+# nonexistent /dev/hdb, and collectd continuously sampled data only for the
+# removed LuCI statistics page.  Disable preserved upgrade copies without
+# deleting their configuration, so users can reinstall them deliberately.
+for retired_memory_service in haproxy collectd luci_statistics smartd; do
+	[ ! -x "/etc/init.d/$retired_memory_service" ] ||
+		"/etc/init.d/$retired_memory_service" stop >/dev/null 2>&1 || true
+	[ ! -x "/etc/init.d/$retired_memory_service" ] ||
+		"/etc/init.d/$retired_memory_service" disable >/dev/null 2>&1 || true
+done
+rm -f /etc/rc.d/*haproxy /etc/rc.d/*collectd \
+	/etc/rc.d/*luci_statistics /etc/rc.d/*smartd
+
 # daed 1.27 leaves its network namespace, veth pair and clsact BPF programs
 # behind after a normal stop.  Those references kept roughly 32 MiB of BPF map
 # memory alive on this 512 MiB board.  Release only stale daed-owned resources.

@@ -11,6 +11,8 @@ SYSCTL="$ROOT/files/etc/sysctl.d/99-c2000max-low-memory.conf"
 DAED_CLEANUP="$ROOT/files/usr/sbin/c2000max-daed-cleanup"
 DAED_PATCH="$TOP/scripts/c2000max/packages-daed-generated-assets.patch"
 APP_BRIDGE="$TOP/package/custom/c2000max-app/files/usr/sbin/c2000max-app-bridge"
+PROFILE="$TOP/target/linux/mediatek/image/filogic.mk"
+TRACE_PATCH="$TOP/target/linux/mediatek/patches-6.12/999-zzz-9999-c2000max-no-trace-printk.patch"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -28,6 +30,25 @@ if grep -Eq '\+netbird|\+luci-app-netbird|c2000max-netbird-job.*INSTALL|c2000max
 fi
 grep -Fq 'rm -rf /etc/netbird /var/lib/netbird' "$DEFAULTS" ||
 	fail 'preserved-upgrade NetBird state cleanup is missing'
+
+if grep -Eq '^CONFIG_(DEFAULT_)?(PACKAGE_)?(haproxy|smartd|collectd|collectd-mod-[^=]+|luci-app-statistics|luci-i18n-statistics-zh-cn)=y$' "$CONFIG" "$DEFCONFIG"; then
+	fail 'unused resident monitoring/proxy services are still selected'
+fi
+if grep -Eq '^CONFIG_PACKAGE_luci-app-passwall2?_INCLUDE_Haproxy=y$' "$CONFIG" "$DEFCONFIG"; then
+	fail 'PassWall still pulls HAProxy back into the image'
+fi
+if sed -n '/define Device\/nradio_c2000-max/,/endef/p' "$PROFILE" |
+	grep -Eq 'luci-app-statistics|luci-i18n-statistics|collectd-mod-'; then
+	fail 'C2000MAX profile still pulls in collectd/LuCI statistics'
+fi
+grep -Fq 'retired_memory_service in haproxy collectd luci_statistics smartd' "$DEFAULTS" ||
+	fail 'preserved-upgrade memory-service cleanup is missing'
+[ -s "$TRACE_PATCH" ] || fail 'final kernel trace_printk removal patch is missing'
+grep -Eq '^\+.*pr_debug\(' "$TRACE_PATCH" ||
+	fail 'final kernel patch does not replace debug tracing with pr_debug'
+if grep -Eq '^\+.*trace_printk\(' "$TRACE_PATCH"; then
+	fail 'final kernel patch adds a trace_printk call'
+fi
 
 grep -Fq 'nf_conntrack_buckets=16384' "$SYSCTL" &&
 grep -Fq 'nf_conntrack_max=32768' "$SYSCTL" ||

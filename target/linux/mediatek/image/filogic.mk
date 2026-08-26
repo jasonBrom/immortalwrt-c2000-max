@@ -2859,8 +2859,6 @@ define Device/nradio_c2000-max
 	luci-i18n-argon-config-zh-cn \
 	luci-app-filemanager luci-i18n-filemanager-zh-cn \
 	luci-app-ttyd luci-i18n-ttyd-zh-cn \
-	luci-app-statistics luci-i18n-statistics-zh-cn \
-	collectd-mod-thermal collectd-mod-uptime \
 	luci-app-sqm luci-i18n-sqm-zh-cn sqm-scripts \
 	luci-app-mwan3 luci-i18n-mwan3-zh-cn mwan3 \
 	cnspeedtest luci-app-cnspeedtest \
