@@ -20,13 +20,8 @@ case "$1" in
 	},
 	"access_status": {},
 	"access_apply": {},
-	"netbird_status": {},
-	"netbird_job_start": {
-		"action": "string",
-		"management_url": "string",
-		"setup_key": "string"
-	},
-	"netbird_job_status": { "job_id": "string" },
+	"official_boot_status": {},
+	"official_boot_once": {},
 	"port_status": {},
 	"port_switch": {
 		"role": "string",
@@ -97,16 +92,11 @@ EOF
 			access_apply)
 				exec /usr/sbin/c2000max-access apply
 				;;
-			netbird_status)
-				exec /usr/sbin/c2000max-netbird-job status
+			official_boot_status)
+				exec /usr/sbin/c2000max-boot-official-once status-json
 				;;
-			netbird_job_start)
-				printf '%s\n' "$input" |
-					/usr/sbin/c2000max-netbird-job enqueue
-				;;
-			netbird_job_status)
-				job_id="$(jsonfilter -s "$input" -e '@.job_id')"
-				exec /usr/sbin/c2000max-netbird-job job-status "$job_id"
+			official_boot_once)
+				exec /usr/sbin/c2000max-boot-official-once arm
 				;;
 			port_status)
 				exec /usr/sbin/c2000max-port-role status

@@ -3,7 +3,7 @@ name: C2000MAX one-shot firmware build
 on:
   push:
     branches:
-      - c2000max-v36.01
+      - c2000max-v36.10
     paths:
       - ".github/workflows/c2000max-one-shot-build.yml"
       - "configs/c2000max.config"
@@ -56,7 +56,6 @@ jobs:
           set -euo pipefail
           bash scripts/c2000max/verify-c2000max-firmware.sh
           package/mtk/applications/luci-app-c2000max-traffic/tests/test_traffic.sh
-          bash package/custom/c2000max-board/tests/test_port_role.sh
           bash package/custom/c2000max-board/tests/test_sim_switch.sh
           node --check package/mtk/applications/luci-app-eqos-mtk/htdocs/luci-static/resources/view/eqos.js
           node --check package/mtk/applications/luci-app-c2000max-traffic/htdocs/luci-static/resources/view/c2000max/traffic.js
@@ -88,6 +87,17 @@ jobs:
             "$GITHUB_WORKSPACE/scripts/c2000max/packages-go126-module-root.patch"
           git -C feeds/packages apply \
             "$GITHUB_WORKSPACE/scripts/c2000max/packages-daed-generated-assets.patch"
+          git -C feeds/luci/applications/luci-app-firewall apply \
+            "$GITHUB_WORKSPACE/scripts/c2000max/luci-firewall-sonic-fullcone.patch"
+          git -C feeds/luci apply \
+            "$GITHUB_WORKSPACE/scripts/c2000max/luci-version-v3610.patch"
+          git -C feeds/luci apply \
+            "$GITHUB_WORKSPACE/scripts/c2000max/luci-system-official-boot.patch"
+          bash package/custom/c2000max-board/tests/test_port_role.sh
+          bash package/custom/c2000max-board/tests/test_low_memory_services.sh
+          bash package/custom/c2000max-board/tests/test_owe_gcmp256.sh
+          bash package/custom/c2000max-board/tests/test_sonic_fullcone.sh
+          bash package/custom/c2000max-board/tests/test_official_boot_once.sh
 
       - name: Generate C2000MAX configuration
         shell: bash
@@ -137,7 +147,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          release_name='C2000MAX-V36.01-traffic-management'
+          release_name='C2000MAX-V36.10-traffic-management'
           mapfile -d '' sysupgrades < <(
             find c2000max-artifacts -maxdepth 1 -type f \
               -name '*nradio_c2000-max*-sysupgrade.bin' -print0
@@ -168,7 +178,7 @@ jobs:
       - name: Finalize release checksums
         shell: bash
         run: |
-          release_name='C2000MAX-V36.01-traffic-management'
+          release_name='C2000MAX-V36.10-traffic-management'
           (
             cd c2000max-artifacts
             find . -maxdepth 1 -type f ! -name c2000max-build-sha256sums.txt \
@@ -186,7 +196,7 @@ jobs:
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: C2000MAX-V36.01-traffic-management
+          name: C2000MAX-V36.10-traffic-management
           path: |
             c2000max-artifacts/
           if-no-files-found: error
@@ -198,8 +208,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          release_name='C2000MAX-V36.01-traffic-management'
-          release_tag='c2000max-v36.01'
+          release_name='C2000MAX-V36.10-traffic-management'
+          release_tag='c2000max-v36.10'
           source_sha="$GITHUB_SHA"
 
           # Release creation rejects GITHUB_TOKEN when its target modifies
@@ -266,7 +276,7 @@ jobs:
             release_target="$(
               jq -n \
                 --arg message \
-                  "C2000MAX V36.01 release anchor for ${source_sha}" \
+                  "C2000MAX V36.10 release anchor for ${source_sha}" \
                 --arg tree "$release_tree_sha" \
                 --arg parent "$source_sha" \
                 '{ message: $message, tree: $tree, parents: [$parent] }' \
@@ -278,7 +288,7 @@ jobs:
           test -n "$release_target"
 
           cat > release-notes.md <<EOF
-          C2000MAX V36.01 正式固件。
+          C2000MAX V36.10 正式固件。
 
           核心更新：
           - HNAT 模式使用硬件 HQoS；规则 ID 与 QID 解耦，同速率规则复用硬件档位并共享档位总带宽。
@@ -292,7 +302,7 @@ jobs:
           - 支持 OAF v3 ZIP 特征库更新、按特征库分类选择应用，以及全设备白名单或指定设备的定时应用阻断。
 
           构建来源：
-          - 分支：c2000max-v36.01
+          - 分支：c2000max-v36.10
           - 提交：${GITHUB_SHA}
           - Actions：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
@@ -310,12 +320,12 @@ jobs:
             gh release upload "$release_tag" "${assets[@]}" \
               --repo "${GITHUB_REPOSITORY}" --clobber
             gh release edit "$release_tag" --repo "${GITHUB_REPOSITORY}" \
-              --title 'C2000MAX V36.01 - 流量管理' \
+              --title 'C2000MAX V36.10 - 流量管理' \
               --notes-file release-notes.md
           else
             gh release create "$release_tag" "${assets[@]}" \
               --repo "${GITHUB_REPOSITORY}" \
               --target "$release_target" \
-              --title 'C2000MAX V36.01 - 流量管理' \
+              --title 'C2000MAX V36.10 - 流量管理' \
               --notes-file release-notes.md
           fi

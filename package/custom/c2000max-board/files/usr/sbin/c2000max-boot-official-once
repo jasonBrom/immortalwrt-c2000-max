@@ -1,0 +1,145 @@
+#!/bin/sh
+
+# Arm one reboot into the untouched SPI-NOR factory firmware.  This uses a
+# dedicated fw_env configuration so it can never overwrite the SD-card
+# environment used by c2000max-sim.
+
+ENV_LABEL='u-boot-env'
+ENV_SIZE=65536
+SAVED_VAR='c2000max_bootcmd_saved'
+
+json_result() {
+	local ready="$1" armed="$2" message="$3"
+	. /usr/share/libubox/jshn.sh
+	json_init
+	json_add_boolean ready "$ready"
+	json_add_boolean armed "$armed"
+	json_add_string message "$message"
+	json_dump
+}
+
+find_env_mtd() {
+	local name hexsize size
+	while IFS=: read -r name rest; do
+		case "$rest" in
+			*\"$ENV_LABEL\"*) ;;
+			*) continue ;;
+		esac
+		hexsize="${rest# }"
+		hexsize="${hexsize%% *}"
+		size=$((0x$hexsize))
+		[ "$size" -eq "$ENV_SIZE" ] || return 1
+		printf '/dev/%s\n' "$name"
+		return 0
+	done < /proc/mtd
+	return 1
+}
+
+make_env_config() {
+	ENV_MTD="$(find_env_mtd)" || return 1
+	[ -c "$ENV_MTD" ] || return 1
+	ENV_CONFIG="/tmp/c2000max-fw-env.$$"
+	(umask 077; printf '%s 0x0 0x10000 0x10000\n' "$ENV_MTD" > "$ENV_CONFIG") || return 1
+}
+
+cleanup() {
+	[ -n "$ENV_CONFIG" ] && rm -f "$ENV_CONFIG"
+}
+trap cleanup EXIT INT TERM
+
+env_get() {
+	fw_printenv -c "$ENV_CONFIG" -n "$1" 2>/dev/null
+}
+
+status_json() {
+	local bootcmd saved
+	if ! command -v fw_printenv >/dev/null 2>&1 ||
+	   ! command -v fw_setenv >/dev/null 2>&1; then
+		json_result 0 0 '缺少 U-Boot 环境工具，无法安全切换。'
+		return
+	fi
+	if ! make_env_config; then
+		json_result 0 0 '未找到独立的 SPI-NOR U-Boot 环境分区。'
+		return
+	fi
+	bootcmd="$(env_get bootcmd)" || {
+		json_result 0 0 '无法校验 SPI-NOR U-Boot 环境，未进行任何写入。'
+		return
+	}
+	saved="$(env_get "$SAVED_VAR" 2>/dev/null || true)"
+	case "$bootcmd" in
+		*'c2000max_bootcmd_saved'*)
+			json_result 1 1 '已安排下次重启进入官方系统；再下一次自动返回 TF 卡系统。'
+			;;
+		'')
+			json_result 0 0 'SPI-NOR bootcmd 为空，拒绝覆盖未知启动配置。'
+			;;
+		*)
+			if [ -n "$saved" ]; then
+				json_result 0 0 '检测到未完成的启动状态，拒绝重复写入。'
+			else
+				json_result 1 0 '可安全安排一次性启动官方系统。'
+			fi
+			;;
+	esac
+}
+
+arm_once() {
+	local bootcmd saved one_shot batch verify
+	command -v fw_printenv >/dev/null 2>&1 || {
+		json_result 0 0 '缺少 fw_printenv。'; return 1;
+	}
+	command -v fw_setenv >/dev/null 2>&1 || {
+		json_result 0 0 '缺少 fw_setenv。'; return 1;
+	}
+	make_env_config || {
+		json_result 0 0 '未找到独立的 SPI-NOR U-Boot 环境分区。'; return 1;
+	}
+	bootcmd="$(env_get bootcmd)" || {
+		json_result 0 0 '无法读取 SPI-NOR U-Boot 环境。'; return 1;
+	}
+	saved="$(env_get "$SAVED_VAR" 2>/dev/null || true)"
+	case "$bootcmd" in
+		*'c2000max_bootcmd_saved'*)
+			json_result 1 1 '一次性官方系统启动已经安排。'
+			return 0
+			;;
+	esac
+	[ -n "$bootcmd" ] && [ -z "$saved" ] || {
+		json_result 0 0 '当前 U-Boot 环境状态不安全，拒绝写入。'; return 1;
+	}
+	case "$bootcmd" in
+		*'
+'*)
+			json_result 0 0 'bootcmd 格式异常，拒绝写入。'; return 1;
+			;;
+	esac
+
+	one_shot='setenv bootcmd ${c2000max_bootcmd_saved}; setenv c2000max_bootcmd_saved; saveenv; mtkboardboot'
+	batch="/tmp/c2000max-fw-env-batch.$$"
+	(umask 077; {
+		printf '%s %s\n' "$SAVED_VAR" "$bootcmd"
+		printf 'bootcmd %s\n' "$one_shot"
+	} > "$batch") || {
+		json_result 0 0 '无法创建环境更新事务。'; return 1;
+	}
+	if ! fw_setenv -c "$ENV_CONFIG" -s "$batch" >/dev/null 2>&1; then
+		rm -f "$batch"
+		json_result 0 0 '写入 U-Boot 环境失败，未安排重启。'
+		return 1
+	fi
+	rm -f "$batch"
+	verify="$(env_get bootcmd 2>/dev/null || true)"
+	saved="$(env_get "$SAVED_VAR" 2>/dev/null || true)"
+	if [ "$verify" != "$one_shot" ] || [ "$saved" != "$bootcmd" ]; then
+		json_result 0 0 'U-Boot 环境回读校验失败，请勿重启并检查 SPI-NOR。'
+		return 1
+	fi
+	json_result 1 1 '已安排：下次重启进入官方系统一次，随后自动恢复 TF 卡启动。'
+}
+
+case "$1" in
+	status-json|status|'') status_json ;;
+	arm) arm_once ;;
+	*) echo "usage: $0 {status-json|arm}" >&2; exit 2 ;;
+esac

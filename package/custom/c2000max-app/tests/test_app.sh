@@ -301,7 +301,7 @@ assert_contains "$HTTP" 'action == "signal" and context.plaintext'
 assert_contains "$HTTP" 'protocol.current_des_response_context(context)'
 assert_contains "$HTTP" 'protocol.reply({ code = "1" }, context)'
 assert_contains "$HTTP" 'function action_health()'
-assert_contains "$HTTP" 'build = "V36.01"'
+assert_contains "$HTTP" 'build = "V36.10"'
 assert_contains "$HTTP" 'signal_refresh = core.signal_refresh_policy()'
 assert_contains "$HTTP" 'function process(action, body, request_context)'
 assert_contains "$HTTP" 'core.local_action_allowed(action, data)'
@@ -332,7 +332,7 @@ assert_not_contains "$RPC" 'main.device_id=$device_id'
 assert_contains "$RPC" "pgrep -f '/usr/sbin/c2000max-app-local'"
 assert_contains "$RPC" 'http://127.0.0.1/cgi-bin/luci/nradio/app/health'
 assert_contains "$RPC" 'http://127.0.0.1:82/cgi-bin/luci/nradio/app/health'
-assert_contains "$RPC" 'json_add_string app_build "V36.01"'
+assert_contains "$RPC" 'json_add_string app_build "V36.10"'
 assert_contains "$RPC" 'json_add_string app_software_version "9.9.13.n0.c1"'
 assert_contains "$RPC" 'json_add_boolean upgrade_permanently_disabled 1'
 assert_not_contains "$RPC" '"upgrade_enable": "bool"'
@@ -364,7 +364,7 @@ assert_not_contains "$VIEW" "'checked': checked"
 assert_not_contains "$VIEW" "'c2000max-app-device-id'"
 assert_contains "$VIEW" '局域网和云端总开关默认关闭'
 assert_contains "$VIEW" '当前界面：'
-assert_contains "$VIEW" "text(status.app_build, 'V36.01')"
+assert_contains "$VIEW" "text(status.app_build, 'V36.10')"
 assert_contains "$VIEW" '软件更新权限'
 assert_contains "$VIEW" '永久关闭'
 assert_not_contains "$VIEW" "name: 'upgrade_enable'"
@@ -542,7 +542,7 @@ assert_contains "$QMODEM_HUAWEI" 'AT+CGEQOSRDP=$cid'
 assert_contains "$QMODEM_HUAWEI" 'cache_c2000max_huawei_detail_'
 assert_contains "$QMODEM_HUAWEI" '[ "$age" -ge 0 ] && [ "$age" -le 60 ]'
 
-echo "PASS: V36.01 local cellular and official remote-control compatibility"
+echo "PASS: V36.10 local cellular and official remote-control compatibility"
 for interval in modem_cache selector_cache cache_warm signal_normal \
 	signal_test signal_carrier
 do

@@ -2054,20 +2054,20 @@ assert_argon_v31_resources()
 	local header="$1" label="$2" versioned_count
 
 	[[ -f "$header" ]] || fail "$label Argon header.ut is missing"
-	grep -Fq "{{ dispatcher.build_url('admin/translations', dispatcher.lang) }}?v={{ version.luciversion }}-c2000max-v36.01" \
+	grep -Fq "{{ dispatcher.build_url('admin/translations', dispatcher.lang) }}?v={{ version.luciversion }}-c2000max-v36.10" \
 		"$header" ||
-		fail "$label Argon translations URL is missing the c2000max-v36.01 cache token"
-	grep -Fq '{{ resource }}/cbi.js?v={{ version.luciversion }}-c2000max-v36.01' \
+		fail "$label Argon translations URL is missing the c2000max-v36.10 cache token"
+	grep -Fq '{{ resource }}/cbi.js?v={{ version.luciversion }}-c2000max-v36.10' \
 		"$header" ||
-		fail "$label Argon cbi.js URL is missing the c2000max-v36.01 cache token"
-	grep -Fq '{{ resource }}/luci.js?v={{ version.luciversion }}-c2000max-v36.01' \
+		fail "$label Argon cbi.js URL is missing the c2000max-v36.10 cache token"
+	grep -Fq '{{ resource }}/luci.js?v={{ version.luciversion }}-c2000max-v36.10' \
 		"$header" ||
-		fail "$label Argon luci.js URL is missing the c2000max-v36.01 cache token"
+		fail "$label Argon luci.js URL is missing the c2000max-v36.10 cache token"
 	versioned_count="$(
-		grep -Ec '<script[[:space:]]+src=.*c2000max-v36\.01' "$header" || true
+		grep -Ec '<script[[:space:]]+src=.*c2000max-v36\.10' "$header" || true
 	)"
 	[[ "$versioned_count" == 3 ]] ||
-		fail "$label Argon header does not contain exactly three V36.01-versioned resource URLs"
+		fail "$label Argon header does not contain exactly three V36.10-versioned resource URLs"
 	if grep -Eq 'c2000max-v(21|22|23|24|25|26|31|34|35)([^0-9]|$)' "$header"; then
 		fail "$label Argon header still contains a stale cache token"
 	fi
@@ -2078,7 +2078,7 @@ LUCI_LUA_MAKEFILE="$ROOT/../../../feeds/luci/modules/luci-lua-runtime/Makefile"
 for luci_makefile in "$LUCI_BASE_MAKEFILE" "$LUCI_LUA_MAKEFILE"; do
 	grep -Fqx 'PKG_SRC_VERSION:=26.231.50176~e9cdc0a' "$luci_makefile" ||
 		fail "LuCI version does not use the requested branch revision: $luci_makefile"
-	grep -Fqx 'PKG_GITBRANCH:=LuCI c2000max-v36.01-head branch' "$luci_makefile" ||
+	grep -Fqx 'PKG_GITBRANCH:=LuCI c2000max-v36.10-head branch' "$luci_makefile" ||
 		fail "LuCI version does not expose the requested C2000MAX branch label: $luci_makefile"
 done
 
@@ -2094,8 +2094,8 @@ grep -Fq '/luci-static/argon|/luci-static/design)' "$DEFAULTS" ||
 DESIGN_HEADER="$ROOT/../luci-theme-design/luasrc/view/themes/design/header.htm"
 DESIGN_COMPAT="$ROOT/../luci-theme-design/htdocs/luci-static/design/css/c2000max.css"
 grep -Fq 'admin/translations' "$DESIGN_HEADER" &&
-	grep -Fq '?v=<%= ver.luciversion %>-c2000max-v36.01-design' "$DESIGN_HEADER" &&
-	grep -Fq 'css/c2000max.css?v=<%= ver.luciversion %>-c2000max-v36.01' "$DESIGN_HEADER" ||
+	grep -Fq '?v=<%= ver.luciversion %>-c2000max-v36.10-design' "$DESIGN_HEADER" &&
+	grep -Fq 'css/c2000max.css?v=<%= ver.luciversion %>-c2000max-v36.10' "$DESIGN_HEADER" ||
 	fail "Design theme does not cache-bust translations and C2000MAX compatibility CSS"
 grep -Fq 'body.modal-overlay-active #maincontent > .alert-message' "$DESIGN_COMPAT" &&
 	grep -Fq '#modal_overlay .modal.cbi-modal' "$DESIGN_COMPAT" &&
@@ -2151,9 +2151,9 @@ done
 CUSTOM_ARGON_HEADER="$ROOT/../luci-theme-argon/ucode/template/themes/argon/header.ut"
 assert_argon_v31_resources "$CUSTOM_ARGON_HEADER" "selected custom"
 CUSTOM_BASE_HEADER="$ROOT/../luci-base/ucode/template/header.ut"
-grep -Fq '{{ resource }}/luci.js?v={# PKG_VERSION #}-{{ pkgs_update_time }}-c2000max-v36.01' \
+grep -Fq '{{ resource }}/luci.js?v={# PKG_VERSION #}-{{ pkgs_update_time }}-c2000max-v36.10' \
 	"$CUSTOM_BASE_HEADER" ||
-	fail "selected custom LuCI base header is missing the c2000max-v36.01 cache token"
+	fail "selected custom LuCI base header is missing the c2000max-v36.10 cache token"
 if grep -Eq 'c2000max-v(21|22|23|24|25|26|31|34|35)([^0-9]|$)' "$CUSTOM_BASE_HEADER"; then
 	fail "selected custom LuCI base header still contains a stale cache token"
 fi

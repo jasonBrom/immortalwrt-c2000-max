@@ -3613,6 +3613,14 @@ static unsigned int mtk_hnat_accel_type(struct sk_buff *skb)
 	if (!ct)
 		return 1;
 
+#if IS_ENABLED(CONFIG_NF_NAT)
+	/* SONiC-style FullCone depends on endpoint-independent mappings which
+	 * cannot be represented by the PPE five-tuple.  Bypass HNAT for those
+	 * connections only; normal TCP/UDP flows remain hardware accelerated. */
+	if (READ_ONCE(ct->nat_fullcone))
+		return 0;
+#endif
+
 	/* rcu_read_lock()ed by nf_hook_slow */
 	help = nfct_help(ct);
 	if (help && rcu_dereference(help->helper))

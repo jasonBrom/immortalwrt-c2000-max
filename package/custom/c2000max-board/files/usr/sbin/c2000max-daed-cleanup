@@ -1,0 +1,24 @@
+#!/bin/sh
+
+# daed 1.27 may exit without detaching clsact BPF filters.  The veth and
+# namespace then keep all referenced maps alive.  Refuse to touch anything
+# while the daemon is running unless its init script explicitly passes --force
+# after procd has stopped it.
+
+if pidof daed >/dev/null 2>&1; then
+	logger -t c2000max-daed-cleanup "daed 仍在运行，跳过残留资源清理"
+	exit 1
+fi
+
+if ip netns list 2>/dev/null | grep -q '^daens\([[:space:]]\|$\)'; then
+	ip netns exec daens tc qdisc del dev dae0peer clsact >/dev/null 2>&1 || true
+fi
+tc qdisc del dev dae0 clsact >/dev/null 2>&1 || true
+ip link del dev dae0 >/dev/null 2>&1 || true
+ip netns del daens >/dev/null 2>&1 || true
+
+# ip-netns normally removes these mountpoints itself.  Remove only empty,
+# exact daed paths left by an interrupted teardown.
+rmdir /var/run/netns/daens /tmp/run/netns/daens >/dev/null 2>&1 || true
+
+exit 0

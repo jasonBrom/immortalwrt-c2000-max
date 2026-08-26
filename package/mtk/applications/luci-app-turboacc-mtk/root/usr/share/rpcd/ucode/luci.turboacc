@@ -133,7 +133,9 @@ const methods = {
 				hasMEDIATEKHNAT:   access(`${mod_path}mtkhnat.ko`),
 				hasGMAC2:          access('/sys/class/net/eth1'),
 				hasXTFULLCONENAT:  access(`${mod_path}xt_FULLCONENAT.ko`),
-				hasNFTFULLCONE:    access(`${mod_path}nft_fullcone.ko`),
+				/* SONiC FullCone is integrated into nf_nat/nft_masq rather than
+				 * exposed as the legacy nft_fullcone module. */
+				hasNFTFULLCONE:    c2000max || access(`${mod_path}nft_fullcone.ko`),
 				hasTCPCCA:         read_trimmed('/proc/sys/net/ipv4/tcp_available_congestion_control'),
 				portRole:          null,
 				effectiveFastpath: null,
@@ -180,7 +182,31 @@ const methods = {
 	getFullConeStat: {
 		call: function(req) {
 			let fctype = null;
-			if (module_active('nft_fullcone')) {
+			let cursor = uci.cursor();
+			let firewall = cursor.get_all('firewall') || {};
+			let global_enabled = false;
+			let zone_enabled = false;
+			let udp_only = false;
+			for (let name, section in firewall) {
+				if (section['.type'] == 'defaults' && section.fullcone == '1')
+					global_enabled = true;
+				if (section['.type'] == 'zone' && section.fullcone == '1') {
+					zone_enabled = true;
+					let proto = list_values(section.fullcone_proto);
+					if (length(proto) == 1 && proto[0] == 'udp')
+						udp_only = true;
+				}
+			}
+			let nft = popen('nft list table inet fw4 2>/dev/null');
+			let active_rules = false;
+			if (nft) {
+				let output = nft.read('all');
+				active_rules = !!match(output, /\bfullcone\b/);
+				nft.close();
+			}
+			if (global_enabled && zone_enabled && active_rules) {
+				fctype = udp_only ? 'SONiC FullCone (UDP)' : 'SONiC FullCone';
+			} else if (module_active('nft_fullcone')) {
 				fctype = 'nft_fullcone';
 			} else if (module_active('xt_FULLCONENAT')) {
 				fctype = 'xt_FULLCONENAT';

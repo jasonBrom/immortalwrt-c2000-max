@@ -2,98 +2,48 @@
 
 set -euo pipefail
 
-BOARD_ROOT="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
-TOP="$(CDPATH= cd "$BOARD_ROOT/../../.." && pwd)"
-ADB_ROOT="$TOP/package/custom/adblock-fast"
-NB_APP="$TOP/package/custom/luci-app-netbird"
-NB_PKG="$TOP/package/custom/netbird"
+ROOT="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
+TOP="$(CDPATH= cd "$ROOT/../../.." && pwd)"
+CONFIG="$TOP/configs/c2000max.config"
+DEFCONFIG="$TOP/defconfig/low-mem-512m/c2000max-mt7993-be3600-wifi.config"
+DEFAULTS="$ROOT/files/etc/uci-defaults/99-c2000max-defaults"
+SYSCTL="$ROOT/files/etc/sysctl.d/99-c2000max-low-memory.conf"
+DAED_CLEANUP="$ROOT/files/usr/sbin/c2000max-daed-cleanup"
+DAED_PATCH="$TOP/scripts/c2000max/packages-daed-generated-assets.patch"
+APP_BRIDGE="$TOP/package/custom/c2000max-app/files/usr/sbin/c2000max-app-bridge"
 
-if [ ! -d "$ADB_ROOT" ]; then
-	ADB_ROOT="$TOP/feeds/packages/net/adblock-fast"
-fi
-if [ ! -d "$NB_PKG" ]; then
-	NB_PKG="$TOP/feeds/packages/net/netbird"
-fi
+fail() { echo "FAIL: $*" >&2; exit 1; }
 
-fail()
-{
-	echo "FAIL: $*" >&2
-	exit 1
-}
-
-ADB_INIT="$ADB_ROOT/files/etc/init.d/adblock-fast"
-ADB_CORE="$ADB_ROOT/files/lib/adblock-fast/adblock-fast.uc"
-ADB_CONFIG="$ADB_ROOT/files/etc/config/adblock-fast"
-NB_SETTINGS="$NB_APP/root/etc/init.d/netbird-settings"
-NB_WATCHDOG="$NB_APP/root/usr/share/netbird/netbird-autoreconnect.sh"
-NB_STATE="$NB_APP/root/usr/share/rpcd/ucode/lib/state.uc"
-NB_RPC="$NB_APP/root/usr/share/rpcd/ucode/netbird.uc"
-NB_CLI="$NB_APP/root/usr/share/rpcd/ucode/lib/netbird_cli.uc"
-NB_INIT="$NB_PKG/files/netbird.init"
-
-for script in "$ADB_INIT" "$NB_SETTINGS" "$NB_WATCHDOG" "$NB_INIT"; do
+for script in "$DEFAULTS" "$DAED_CLEANUP"; do
 	sh -n "$script" || fail "shell syntax failed: $script"
 done
 
-grep -Fq "option parallel_downloads '2'" "$ADB_CONFIG" ||
-	fail "adblock-fast fresh-install concurrency is not capped at two"
-grep -Fq 'low_ram_reserve: 100663296' "$ADB_CORE" ||
-	fail "adblock-fast does not reserve 96 MiB for the management plane"
-grep -Fq 'low_ram_parallel_cap: 2' "$ADB_CORE" ||
-	fail "adblock-fast runtime concurrency cap is missing"
-grep -Fq 'echo 500 > /proc/self/oom_score_adj' "$ADB_INIT" ||
-	fail "adblock-fast worker has no OOM preference"
-grep -Fq 'nice -n 10' "$ADB_INIT" ||
-	fail "adblock-fast worker is not de-prioritized"
-
-grep -Fq '_bounded 30s "$bin"' "$NB_SETTINGS" ||
-	fail "NetBird settings apply has no bounded up command"
-grep -Fq '_bounded 5s "$bin" down' "$NB_SETTINGS" ||
-	fail "NetBird down command has no timeout"
-grep -Fq 'applying NetBird settings outside rpcd' "$NB_WATCHDOG" ||
-	fail "NetBird watchdog does not use the out-of-rpcd reconnect path"
-grep -Fq 'echo 500 > /proc/self/oom_score_adj' "$NB_WATCHDOG" ||
-	fail "NetBird reconnect worker has no OOM preference"
-if grep -Eq 'ubus .*luci\.netbird .*do_up' "$NB_WATCHDOG"; then
-	fail "NetBird watchdog still blocks rpcd with do_up"
+grep -Fq 'PKG_VERSION:=2.36.10' "$ROOT/Makefile" ||
+	fail 'board package version is not V36.10'
+if grep -Eq '^CONFIG_(DEFAULT_)?(PACKAGE_)?(netbird|luci-app-netbird|luci-i18n-netbird-zh-cn)=y$' "$CONFIG" "$DEFCONFIG"; then
+	fail 'NetBird is still selected in a C2000MAX image configuration'
 fi
-grep -Fq 'timeout 2s ' "$NB_STATE" ||
-	fail "NetBird state probe timeout is not two seconds"
-grep -Fq 'probe_state(true)' "$NB_RPC" ||
-	fail "NetBird normal RPC paths do not use the fast state probe"
-grep -Fq 'timeout 2s ' "$NB_CLI" ||
-	fail "NetBird hot-path CLI timeout is not two seconds"
-grep -Fq "message: 'timeout after 2s'" "$NB_CLI" ||
-	fail "NetBird hot-path timeout message does not match its wall clock"
+if grep -Eq '\+netbird|\+luci-app-netbird|c2000max-netbird-job.*INSTALL|c2000max-service-worker.*INSTALL' "$ROOT/Makefile"; then
+	fail 'board package still depends on or installs NetBird workers'
+fi
+grep -Fq 'rm -rf /etc/netbird /var/lib/netbird' "$DEFAULTS" ||
+	fail 'preserved-upgrade NetBird state cleanup is missing'
 
-grep -Fq 'echo 500 > /proc/self/oom_score_adj' "$NB_INIT" ||
-	fail "NetBird daemon has no OOM preference"
-grep -Fq 'procd_set_param nice 10' "$NB_INIT" ||
-	fail "NetBird daemon is not de-prioritized"
-grep -Fq 'procd_set_param respawn 3600 5 5' "$NB_INIT" ||
-	fail "NetBird daemon has no bounded respawn policy"
+grep -Fq 'nf_conntrack_buckets=16384' "$SYSCTL" &&
+grep -Fq 'nf_conntrack_max=32768' "$SYSCTL" ||
+	fail '512 MiB conntrack limits are missing'
+grep -Fq 'tc qdisc del dev dae0 clsact' "$DAED_CLEANUP" &&
+grep -Fq 'ip netns del daens' "$DAED_CLEANUP" ||
+	fail 'daed BPF/netns cleanup is incomplete'
+grep -Fq 'procd_set_param limits core="0 0"' "$DAED_PATCH" &&
+grep -Fq 'service_stopped()' "$DAED_PATCH" ||
+	fail 'daed generated feed patch does not release resources after stop'
 
-# Exercise the helper itself: a command that sleeps for five seconds must be
-# terminated near its one-second wall clock, not inherited as an unbounded wait.
-(
-	# shellcheck disable=SC1090
-	source "$NB_SETTINGS"
-	start="$(date +%s)"
-	if _bounded 1s sh -c 'sleep 5'; then
-		fail "NetBird timeout helper accepted a hung command"
-	fi
-	elapsed=$(( $(date +%s) - start ))
-	[ "$elapsed" -le 4 ] ||
-		fail "NetBird timeout helper took ${elapsed}s for a one-second limit"
-)
+grep -Fq "'connection_messages false'" "$APP_BRIDGE" &&
+grep -Fq "'log_type error'" "$APP_BRIDGE" ||
+	fail 'APP MQTT bridge still writes routine reconnect chatter to tmpfs'
+if grep -Fq "'log_type notice'" "$APP_BRIDGE"; then
+	fail 'APP MQTT bridge notice logging is still enabled'
+fi
 
-grep -Fq 'PKG_VERSION:=2.36.01' "$BOARD_ROOT/Makefile" ||
-	fail "board package version is not V36.01"
-grep -Fq 'PKG_RELEASE:=14' "$NB_APP/Makefile" ||
-	fail "luci-app-netbird release was not bumped"
-grep -Fq 'PKG_RELEASE:=2' "$NB_PKG/Makefile" ||
-	fail "netbird package release was not bumped"
-grep -Fq 'PKG_RELEASE:=5' "$ADB_ROOT/Makefile" ||
-	fail "adblock-fast package release was not bumped"
-
-echo 'C2000-MAX low-memory service tests passed'
+echo 'C2000MAX V36.10 low-memory service tests passed'

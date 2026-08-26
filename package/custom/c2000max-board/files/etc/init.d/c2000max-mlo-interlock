@@ -4,6 +4,7 @@
 # from ever seeing the unsupported MLO + ordinary AP combination at boot.
 START=18
 STOP=90
+USE_PROCD=1
 
 sync_interlock()
 {
@@ -13,5 +14,10 @@ sync_interlock()
 	}
 }
 
-start() { sync_interlock; }
-reload() { sync_interlock; }
+start_service() { sync_interlock; }
+reload_service() { sync_interlock; }
+
+service_triggers()
+{
+	procd_add_reload_trigger wireless
+}

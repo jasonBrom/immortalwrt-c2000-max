@@ -2842,7 +2842,7 @@ define Device/nradio_c2000-max
 	mtwifi-cfg-ucode luci-app-mtwifi-cfg luci-i18n-mtwifi-cfg-zh-cn \
 	-wpad-basic-mbedtls \
 	wpad-openssl hostapd-utils wpa-cli \
-	kmod-hwmon-pwmfan kmod-mediatek_hnat kmod-nft-fullcone kmod-dummy \
+	kmod-hwmon-pwmfan kmod-mediatek_hnat kmod-dummy \
 	mtkhnat_util hnat-detect luci-app-turboacc-mtk \
 	luci-i18n-turboacc-mtk-zh-cn \
 	kmod-usb3 kmod-usb-net-cdc-ether kmod-usb-net-cdc-ncm \

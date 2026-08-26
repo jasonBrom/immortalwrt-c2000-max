@@ -1367,6 +1367,7 @@ local uci_dev_options = {
 
 local uci_iface_options = {
     "device", "network", "mode", "disabled", "ssid", "bssid", "vifidx", "hidden", "wmm", "dtim_period",
+    "owe_transition_bssid", "owe_transition_ssid", "owe_transition_ifname", "owe_groups",
     "encryption", "key", "key1", "key2", "key3", "key4", "rekey_interval", "rekey_meth",
     "ieee8021x", "auth_server", "auth_port", "auth_secret", "ownip", "idle_timeout", "session_timeout",
     "rsn_preauth", "ieee80211w", "pmf_sha256", "wireless_mode", "mldgroup", "tx_rate", "isolate",

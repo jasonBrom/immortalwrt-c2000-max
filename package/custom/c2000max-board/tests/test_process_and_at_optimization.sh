@@ -4,7 +4,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOP="$(cd "$ROOT/../../.." && pwd)"
-WORKER="$ROOT/files/usr/sbin/c2000max-service-worker"
 SIM="$ROOT/files/usr/sbin/c2000max-sim"
 SIM_INIT="$ROOT/files/etc/init.d/c2000max-sim"
 FAN_INIT="$ROOT/files/etc/init.d/c2000max-fan"
@@ -19,12 +18,8 @@ fail()
 	exit 1
 }
 
-grep -Fq 'C2000MAX_WORKER_INTERVAL:-30' "$WORKER" ||
-	fail 'service worker is not on the 30-second default interval'
-! grep -Fq "tr '\\000' ' ' < \"\$proc/cmdline\"" "$WORKER" ||
-	fail 'service worker still forks tr once per process'
-grep -Fq "kill \"\$sleeper\"" "$WORKER" ||
-	fail 'USR1 wake-up can leave orphan sleep processes'
+! grep -Eq '\$\(INSTALL_(BIN|DATA)\).*c2000max-service-worker' "$ROOT/Makefile" ||
+	fail 'retired NetBird/package polling worker is still installed'
 
 grep -Fq 'get c2000max.fan.enabled' "$FAN_INIT" ||
 	fail 'disabled fan still starts its polling daemon'

@@ -256,7 +256,7 @@ status()
 	json_add_string remote_wget_runtime "$remote_wget_runtime"
 	json_add_boolean remote_wget_ready \
 		"$([ "$remote_wget_ready" = true ] && echo 1 || echo 0)"
-	json_add_string app_build "V36.01"
+	json_add_string app_build "V36.10"
 	json_add_string app_software_version "9.9.13.n0.c1"
 	json_add_boolean upgrade_permanently_disabled 1
 	local_enabled="$(uci -q get c2000max_app.main.local_enable)"

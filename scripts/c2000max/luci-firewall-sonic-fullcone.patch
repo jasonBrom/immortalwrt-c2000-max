@@ -1,0 +1,54 @@
+--- a/htdocs/luci-static/resources/view/firewall/zones.js
++++ b/htdocs/luci-static/resources/view/firewall/zones.js
+@@ -55,11 +55,12 @@
+ 		};
+ 
+ 		o = s.option(form.Flag, 'drop_invalid', _('Drop invalid packets'));
+-		if (L.hasSystemFeature('fullcone')) {
+-			o = s.option(form.Flag, 'fullcone', _('Enable FullCone NAT'));
+-			if (fw4)
+-				o = s.option(form.Flag, 'fullcone6', _('Enable FullCone NAT6'));
+-		}
++
++		o = s.option(form.Flag, 'fullcone', _('Fullcone NAT'),
++			_('Global gate for SONiC-style fullcone NAT. When enabled, each zone can individually activate fullcone in its settings.'));
++		o.default = '0';
++		o.rmempty = true;
++		o.optional = true;
+ 
+ 		let p = [
+ 			s.option(form.ListValue, 'input', _('Input')),
+@@ -181,6 +182,11 @@
+ 			return null;
+ 		};
+ 
++		o = s.taboption('general', form.Flag, 'fullcone', _('Fullcone NAT'),
++			_('Enable SONiC-style fullcone NAT for this zone. The global Fullcone NAT gate must also be enabled. For C2000MAX, keep the protocol selection at UDP so only those flows bypass HNAT.'));
++		o.editable = true;
++		o.depends('masq', '1');
++
+ 		o = s.taboption('general', form.Flag, 'mtu_fix', _('MSS clamping'));
+ 		o.modalonly = true;
+ 
+@@ -283,6 +289,21 @@
+ 		o.placeholder = '0.0.0.0/0';
+ 		o.modalonly = true;
+ 
++		o = s.taboption('advanced', form.MultiValue, 'fullcone_proto',
++			_('Fullcone protocols'),
++			_('Restrict FullCone NAT to selected L4 protocols. UDP is recommended on C2000MAX; FullCone flows use the software NAT path while ordinary flows remain eligible for MediaTek HNAT.'));
++		o.value('tcp', _('TCP'));
++		o.value('udp', _('UDP'));
++		o.value('udplite', _('UDP-Lite'));
++		o.value('sctp', _('SCTP'));
++		o.value('dccp', _('DCCP'));
++		o.depends('fullcone', '1');
++		o.modalonly = true;
++		o.optional = true;
++		o.placeholder = _('All protocols');
++		o.display_size = 5;
++		o.delimiter = ' ';
++
+ 		o = s.taboption('conntrack', form.Flag, 'masq_allow_invalid', _('Allow "invalid" traffic'), _('Do not install extra rules to reject forwarded traffic with conntrack state <em>invalid</em>. This may be required for complex asymmetric route setups.'));
+ 		o.modalonly = true;
+ 

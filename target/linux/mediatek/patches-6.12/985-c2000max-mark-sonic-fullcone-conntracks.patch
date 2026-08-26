@@ -1,0 +1,34 @@
+From: C2000MAX Maintainers <c2000max@localhost>
+Date: Wed, 26 Aug 2026 00:00:00 +0800
+Subject: [PATCH] netfilter: mark SONiC fullcone conntracks for HNAT exclusion
+
+MediaTek HNAT cannot preserve endpoint-independent FullCone mappings.  Keep a
+small per-conntrack marker so the board HNAT hook can leave only those flows on
+the software NAT path while retaining HNAT for ordinary traffic.
+---
+ include/net/netfilter/nf_conntrack.h | 1 +
+ net/netfilter/nf_nat_core.c          | 3 +++
+ 2 files changed, 4 insertions(+)
+
+--- a/include/net/netfilter/nf_conntrack.h
++++ b/include/net/netfilter/nf_conntrack.h
+@@ -107,6 +107,7 @@ struct nf_conn {
+ 
+ 	/* To optionally ensure 3-tuple uniqueness on the translated source */
+ 	struct hlist_node	nat_by_manip_src;
++	bool			nat_fullcone;
+ #endif
+ 	/* all members below initialized via memset */
+ 	struct { } __nfct_init_offset;
+--- a/net/netfilter/nf_nat_core.c
++++ b/net/netfilter/nf_nat_core.c
+@@ -717,6 +717,9 @@ nf_nat_setup_info(struct nf_conn *ct,
+ 	nf_ct_invert_tuple(&curr_tuple,
+ 			   &ct->tuplehash[IP_CT_DIR_REPLY].tuple);
+ 
++	if (range->flags & NF_NAT_RANGE_FULLCONE)
++		WRITE_ONCE(ct->nat_fullcone, true);
++
+ 	if (!get_unique_tuple(&new_tuple, &curr_tuple, range, ct, maniptype)) {
+ 		return NF_DROP;
+ 	}

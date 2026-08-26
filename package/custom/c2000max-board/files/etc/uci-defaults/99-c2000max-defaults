@@ -142,6 +142,31 @@ uci -q set "system.@system[0].zram_priority=$swap_priority"
 [ ! -x /usr/sbin/c2000max-adblock-compat ] ||
 	/usr/sbin/c2000max-adblock-compat seed >/dev/null 2>&1 || true
 
+# V36.10 removes NetBird from the image and retires the board worker which
+# existed solely to supervise NetBird and poll package state.  Clean preserved
+# upgrade remnants once; no resident replacement daemon is needed.
+for retired_service in netbird luci-netbird-watchdog c2000max-service-worker; do
+	[ ! -x "/etc/init.d/$retired_service" ] ||
+		"/etc/init.d/$retired_service" stop >/dev/null 2>&1 || true
+	[ ! -x "/etc/init.d/$retired_service" ] ||
+		"/etc/init.d/$retired_service" disable >/dev/null 2>&1 || true
+done
+rm -f /etc/rc.d/*netbird /etc/rc.d/*c2000max-service-worker
+rm -rf /etc/netbird /var/lib/netbird /tmp/c2000max-netbird
+rm -f /etc/config/netbird
+rm -f /etc/init.d/c2000max-service-worker \
+	/usr/sbin/c2000max-service-worker \
+	/usr/sbin/c2000max-netbird-job \
+	/usr/share/luci/menu.d/zzzz-c2000max-netbird.json \
+	/usr/share/rpcd/acl.d/zzzz-c2000max-netbird.json \
+	/www/luci-static/resources/view/c2000max/netbird_async_v353.js
+
+# daed 1.27 leaves its network namespace, veth pair and clsact BPF programs
+# behind after a normal stop.  Those references kept roughly 32 MiB of BPF map
+# memory alive on this 512 MiB board.  Release only stale daed-owned resources.
+[ ! -x /usr/sbin/c2000max-daed-cleanup ] ||
+	/usr/sbin/c2000max-daed-cleanup >/dev/null 2>&1 || true
+
 # Global device access control is deliberately off by default. Never migrate
 # the former Wi-Fi-only blacklist into this list: it had different semantics.
 if [ -z "$(uci -q get c2000max.access_control)" ]; then
@@ -198,6 +223,14 @@ uci -q set "firewall.${wan_zone}.input=REJECT"
 uci -q set "firewall.${wan_zone}.forward=REJECT"
 uci -q set "firewall.${wan_zone}.masq=1"
 uci -q set "firewall.${wan_zone}.mtu_fix=1"
+# SONiC-style FullCone is globally available, but is deliberately restricted
+# to UDP on the WAN zone.  The kernel marks these conntracks so MediaTek HNAT
+# skips only the incompatible FullCone flows; normal TCP/UDP NAT still uses PPE.
+uci -q set firewall.@defaults[0].fullcone='1'
+uci -q set "firewall.${wan_zone}.fullcone=1"
+fullcone_protocols="$(uci -q get "firewall.${wan_zone}.fullcone_proto")"
+c2000_list_has "$fullcone_protocols" udp ||
+	uci -q add_list "firewall.${wan_zone}.fullcone_proto=udp"
 
 uci -q set luci.main.lang='zh_cn'
 case "$(uci -q get luci.main.mediaurlbase)" in
@@ -258,7 +291,7 @@ if [ "$(uci -q get c2000max_traffic.config.enabled)" = 1 ]; then
 else
 	uci -q set turboacc.config.fastpath_mh_update_nfct='0'
 fi
-uci -q set turboacc.config.fullcone='1'
+uci -q delete turboacc.config.fullcone
 uci -q set turboacc.config.tcpcca='cubic'
 
 # Keep hardware flow offload disabled. The generic nft software flowtable is
@@ -318,11 +351,50 @@ if [ "$wireless_is_new" = '1' ]; then
 		for iface in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)\.device='$radio'$/\1/p"); do
 			uci -q set "wireless.$iface.disabled=0"
 			uci -q set "wireless.$iface.ssid=$ssid"
-			uci -q set "wireless.$iface.encryption=owe+gcmp256"
 			uci -q delete "wireless.$iface.key"
-			uci -q set "wireless.$iface.ieee80211w=2"
-			uci -q set "wireless.$iface.rsn_override=0"
+			case "$band" in
+				2g)
+					# Maximum compatibility for older/IoT clients.
+					uci -q set "wireless.$iface.encryption=none"
+					uci -q delete "wireless.$iface.ieee80211w"
+					uci -q delete "wireless.$iface.rsn_override"
+					uci -q delete "wireless.$iface.owe_transition_ifname"
+					uci -q delete "wireless.$iface.owe_transition_ssid"
+					;;
+				5g)
+					# The visible half of 5 GHz OWE Transition remains open.
+					uci -q set "wireless.$iface.encryption=none"
+					uci -q set "wireless.$iface.vifidx=1"
+					uci -q set "wireless.$iface.c2000max_owe_transition=1"
+					uci -q set c2000max.wireless='wireless'
+					uci -q set "c2000max.wireless.owe_main=$iface"
+					uci -q delete "wireless.$iface.ieee80211w"
+					uci -q delete "wireless.$iface.rsn_override"
+					uci -q set "wireless.$iface.owe_transition_ifname=rai1"
+					uci -q set "wireless.$iface.owe_transition_ssid=ImmortalWrt-5GOWE"
+					;;
+			esac
 		done
+	done
+
+	# Hidden encrypted half of the 5 GHz OWE Transition pair.  It is appended
+	# after the ordinary BSS, therefore the MT7993 interface is rai1.
+	for radio in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p"); do
+		[ "$(uci -q get wireless.$radio.band)" = 5g ] || continue
+		uci -q set wireless.c2000max_owe_5g='wifi-iface'
+		uci -q set "wireless.c2000max_owe_5g.device=$radio"
+		uci -q set wireless.c2000max_owe_5g.network='lan'
+		uci -q set wireless.c2000max_owe_5g.mode='ap'
+		uci -q set wireless.c2000max_owe_5g.vifidx='2'
+		uci -q set wireless.c2000max_owe_5g.ssid='ImmortalWrt-5GOWE'
+		uci -q set wireless.c2000max_owe_5g.encryption='owe+gcmp256'
+		uci -q set wireless.c2000max_owe_5g.hidden='1'
+		uci -q set wireless.c2000max_owe_5g.ieee80211w='2'
+		uci -q set wireless.c2000max_owe_5g.rsn_override='0'
+		uci -q set wireless.c2000max_owe_5g.owe_transition_ifname='rai0'
+		uci -q set wireless.c2000max_owe_5g.owe_transition_ssid='ImmortalWrt-5G'
+		uci -q set wireless.c2000max_owe_5g.c2000max_factory_owe='1'
+		break
 	done
 fi
 
@@ -381,28 +453,80 @@ if [ "$(uci -q get c2000max.migration.wifi_ssid_brand_v1)" != '1' ]; then
 	uci -q set c2000max.migration.wifi_ssid_brand_v1='1'
 fi
 
-# V36.01-r16 keeps the two ordinary factory SSIDs passwordless while replacing
-# legacy OPEN/NONE with Enhanced Open (OWE) and the Wi-Fi 7 GCMP-256 cipher.
-# Migrate only exact factory names which still have no key and use either the
-# former open mode or the earlier basic OWE test; custom security is untouched.
-if [ "$(uci -q get c2000max.migration.wifi_owe_gcmp256_v1)" != '1' ]; then
+# V36.10 uses OWE Transition only on 5 GHz.  The visible BSS remains open and
+# points to a hidden GCMP-256 OWE partner; 2.4 GHz stays fully open for legacy
+# and IoT compatibility.  Touch only keyless factory SSIDs.
+if [ "$(uci -q get c2000max.migration.wifi_owe_transition_v3610)" != '1' ]; then
+	owe_5g_main=
+	owe_5g_radio=
 	for iface in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-iface$/\1/p"); do
 		case "$(uci -q get wireless.$iface.ssid)" in
-			ImmortalWrt-2.4G|ImmortalWrt-5G) ;;
+			ImmortalWrt-2.4G)
+				case "$(uci -q get wireless.$iface.encryption)" in
+					none|owe|owe+gcmp|owe+gcmp256) ;;
+					*) continue ;;
+				esac
+				[ -z "$(uci -q get wireless.$iface.key)" ] || continue
+				uci -q set "wireless.$iface.encryption=none"
+				uci -q delete "wireless.$iface.ieee80211w"
+				uci -q delete "wireless.$iface.rsn_override"
+				uci -q delete "wireless.$iface.owe_transition_ifname"
+				uci -q delete "wireless.$iface.owe_transition_ssid"
+				continue
+				;;
+			ImmortalWrt-5G) ;;
 			*) continue ;;
 		esac
 		case "$(uci -q get wireless.$iface.encryption)" in
-			none|owe) ;;
+			none|owe|owe+gcmp|owe+gcmp256) ;;
 			*) continue ;;
 		esac
 		[ -z "$(uci -q get wireless.$iface.key)" ] || continue
-		uci -q set "wireless.$iface.encryption=owe+gcmp256"
+		owe_5g_main="$iface"
+		owe_5g_radio="$(uci -q get wireless.$iface.device)"
+		uci -q set "wireless.$iface.encryption=none"
+		uci -q set "wireless.$iface.vifidx=1"
+		uci -q set "wireless.$iface.c2000max_owe_transition=1"
+		uci -q set c2000max.wireless='wireless'
+		uci -q set "c2000max.wireless.owe_main=$iface"
 		uci -q delete "wireless.$iface.key"
-		uci -q set "wireless.$iface.ieee80211w=2"
-		uci -q set "wireless.$iface.rsn_override=0"
+		uci -q delete "wireless.$iface.ieee80211w"
+		uci -q delete "wireless.$iface.rsn_override"
 	done
+	if [ -n "$owe_5g_main" ] && [ -n "$owe_5g_radio" ]; then
+		owe_partner_safe=1
+		for iface in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-iface$/\1/p"); do
+			[ "$(uci -q get wireless.$iface.device)" = "$owe_5g_radio" ] || continue
+			[ "$(uci -q get wireless.$iface.mode)" = ap ] || continue
+			[ "$iface" = c2000max_owe_5g ] && continue
+			[ "$iface" = "$owe_5g_main" ] && continue
+			[ "$(uci -q get wireless.$iface.vifidx)" != 2 ] || owe_partner_safe=0
+		done
+		if [ -n "$(uci -q get wireless.c2000max_owe_5g)" ] &&
+		   [ "$(uci -q get wireless.c2000max_owe_5g.c2000max_factory_owe)" != 1 ]; then
+			owe_partner_safe=0
+		fi
+		if [ "$owe_partner_safe" = 1 ]; then
+			uci -q set "wireless.${owe_5g_main}.owe_transition_ifname=rai1"
+			uci -q set "wireless.${owe_5g_main}.owe_transition_ssid=ImmortalWrt-5GOWE"
+			uci -q set wireless.c2000max_owe_5g='wifi-iface'
+			uci -q set "wireless.c2000max_owe_5g.device=$owe_5g_radio"
+			uci -q set wireless.c2000max_owe_5g.network='lan'
+			uci -q set wireless.c2000max_owe_5g.mode='ap'
+			uci -q set wireless.c2000max_owe_5g.vifidx='2'
+			uci -q set wireless.c2000max_owe_5g.ssid='ImmortalWrt-5GOWE'
+			uci -q set wireless.c2000max_owe_5g.encryption='owe+gcmp256'
+			uci -q set wireless.c2000max_owe_5g.hidden='1'
+			uci -q delete wireless.c2000max_owe_5g.key
+			uci -q set wireless.c2000max_owe_5g.ieee80211w='2'
+			uci -q set wireless.c2000max_owe_5g.rsn_override='0'
+			uci -q set wireless.c2000max_owe_5g.owe_transition_ifname='rai0'
+			uci -q set wireless.c2000max_owe_5g.owe_transition_ssid='ImmortalWrt-5G'
+			uci -q set wireless.c2000max_owe_5g.c2000max_factory_owe='1'
+		fi
+	fi
 	uci -q set c2000max.migration='migration'
-	uci -q set c2000max.migration.wifi_owe_gcmp256_v1='1'
+	uci -q set c2000max.migration.wifi_owe_transition_v3610='1'
 fi
 
 # MLO on this dual-band profile requires the 2.4 GHz link to use the vendor's
@@ -442,7 +566,6 @@ fi
 /etc/init.d/c2000max-swap-tune enable
 /etc/init.d/c2000max-uplink enable
 /etc/init.d/c2000max-mlo-interlock enable
-/etc/init.d/c2000max-service-worker enable
 /etc/init.d/cpufreq enable
 /etc/init.d/turboacc enable >/dev/null 2>&1
 if [ "$swap_enabled" = 1 ]; then
@@ -532,6 +655,7 @@ rm -f /www/luci-static/resources/view/c2000max/port_role_v26.js
 rm -f /tmp/luci-indexcache
 rm -f /tmp/luci-indexcache.*
 rm -rf /tmp/luci-modulecache
+rm -f /tmp/core /tmp/core.* /tmp/*.core
 
 # Retire the former board-specific frequency service on preserved upgrades.
 [ ! -x /etc/init.d/c2000max-cpufreq ] || /etc/init.d/c2000max-cpufreq disable

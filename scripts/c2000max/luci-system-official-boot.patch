@@ -1,0 +1,139 @@
+diff --git a/modules/luci-mod-system/htdocs/luci-static/resources/view/system/reboot.js b/modules/luci-mod-system/htdocs/luci-static/resources/view/system/reboot.js
+--- a/modules/luci-mod-system/htdocs/luci-static/resources/view/system/reboot.js
++++ b/modules/luci-mod-system/htdocs/luci-static/resources/view/system/reboot.js
+@@ -10,18 +10,37 @@
+ 	expect: { result: 0 }
+ });
+ 
++var callOfficialStatus = rpc.declare({
++	object: 'c2000max',
++	method: 'official_boot_status',
++	expect: { '': {} }
++});
++
++var callOfficialOnce = rpc.declare({
++	object: 'c2000max',
++	method: 'official_boot_once',
++	expect: { '': {} }
++});
++
+ return view.extend({
+ 	load: function() {
+-		return uci.changes();
++		return Promise.all([
++			uci.changes(),
++			callOfficialStatus().catch(function(e) {
++				return { ready: false, armed: false, message: e.message };
++			})
++		]);
+ 	},
+ 
+-	render: function(changes) {
++	render: function(data) {
++		var changes = data[0] || {};
++		var official = data[1] || {};
+ 		var body = E([
+ 			E('h2', _('Reboot')),
+ 			E('p', {}, _('Reboots the operating system of your device'))
+ 		]);
+ 
+-		for (var config in (changes || {})) {
++		for (var config in changes) {
+ 			body.appendChild(E('p', { 'class': 'alert-message warning' },
+ 				_('Warning: There are unsaved changes that will get lost on reboot!')));
+ 			break;
+@@ -33,30 +52,76 @@
+ 			'click': ui.createHandlerFn(this, 'handleReboot')
+ 		}, _('Perform reboot')));
+ 
++		body.appendChild(E('div', {
++			'class': 'cbi-section',
++			'style': 'margin-top:2em'
++		}, [
++			E('h3', {}, _('重启到官方系统（仅一次）')),
++			E('p', {}, _('下一次重启从机身 SPI-NOR 中的官方系统启动；官方系统再次重启后，会自动返回 TF 卡中的 ImmortalWrt。不会改写官方固件。')),
++			E('p', {
++				'class': official.ready ? 'alert-message notice' : 'alert-message warning'
++			}, official.message || _('正在检查启动环境…')),
++			E('button', {
++				'class': 'cbi-button cbi-button-negative important',
++				'disabled': !official.ready || official.armed,
++				'click': ui.createHandlerFn(this, 'handleOfficialOnce')
++			}, official.armed ? _('已安排一次性启动') : _('重启到官方系统一次'))
++		]));
++
+ 		return body;
+ 	},
+ 
+-	handleReboot: function(ev) {
+-		return callReboot().then(function(res) {
+-			if (res != 0) {
+-				L.ui.addNotification(null, E('p', _('The reboot command failed with code %d').format(res)));
+-				L.raise('Error', 'Reboot failed');
+-			}
+-
++	showRebootWait: function() {
++		L.ui.showModal(_('Rebooting…'), [
++			E('p', { 'class': 'spinning' }, _('Waiting for device...'))
++		]);
++		window.setTimeout(function() {
+ 			L.ui.showModal(_('Rebooting…'), [
+-				E('p', { 'class': 'spinning' }, _('Waiting for device...'))
++				E('p', { 'class': 'spinning alert-message warning' },
++					_('Device unreachable! Still waiting for device...'))
+ 			]);
++		}, 150000);
++		L.ui.awaitReconnect();
++	},
+ 
+-			window.setTimeout(function() {
+-				L.ui.showModal(_('Rebooting…'), [
+-					E('p', { 'class': 'spinning alert-message warning' },
+-						_('Device unreachable! Still waiting for device...'))
+-				]);
+-			}, 150000);
+-
+-			L.ui.awaitReconnect();
+-		})
+-		.catch(function(e) { L.ui.addNotification(null, E('p', e.message)) });
++	handleReboot: function() {
++		return callReboot().then(L.bind(function(res) {
++			if (res != 0)
++				throw new Error(_('The reboot command failed with code %d').format(res));
++			this.showRebootWait();
++		}, this)).catch(function(e) {
++			L.ui.addNotification(null, E('p', e.message));
++		});
++	},
++
++	handleOfficialOnce: function() {
++		return ui.showModal(_('确认一次性启动官方系统'), [
++			E('p', {}, _('路由器将从 SPI-NOR 启动官方系统一次。请确保当前没有正在进行的刷写、升级或关键业务。')),
++			E('div', { 'class': 'right' }, [
++				E('button', {
++					'class': 'btn',
++					'click': ui.hideModal
++				}, _('取消')),
++				' ',
++				E('button', {
++					'class': 'btn cbi-button-negative important',
++					'click': ui.createHandlerFn(this, function() {
++						return callOfficialOnce().then(L.bind(function(result) {
++							if (!result || !result.ready || !result.armed)
++								throw new Error((result && result.message) || _('无法安排官方系统启动。'));
++							return callReboot().then(L.bind(function(res) {
++								if (res != 0)
++									throw new Error(_('The reboot command failed with code %d').format(res));
++								this.showRebootWait();
++							}, this));
++						}, this)).catch(function(e) {
++							ui.hideModal();
++							L.ui.addNotification(null, E('p', e.message));
++						});
++					})
++				}, _('确认并重启'))
++			])
++		]);
+ 	},
+ 
+ 	handleSaveApply: null,

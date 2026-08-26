@@ -6,6 +6,14 @@
             "type": "string",
             "description": "Operation mode (ap, sta, etc.)"
         },
+        "disabled": {
+            "type": "boolean",
+            "description": "Disable this interface"
+        },
+        "vifidx": {
+            "type": "integer",
+            "description": "Stable private-driver virtual interface index"
+        },
         "mlo": {
             "type": "boolean",
             "description": "Multi-Link Operation"
@@ -74,6 +82,37 @@
                 "type": "string"
             },
             "description": "SAE group list"
+        },
+        "owe_groups": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "description": "OWE finite cyclic group list"
+        },
+        "owe_transition_bssid": {
+            "type": "string",
+            "description": "BSSID of the paired OWE transition BSS"
+        },
+        "owe_transition_ssid": {
+            "type": "string",
+            "description": "SSID of the paired OWE transition BSS"
+        },
+        "owe_transition_ifname": {
+            "type": "string",
+            "description": "Private-driver ifname of the paired OWE transition BSS"
+        },
+        "c2000max_owe_transition": {
+            "type": "boolean",
+            "description": "C2000MAX managed visible OWE transition BSS"
+        },
+        "c2000max_factory_owe": {
+            "type": "boolean",
+            "description": "C2000MAX managed hidden OWE transition BSS"
+        },
+        "c2000max_owe_suspended": {
+            "type": "boolean",
+            "description": "Hidden OWE BSS suspended by encryption lifecycle management"
         },
         "bridge_isolate": {
             "type": "boolean",

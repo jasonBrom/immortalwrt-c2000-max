@@ -139,6 +139,8 @@ verify_interlock()
 sync_interlock()
 {
 	C2000_MLO_CHANGED=0
+	[ ! -x /usr/sbin/c2000max-owe-transition ] ||
+		/usr/sbin/c2000max-owe-transition sync || return 1
 	collect_active_mlo_radios || return 1
 	restore_stale_iface_locks || return 1
 	lock_ordinary_aps || return 1
@@ -150,6 +152,11 @@ sync_interlock()
 		logger -t c2000max-mlo-interlock \
 			"已同步 MLO 互锁，活动成员：${C2000_MLO_ACTIVE_RADIOS:-无}"
 	fi
+	# Run once more after restoring MLO locks.  If the visible 5 GHz BSS was
+	# changed to WPA/SAE while MLO was active, this prevents its hidden OWE
+	# partner from being restored on its own.
+	[ ! -x /usr/sbin/c2000max-owe-transition ] ||
+		/usr/sbin/c2000max-owe-transition sync || return 1
 }
 
 status_interlock()

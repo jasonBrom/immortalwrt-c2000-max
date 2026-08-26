@@ -383,6 +383,14 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 
+			/* Dedicated U-Boot environment.  It is writable only so the
+			 * running TF-card system can arm a verified one-shot boot into
+			 * the untouched factory firmware. */
+			partition@40000 {
+				label = "u-boot-env";
+				reg = <0x040000 0x010000>;
+			};
+
 			partition@50000 {
 				label = "Factory";
 				reg = <0x050000 0x100000>;

@@ -77,18 +77,19 @@ chmod 0600 "$BRIDGE_RECONNECT_COUNT"
 
 rm -f "$LOG"
 
+# Do not mirror routine connect/reconnect notices into tmpfs.  A live remote
+# bridge previously grew this file beyond 4 MiB per session.
 {
 	printf '%s\n' \
 		'per_listener_settings false' \
 		"listener $LOCAL_PORT 127.0.0.1" \
 		'allow_anonymous true' \
 		'persistence false' \
-		'connection_messages true' \
+		'connection_messages false' \
 		'log_timestamp true' \
 		"log_dest file $LOG" \
 		'log_type error' \
 		'log_type warning' \
-		'log_type notice' \
 		"connection $device_id" \
 		"address $broker:1883" \
 		'bridge_protocol_version mqttv311' \
