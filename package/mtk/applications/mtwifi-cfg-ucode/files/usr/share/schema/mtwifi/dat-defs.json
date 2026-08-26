@@ -98,6 +98,10 @@
 	"ENC_2_COMMON_DAT": {
 		"none": [ "OPEN", "NONE" ],
 		"owe": [ "OWE", "AES" ],
+		"owe+ccmp": [ "OWE", "CCMP128" ],
+		"owe+gcmp": [ "OWE", "GCMP128" ],
+		"owe+ccmp256": [ "OWE", "CCMP256" ],
+		"owe+gcmp256": [ "OWE", "GCMP256" ],
 		"wpa+tkip": [ "WPA", "TKIP" ],
 		"wpa+tkip+ccmp": [ "WPA", "TKIPAES" ],
 		"wpa+ccmp": [ "WPA", "AES" ],

@@ -34,6 +34,11 @@ config app 'main'
 	# Rebuild only the official MQTT bridge once a day.  This refreshes the
 	# vendor cloud session without rebooting the router or restarting QModem.
 	option bridge_restart_interval '86400'
+	# Shared APP snapshot lifetimes.  LuCI exposes these values so users can
+	# trade modem query load for faster foreground refreshes.
+	option modem_cache_interval '10'
+	option selector_cache_interval '15'
+	option cache_warm_interval '2'
 	# APP foreground refresh policy.  The fast path sends only AT^MONSC through
 	# QModem's serialized queue; static modem fields retain their own caches.
 	option signal_normal_interval '3'

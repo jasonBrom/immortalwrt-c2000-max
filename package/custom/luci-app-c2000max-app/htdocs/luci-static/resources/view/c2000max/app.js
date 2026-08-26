@@ -62,6 +62,27 @@ const OPTIONS = [
 		desc: '允许通用 ubus 调用和扩展文件路径。', risk: true }
 ];
 
+const INTERVALS = [
+	{ name: 'modem_cache_interval', title: '设备快照缓存', unit: '秒',
+		desc: '设备、SIM 与蜂窝静态信息的返回缓存；调小后 APP 信息页更新更快。',
+		min: 1, max: 60, fallback: 10 },
+	{ name: 'selector_cache_interval', title: 'SIM 状态缓存', unit: '秒',
+		desc: '当前 SIM 槽与选择器状态的缓存时间。',
+		min: 1, max: 60, fallback: 15 },
+	{ name: 'cache_warm_interval', title: '后台预热间隔', unit: '秒',
+		desc: '后台刷新 APP 快照的周期；过低会增加设备查询负载。',
+		min: 1, max: 60, fallback: 2 },
+	{ name: 'signal_normal_interval', title: '普通信号刷新', unit: '秒',
+		desc: 'APP 信号页面常规刷新时的最短采样间隔。',
+		min: 1, max: 30, fallback: 3 },
+	{ name: 'signal_test_interval', title: '信号测试刷新', unit: '秒',
+		desc: 'APP 聚焦信号测试时的最短采样间隔。',
+		min: 1, max: 10, fallback: 1 },
+	{ name: 'signal_carrier_interval', title: '载波聚合刷新', unit: '秒',
+		desc: '载波拓扑与聚合频段的缓存时间。',
+		min: 2, max: 120, fallback: 10 }
+];
+
 const callStatus = rpc.declare({
 	object: 'c2000max_app',
 	method: 'status',
@@ -71,7 +92,8 @@ const callStatus = rpc.declare({
 const callSet = rpc.declare({
 	object: 'c2000max_app',
 	method: 'set',
-	params: OPTIONS.map(function(option) { return option.name; }),
+	params: OPTIONS.map(function(option) { return option.name; }).concat(
+		INTERVALS.map(function(option) { return option.name; })),
 	expect: { '': {} }
 });
 
@@ -136,6 +158,30 @@ function optionRow(option, status) {
 	]);
 }
 
+function intervalRow(option, status) {
+	const value = Number(status[option.name]) || option.fallback;
+	return E('div', { 'class': 'cbi-value' }, [
+		E('label', {
+			'class': 'cbi-value-title',
+			'for': 'c2000max-app-' + option.name
+		}, option.title),
+		E('div', { 'class': 'cbi-value-field' }, [
+			E('input', {
+				'id': 'c2000max-app-' + option.name,
+				'class': 'cbi-input-text',
+				'type': 'number',
+				'min': String(option.min),
+				'max': String(option.max),
+				'step': '1',
+				'value': String(value)
+			}),
+			E('span', { 'style': 'margin-left:.5em' }, option.unit),
+			E('div', { 'class': 'cbi-value-description' },
+				option.desc + ' 可设置 ' + option.min + '–' + option.max + ' 秒。')
+		])
+	]);
+}
+
 function statusLabel(status) {
 	if (!flag(status.remote_enable))
 		return '未启用';
@@ -178,12 +224,27 @@ return view.extend({
 	},
 
 	save: async function() {
-		const values = OPTIONS.map(function(option) {
+		const flags = OPTIONS.map(function(option) {
 			return document.getElementById(
 				'c2000max-app-' + option.name).checked;
 		});
+		const intervals = INTERVALS.map(function(option) {
+			return Number(document.getElementById(
+				'c2000max-app-' + option.name).value);
+		});
+		for (let i = 0; i < INTERVALS.length; i++) {
+			const option = INTERVALS[i];
+			const value = intervals[i];
+			if (!Number.isInteger(value) || value < option.min ||
+			    value > option.max) {
+				ui.addNotification(null, E('p', {},
+					option.title + '必须是 ' + option.min + '–' +
+					option.max + ' 之间的整数。'), 'error');
+				return;
+			}
+		}
 		const newlyRisky = OPTIONS.some(function(option, index) {
-			return option.risk && values[index] &&
+			return option.risk && flags[index] &&
 				!flag(this.currentStatus[option.name]);
 		}, this);
 		if (newlyRisky && !window.confirm(
@@ -193,7 +254,8 @@ return view.extend({
 
 		const button = document.getElementById('c2000max-app-save');
 		button.disabled = true;
-		const result = await L.resolveDefault(callSet.apply(null, values), {});
+		const result = await L.resolveDefault(callSet.apply(null,
+			flags.concat(intervals)), {});
 		if (!result.success) {
 			ui.addNotification(null,
 				E('p', {}, text(result.message, '无法保存 APP 管理设置')),
@@ -227,6 +289,9 @@ return view.extend({
 		const cloudOptions = OPTIONS.slice(13).map(function(option) {
 			return optionRow(option, status);
 		});
+		const refreshOptions = INTERVALS.map(function(option) {
+			return intervalRow(option, status);
+		});
 		const updatePolicy = E('div', { 'class': 'cbi-value' }, [
 			E('label', { 'class': 'cbi-value-title' }, '软件更新权限'),
 			E('div', { 'class': 'cbi-value-field' }, [
@@ -258,6 +323,11 @@ return view.extend({
 					'以下开关只有在“官方云端远程管理”开启时生效。'),
 				updatePolicy
 			].concat(cloudOptions)),
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, '数据刷新与缓存'),
+				E('div', { 'class': 'cbi-section-descr' },
+					'数值越小，APP 返回的数据越新，但蜂窝模块和 CPU 查询更频繁。')
+			].concat(refreshOptions)),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '设备身份与状态'),
 				E('table', { 'class': 'table' }, [

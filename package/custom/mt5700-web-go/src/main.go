@@ -1098,6 +1098,22 @@ func (a *webApp) health(w http.ResponseWriter, r *http.Request) {
 func browserRouteShim(basePath string) string {
 	encoded, _ := json.Marshal(basePath)
 	return `(function(base){
+if(!window.__c2000maxAsyncAssetCacheV6){
+ window.__c2000maxAsyncAssetCacheV6=true;
+ var NativeAppendChild=window.Element.prototype.appendChild;
+ window.Element.prototype.appendChild=function(node){
+  if(node&&node.tagName==='SCRIPT'&&node.src){
+   try{
+    var asset=new URL(node.src,window.location.href);
+    if(asset.host===window.location.host&&/\.async\.js$/.test(asset.pathname)){
+     asset.searchParams.set('c2000max','mt5700-r6');
+     node.src=asset.toString();
+    }
+   }catch(e){}
+  }
+  return NativeAppendChild.call(this,node);
+ };
+}
 var NativeWebSocket=window.WebSocket;
 function RoutedWebSocket(url,protocols){
  try {
@@ -1118,19 +1134,176 @@ window.WebSocket=RoutedWebSocket;
 `
 }
 
-func rewriteWebAsset(name string, data []byte, basePath string) []byte {
-	if basePath == "" {
+// networkSpeedCompatibilityShim is deliberately independent from the bundled
+// React component.  The vendor page has changed its internal hook layout more
+// than once, making minified-symbol patches unreliable on real browsers.  This
+// small client owns a separate WebSocket, samples the documented cumulative DS
+// counters every 500 ms while the speed switch is enabled and updates the two
+// Ant Design Statistic values in place.
+func networkSpeedCompatibilityShim(basePath string) string {
+	encoded, _ := json.Marshal(basePath)
+	return `(function(base){
+if(window.__c2000maxDsflowSpeedV3)return;
+window.__c2000maxDsflowSpeedV3=true;
+var socket=null,busy=false,last=null,idleTicks=0;
+function findStatistic(title){
+ var nodes=document.querySelectorAll('.ant-statistic');
+ for(var i=0;i<nodes.length;i++){
+  var label=nodes[i].querySelector('.ant-statistic-title');
+  if(label&&label.textContent.trim()===title)return nodes[i];
+ }
+ return null;
+}
+function targets(){
+ var up=findStatistic('上行速率'),down=findStatistic('下行速率');
+ return up&&down?{up:up,down:down}:null;
+}
+function enabled(){
+	var t=targets(),scope=t&&t.up;
+	for(var depth=0;scope&&depth<8;depth++,scope=scope.parentElement){
+	 if(scope.textContent.indexOf('实时网速')<0)continue;
+	 var node=scope.querySelector('button[role="switch"],.ant-switch');
+	 if(node)return node.getAttribute('aria-checked')==='true'||node.classList.contains('ant-switch-checked');
+	}
+	return true;
+}
+function setValue(stat,value){
+ var node=stat.querySelector('.ant-statistic-content-value')||stat.querySelector('.ant-statistic-content');
+ if(node){node.textContent=value;node.setAttribute('data-c2000max-dsflow','1');}
+}
+function format(bytesPerSecond){
+ var bits=Math.max(0,bytesPerSecond*8);
+ if(bits>=1e9)return(bits/1e9).toFixed(2)+' Gbps';
+ if(bits>=1e6)return(bits/1e6).toFixed(2)+' Mbps';
+ if(bits>=1e3)return(bits/1e3).toFixed(2)+' Kbps';
+ return Math.round(bits)+' bps';
+}
+function render(up,down){
+ var t=targets();
+ if(!t)return;
+ setValue(t.up,format(up));setValue(t.down,format(down));
+}
+function consume(raw){
+	var payload;
+	try{payload=JSON.parse(raw);}catch(e){return;}
+	if(!payload||!Object.prototype.hasOwnProperty.call(payload,'success'))return;
+	busy=false;
+	if(!payload.success||typeof payload.data!=='string')return;
+ var compact=payload.data.replace(/\s+/g,'');
+ var m=compact.match(/\^DSFLOWQRY:([0-9A-Fa-f]{1,8}),([0-9A-Fa-f]{1,16}),([0-9A-Fa-f]{1,16}),([0-9A-Fa-f]{1,8}),([0-9A-Fa-f]{1,16}),([0-9A-Fa-f]{1,16})/);
+ if(!m)return;
+ var now=performance.now(),tx=BigInt('0x'+m[5]),rx=BigInt('0x'+m[6]);
+ if(last){
+  var seconds=(now-last.time)/1000,txDelta=tx-last.tx,rxDelta=rx-last.rx;
+  render(txDelta>=0&&seconds>0?Number(txDelta)/seconds:0,rxDelta>=0&&seconds>0?Number(rxDelta)/seconds:0);
+ }
+ last={time:now,tx:tx,rx:rx};
+}
+function closeSocket(){
+ if(socket){try{socket.close();}catch(e){}socket=null;}
+ busy=false;last=null;
+}
+function ensureSocket(){
+ if(socket&&(socket.readyState===0||socket.readyState===1))return;
+ var scheme=location.protocol==='https:'?'wss://':'ws://';
+ socket=new window.WebSocket(scheme+location.host+base+'/ws');
+ socket.onmessage=function(event){consume(event.data);};
+ socket.onclose=function(){socket=null;busy=false;last=null;};
+ socket.onerror=function(){busy=false;};
+}
+function tick(){
+ var t=targets();
+ if(!t){if(++idleTicks>10)closeSocket();return;}
+ idleTicks=0;
+ if(!enabled()){closeSocket();render(0,0);return;}
+ ensureSocket();
+ if(socket&&socket.readyState===1&&!busy){busy=true;socket.send('AT^DSFLOWQRY');}
+}
+window.__c2000maxDsflowTimer=setInterval(tick,500);tick();
+})(` + string(encoded) + `);
+`
+}
+
+const networkInfoAsset = "p__CPE__Network__Info__index.30901ff8.async.js"
+
+// The supplied panel bundle calculates a DSFLOWQRY byte-counter delta but
+// never renders it: the real-time cards only consult PDCP push reports, which
+// remain zero on MT5700M-CN firmware.  Keep the proprietary bundle intact on
+// disk and apply a small, regression-tested compatibility patch while serving
+// this one asset.
+func patchNetworkInfoAsset(name string, data []byte) []byte {
+	if name != networkInfoAsset {
 		return data
+	}
+	content := string(data)
+	replacements := [][2]string{
+		{
+			`vr=R()(La,2),_e=vr[0],br=vr[1],Ze=`,
+			`vr=R()(La,2),_e=vr[0],br=vr[1],C2kSpeedSampleRef=(0,j.useRef)({lastUpdateTime:0,lastTxFlow:0,lastRxFlow:0}),Ze=`,
+		},
+		{
+			`_e.lastUpdateTime>0?(t=(r-_e.lastUpdateTime)/1e3,t>0&&(g=u-_e.lastTxFlow,v=s-_e.lastRxFlow,h=g/t,x=v/t,br({upSpeed:h,downSpeed:x,lastUpdateTime:r,lastTxFlow:u,lastRxFlow:s}))):br(o()(o()({},_e),{},{lastUpdateTime:r,lastTxFlow:u,lastRxFlow:s})),Oa(`,
+			`C2kSpeedSampleRef.current.lastUpdateTime>0?(t=(r-C2kSpeedSampleRef.current.lastUpdateTime)/1e3,t>0&&(g=u-C2kSpeedSampleRef.current.lastTxFlow,v=s-C2kSpeedSampleRef.current.lastRxFlow,h=g>=0?g/t:0,x=v>=0?v/t:0,br({upSpeed:h,downSpeed:x,lastUpdateTime:r,lastTxFlow:u,lastRxFlow:s}))):br({upSpeed:0,downSpeed:0,lastUpdateTime:r,lastTxFlow:u,lastRxFlow:s}),C2kSpeedSampleRef.current={lastUpdateTime:r,lastTxFlow:u,lastRxFlow:s},Oa(`,
+		},
+		{
+			`):ne.ZP.error("\u5B9E\u65F6\u7F51\u901F\u5F00\u542F\u5931\u8D25"),a.next=10`,
+			`):(Ve(!0),hn(!1),Xr(xn),ne.ZP.warning("PDCP \u4E0A\u62A5\u4E0D\u53EF\u7528\uFF0C\u5DF2\u6539\u7528 DS \u6D41\u91CF\u91C7\u6837"),mn(!1)),a.next=10`,
+		},
+		{
+			`case 7:a.prev=7,a.t0=a.catch(0),ne.ZP.error("\u8BBE\u7F6EPDCP\u6570\u636E\u4E0A\u62A5\u5931\u8D25")`,
+			`case 7:a.prev=7,a.t0=a.catch(0),Ve(!0),hn(!1),Xr(xn),ne.ZP.warning("PDCP \u4E0A\u62A5\u4E0D\u53EF\u7528\uFF0C\u5DF2\u6539\u7528 DS \u6D41\u91CF\u91C7\u6837"),mn(!1)`,
+		},
+		{
+			`case 5:return r.prev=5`,
+			`case 5:return C2kSpeedSampleRef.current={lastUpdateTime:0,lastTxFlow:0,lastRxFlow:0},br({upSpeed:0,downSpeed:0,lastUpdateTime:0,lastTxFlow:0,lastRxFlow:0}),r.prev=5`,
+		},
+		{
+			`d=r.sent,d.success?(Ve(!1),fn(null),hn(!1),ne.ZP.success("\u5173\u95ED\u5B9E\u65F6\u7F51\u901F\u6210\u529F")):ne.ZP.error("\u5173\u95ED\u5B9E\u65F6\u7F51\u901F\u5931\u8D25")`,
+			`d=r.sent,Ve(!1),fn(null),hn(!1),d.success?ne.ZP.success("\u5173\u95ED\u5B9E\u65F6\u7F51\u901F\u6210\u529F"):ne.ZP.warning("PDCP \u5173\u95ED\u5931\u8D25\uFF0CDS \u6D41\u91CF\u91C7\u6837\u5DF2\u505C\u6B62")`,
+		},
+		{
+			`case 12:r.prev=12,r.t0=r.catch(5),ne.ZP.error("\u8BBE\u7F6EPDCP\u6570\u636E\u4E0A\u62A5\u5931\u8D25")`,
+			`case 12:r.prev=12,r.t0=r.catch(5),Ve(!1),fn(null),hn(!1),ne.ZP.warning("PDCP \u5173\u95ED\u5931\u8D25\uFF0CDS \u6D41\u91CF\u91C7\u6837\u5DF2\u505C\u6B62")`,
+		},
+		{
+			`se?an(se.ulPdcpRate):"0 bps"`,
+			`se&&se.ulPdcpRate>0?an(se.ulPdcpRate):an(_e.upSpeed)`,
+		},
+		{
+			`se?an(se.dlPdcpRate):"0 bps"`,
+			`se&&se.dlPdcpRate>0?an(se.dlPdcpRate):an(_e.downSpeed)`,
+		},
+		{
+			`((re==null?void 0:re.ulPdcpRate)||(se==null?void 0:se.ulPdcpRate)||0)*8`,
+			`((re==null?void 0:re.ulPdcpRate)||(se==null?void 0:se.ulPdcpRate)||_e.upSpeed||0)*8`,
+		},
+		{
+			`((re==null?void 0:re.dlPdcpRate)||(se==null?void 0:se.dlPdcpRate)||0)*8`,
+			`((re==null?void 0:re.dlPdcpRate)||(se==null?void 0:se.dlPdcpRate)||_e.downSpeed||0)*8`,
+		},
+	}
+	for _, replacement := range replacements {
+		content = strings.ReplaceAll(content, replacement[0], replacement[1])
+	}
+	return []byte(content)
+}
+
+func rewriteWebAsset(name string, data []byte, basePath string) []byte {
+	data = patchNetworkInfoAsset(name, data)
+	if name == networkInfoAsset {
+		data = append([]byte(networkSpeedCompatibilityShim(basePath)), data...)
 	}
 	extension := strings.ToLower(path.Ext(name))
 	if extension != ".html" && extension != ".js" && extension != ".css" && extension != ".json" && extension != ".svg" {
 		return data
 	}
 	content := string(data)
-	content = strings.ReplaceAll(content, "/5700/", basePath+"/5700/")
-	content = strings.ReplaceAll(content, "/scripts/loading.js", basePath+"/scripts/loading.js")
-	content = strings.ReplaceAll(content, "/cgi-bin/at-ws-info", basePath+"/cgi-bin/at-ws-info")
-	content = strings.ReplaceAll(content, "/cgi-bin/at-log-clear", basePath+"/cgi-bin/at-log-clear")
+	content = strings.ReplaceAll(content, "/scripts/loading.js", basePath+"/scripts/loading.js?v=c2000max-mt5700-r6")
+	if basePath != "" {
+		content = strings.ReplaceAll(content, "/5700/", basePath+"/5700/")
+		content = strings.ReplaceAll(content, "/cgi-bin/at-ws-info", basePath+"/cgi-bin/at-ws-info")
+		content = strings.ReplaceAll(content, "/cgi-bin/at-log-clear", basePath+"/cgi-bin/at-log-clear")
+	}
 	if name == "scripts/loading.js" {
 		content = browserRouteShim(basePath) + content
 	}
@@ -1171,8 +1344,8 @@ func (a *webApp) serveWebAsset(w http.ResponseWriter, r *http.Request, name stri
 	if contentType := contentTypeFor(name); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
-	if strings.HasSuffix(name, ".html") {
-		w.Header().Set("Cache-Control", "no-cache")
+	if strings.HasSuffix(name, ".html") || name == networkInfoAsset || name == "scripts/loading.js" {
+		w.Header().Set("Cache-Control", "no-store")
 	} else {
 		w.Header().Set("Cache-Control", "public, max-age=604800")
 	}

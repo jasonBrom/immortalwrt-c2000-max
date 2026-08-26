@@ -9,6 +9,16 @@ SCRIPT="$ROOT/files/usr/sbin/c2000max-port-role"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+MTWIFI_DEFAULTS="$ROOT/../../mtk/applications/mtwifi-cfg-ucode/files/lib/wifi/mtwifi.uc"
+grep -Fq 'return { channel: "6", htmode: "EHT40"' "$MTWIFI_DEFAULTS" || {
+	echo "FAIL: the generated 2.4 GHz default is not fixed to channel 6" >&2
+	exit 1
+}
+grep -Fq "wifi_2g_channel_v40" "$ROOT/files/etc/uci-defaults/99-c2000max-defaults" || {
+	echo "FAIL: preserved auto-channel configurations are not migrated for MLO" >&2
+	exit 1
+}
+
 declare -A DB HELD
 FAIL_MATCH=""
 QMODEM_RUNNING=1
@@ -1575,12 +1585,16 @@ fi
 [[ -e "$DEGRADED" ]] || fail "failed rollback did not mark degraded"
 [[ "$FORCE_OFF" -gt 1 ]] || fail "failed rollback did not force HNAT off"
 
+
 HNAT_HOTPLUG="$ROOT/../.."/mtk/applications/hnat-detect/files/etc/hotplug.d/iface/99-hnat-detect
 grep -q 'ifup|ifdown|update' "$HNAT_HOTPLUG" ||
 	fail "C2000 HNAT hotplug does not cover down/update events"
 grep -q 'exec /etc/init.d/c2000max-hnat reload' "$HNAT_HOTPLUG" ||
 	fail "C2000 HNAT hotplug does not run fail-closed controller convergence"
 EQOS_HOTPLUG="$ROOT/../.."/mtk/applications/luci-app-eqos-mtk/root/etc/hotplug.d/iface/10-eqos
+grep -q 'EQOS_ENABLED=.*eqos.config.enabled' "$EQOS_HOTPLUG" &&
+	grep -q '\[ "$EQOS_ENABLED" = 1 \] || exit 0' "$EQOS_HOTPLUG" ||
+	fail "disabled C2000 EQoS hotplug can still reset HNAT/FoE"
 grep -q '/etc/init.d/eqos stop' "$EQOS_HOTPLUG" ||
 	fail "C2000 EQoS hotplug does not stop unsafe runtime state"
 grep -q 'c2000max-eqos-hotplug.lock' "$EQOS_HOTPLUG" ||
@@ -1598,6 +1612,30 @@ grep -Fq 'S??c2000max-hnat' \
 EQOS_INIT="$ROOT/../.."/mtk/applications/luci-app-eqos-mtk/root/etc/init.d/eqos
 EQOS_CLI="$ROOT/../.."/mtk/applications/luci-app-eqos-mtk/root/usr/sbin/eqos
 source <(awk '$0 != ". /lib/functions/system.sh" { print }' "$EQOS_INIT")
+
+# Reproduce the WAN DHCP/IPv6 burst which used to call reload twice while the
+# limiter was disabled.  With no published backend, neither call may touch
+# QDMA or invalidate FoE.  A real 1 -> 0 transition still owns a backend marker
+# and must execute the cleanup transaction once.
+(
+	EQOS_RUNTIME_DIR="$TMP/eqos-disabled-noop"
+	EQOS_ERROR_FILE="$EQOS_RUNTIME_DIR/last_error"
+	EQOS_PROFILE_FILE="$EQOS_RUNTIME_DIR/profiles"
+	EQOS_CALL_PROBE="$TMP/eqos-disabled-calls"
+	rm -rf "$EQOS_RUNTIME_DIR"
+	rm -f "$EQOS_CALL_PROBE"
+	config_get_bool() { printf -v "$1" '%s' 0; }
+	eqos() { printf '%s\n' "$*" >>"$EQOS_CALL_PROBE"; }
+	eqos_reload_service_locked
+	eqos_reload_service_locked
+	[[ ! -e "$EQOS_CALL_PROBE" ]] ||
+		fail "disabled EQoS reload still touched QDMA/HNAT without runtime ownership"
+	mkdir -p "$EQOS_RUNTIME_DIR"
+	printf '%s\n' hnat >"$EQOS_RUNTIME_DIR/backend"
+	eqos_reload_service_locked
+	grep -qx stop "$EQOS_CALL_PROBE" ||
+		fail "disabling an active EQoS backend no longer performs cleanup"
+)
 
 EQOS_SIGNAL_PROBE="$TMP/eqos-signal-probe"
 rm -f "$EQOS_SIGNAL_PROBE"
@@ -1950,13 +1988,20 @@ if grep -q 'parseInt' "$V31_VIEW"; then
 fi
 grep -q 'valueAsNumber' "$V31_VIEW" ||
 	fail "V31 ratio input is not validated as an integer"
-grep -q 'WAN 和 WAN＋5G 模式关闭 HNAT，但可以使用软件流量分载' "$V31_VIEW" ||
-	fail "V31 UI does not disclose the WAN software-flow fallback policy"
-grep -q '软件流量分载（HNAT 已关闭）' "$V31_VIEW" ||
-	fail "V31 UI cannot report the WAN software-flow runtime"
+grep -q 'LAN、WAN 和 WAN＋5G 均可按 TurboACC 设置使用 MediaTek HNAT' "$V31_VIEW" ||
+	fail "V31 UI does not disclose HNAT support in all port modes"
+grep -q 'WAN＋5G 由 MWAN3 选择每条新连接的出口' "$V31_VIEW" ||
+	fail "V31 UI does not explain dual-WAN per-flow selection"
 if grep -Eq '紧急|WHNAT|PPE 端点|MTK GMAC|网络 / WAN 配置 / 服务启动策略' "$V31_VIEW"; then
 	fail "V31 UI still exposes emergency wording or low-level diagnostic clutter"
 fi
+TURBO_VIEW="$ROOT/../../mtk/applications/luci-app-turboacc-mtk/htdocs/luci-static/resources/view/turboacc.js"
+if grep -q 'uses MediaTek HNAT only in LAN mode' "$TURBO_VIEW" ||
+   grep -q 'WAN and WAN+5G keep HNAT' "$TURBO_VIEW"; then
+	fail "TurboACC UI still displays the obsolete WAN HNAT limitation"
+fi
+grep -q 'Ethernet topology is inconsistent or degraded' "$TURBO_VIEW" ||
+	fail "TurboACC UI lost the real topology-degradation warning"
 grep -q "method: 'port_repair'" "$V31_VIEW" &&
 	grep -q 'repair: async function' "$V31_VIEW" &&
 	grep -q "document.getElementById('c2000max-port-repair')" "$V31_VIEW" &&
@@ -2027,6 +2072,81 @@ assert_argon_v31_resources()
 		fail "$label Argon header still contains a stale cache token"
 	fi
 }
+
+LUCI_BASE_MAKEFILE="$ROOT/../luci-base/Makefile"
+LUCI_LUA_MAKEFILE="$ROOT/../../../feeds/luci/modules/luci-lua-runtime/Makefile"
+for luci_makefile in "$LUCI_BASE_MAKEFILE" "$LUCI_LUA_MAKEFILE"; do
+	grep -Fqx 'PKG_SRC_VERSION:=26.231.50176~e9cdc0a' "$luci_makefile" ||
+		fail "LuCI version does not use the requested branch revision: $luci_makefile"
+	grep -Fqx 'PKG_GITBRANCH:=LuCI c2000max-v36.01-head branch' "$luci_makefile" ||
+		fail "LuCI version does not expose the requested C2000MAX branch label: $luci_makefile"
+done
+
+DESIGN_DEFAULT="$ROOT/../luci-theme-design/root/etc/uci-defaults/30_luci-theme-design"
+[[ -f "$DESIGN_DEFAULT" ]] || fail "selectable Design theme defaults are missing"
+grep -Fq 'set luci.themes.Design=/luci-static/design' "$DESIGN_DEFAULT" ||
+	fail "Design theme is not registered with LuCI"
+if grep -Fq 'set luci.main.mediaurlbase=/luci-static/design' "$DESIGN_DEFAULT"; then
+	fail "Design theme still replaces Argon during first boot"
+fi
+grep -Fq '/luci-static/argon|/luci-static/design)' "$DEFAULTS" ||
+	fail "board defaults do not preserve an explicit Design theme selection"
+DESIGN_HEADER="$ROOT/../luci-theme-design/luasrc/view/themes/design/header.htm"
+DESIGN_COMPAT="$ROOT/../luci-theme-design/htdocs/luci-static/design/css/c2000max.css"
+grep -Fq 'admin/translations' "$DESIGN_HEADER" &&
+	grep -Fq '?v=<%= ver.luciversion %>-c2000max-v36.01-design' "$DESIGN_HEADER" &&
+	grep -Fq 'css/c2000max.css?v=<%= ver.luciversion %>-c2000max-v36.01' "$DESIGN_HEADER" ||
+	fail "Design theme does not cache-bust translations and C2000MAX compatibility CSS"
+grep -Fq 'body.modal-overlay-active #maincontent > .alert-message' "$DESIGN_COMPAT" &&
+	grep -Fq '#modal_overlay .modal.cbi-modal' "$DESIGN_COMPAT" &&
+	grep -Fq '.modal.cbi-modal .cbi-dynlist' "$DESIGN_COMPAT" &&
+	grep -Fq '.modal.cbi-modal .cbi-dropdown' "$DESIGN_COMPAT" ||
+	fail "Design theme lacks modal notification and dynamic-list compatibility fixes"
+grep -Fq "set luci.main.mediaurlbase='/luci-static/argon'" "$DEFAULTS" ||
+	fail "Argon is no longer the fallback/default LuCI theme"
+
+MLO_VIEW="$ROOT/../../mtk/applications/luci-app-mtwifi-cfg/root/usr/share/luci-app-mtwifi-cfg/wireless-mtk.js"
+MLO_PO="$ROOT/../../mtk/applications/luci-app-mtwifi-cfg/po/zh_Hans/mtwifi-cfg.po"
+[[ -f "$MLO_VIEW" ]] || fail "MediaTek wireless MLO management page is missing"
+grep -Fq "o.value('mlo-ap', _('MLO Access Point (MLO AP)'))" "$MLO_VIEW" &&
+	grep -Fq "'click': ui.createHandlerFn(this, 'handleMloToggle'" "$MLO_VIEW" &&
+	grep -Fq "'renderMloStaOptionsModal' : 'renderMloOptionsModal'" "$MLO_VIEW" &&
+	grep -Fq "'click': ui.createHandlerFn(this, 'handleMloRemove'" "$MLO_VIEW" ||
+	fail "wireless page does not expose complete MLO create/toggle/edit/remove management"
+grep -Fq "_('MLO Multi-Link Overview')" "$MLO_VIEW" &&
+	grep -Fq 'msgstr "MLO 多链路概览"' "$MLO_PO" ||
+	fail "wireless page does not expose a distinct MLO overview section"
+grep -Fq 'msgstr "添加 MLO AP"' "$MLO_PO" &&
+	grep -Fq 'msgstr "MLO 客户端 (MLO STA)"' "$MLO_PO" ||
+	fail "MLO management lacks Simplified Chinese translations"
+grep -Fq "set wireless.c2000max_mlo.mlo='1'" "$DEFAULTS" &&
+	grep -Fq "set wireless.c2000max_mlo.disabled='1'" "$DEFAULTS" &&
+	grep -Fq "set wireless.c2000max_mlo.ssid='ImmortalWrt-MLO'" "$DEFAULTS" &&
+	grep -Fq 'add_list "wireless.c2000max_mlo.device=$mlo_2g"' "$DEFAULTS" &&
+	grep -Fq 'add_list "wireless.c2000max_mlo.device=$mlo_5g"' "$DEFAULTS" ||
+	fail "factory defaults do not create a complete disabled 2.4/5 GHz MLO group"
+if ! awk '/set wireless\.c2000max_mlo\.mlo=/{mlo=NR}
+	/set wireless\.c2000max_mlo\.disabled=/{disabled=NR}
+	END {exit !(mlo && disabled && disabled > mlo)}' "$DEFAULTS"; then
+	fail "MLO factory group is not explicitly disabled"
+fi
+
+if grep -Fq '5 GHz 160 MHz 提醒' "$MLO_VIEW" ||
+	grep -Fq '必须先完成雷达检测（CAC）' "$MLO_VIEW"; then
+	fail "wireless page still shows the DFS/CAC debugging warning"
+fi
+
+DFS_PROFILE_DIR="$ROOT/../../mtk/drivers/wifi-profile/files/mt7993"
+dfs_profile_count=0
+for dfs_profile in "$DFS_PROFILE_DIR"/*.dat; do
+	[[ -f "$dfs_profile" ]] || continue
+	grep -q '^DfsEnable=' "$dfs_profile" || continue
+	dfs_profile_count=$((dfs_profile_count + 1))
+	grep -q '^DfsEnable=0$' "$dfs_profile" ||
+		fail "MT7993 profile does not default DfsEnable to 0: $dfs_profile"
+done
+[[ "$dfs_profile_count" -gt 0 ]] ||
+	fail "no MT7993 DfsEnable profile was checked"
 
 CUSTOM_ARGON_HEADER="$ROOT/../luci-theme-argon/ucode/template/themes/argon/header.ut"
 assert_argon_v31_resources "$CUSTOM_ARGON_HEADER" "selected custom"

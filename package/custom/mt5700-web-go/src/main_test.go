@@ -79,15 +79,79 @@ func TestInstanceAssetRewrite(t *testing.T) {
 	rewritten := string(rewriteWebAsset("index.html", []byte(
 		`<link href="/5700/app.css"><script src="/scripts/loading.js"></script>`), "/modem/ak68"))
 	for _, expected := range []string{
-		`/modem/ak68/5700/app.css`, `/modem/ak68/scripts/loading.js`,
+		`/modem/ak68/5700/app.css`, `/modem/ak68/scripts/loading.js?v=c2000max-mt5700-r6`,
 	} {
 		if !strings.Contains(rewritten, expected) {
 			t.Fatalf("rewritten asset is missing %q: %s", expected, rewritten)
 		}
 	}
 	shim := string(rewriteWebAsset("scripts/loading.js", []byte("ready();"), "/modem/ak68"))
-	if !strings.Contains(shim, `/modem/ak68`) || !strings.Contains(shim, `RoutedWebSocket`) {
+	if !strings.Contains(shim, `/modem/ak68`) || !strings.Contains(shim, `RoutedWebSocket`) ||
+		!strings.Contains(shim, `__c2000maxAsyncAssetCacheV6`) ||
+		!strings.Contains(shim, `asset.searchParams.set('c2000max','mt5700-r6')`) {
 		t.Fatalf("WebSocket routing shim is missing: %s", shim)
+	}
+	rootHTML := string(rewriteWebAsset("index.html", []byte(`<script src="/scripts/loading.js"></script>`), ""))
+	if !strings.Contains(rootHTML, `/scripts/loading.js?v=c2000max-mt5700-r6`) {
+		t.Fatalf("root instance loading script is not cache busted: %s", rootHTML)
+	}
+	rootShim := string(rewriteWebAsset("scripts/loading.js", []byte("ready();"), ""))
+	if !strings.Contains(rootShim, `__c2000maxAsyncAssetCacheV6`) {
+		t.Fatal("root instance does not install the async chunk cache buster")
+	}
+}
+
+func TestNetworkSpeedAssetUsesDSFlowFallback(t *testing.T) {
+	asset, err := embeddedWeb.ReadFile("web/p__CPE__Network__Info__index.30901ff8.async.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(rewriteWebAsset(networkInfoAsset, asset, "/modem/internal"))
+	if !strings.HasPrefix(content, `(function(base){`) {
+		t.Fatal("standalone DS flow poller is not executed before the vendor chunk")
+	}
+	for _, expected := range []string{
+		`__c2000maxDsflowSpeedV3`,
+		`new window.WebSocket`,
+		`/modem/internal`,
+		`socket.send('AT^DSFLOWQRY')`,
+		`setInterval(tick,500)`,
+		`Object.prototype.hasOwnProperty.call(payload,'success')`,
+		`data-c2000max-dsflow`,
+		`BigInt('0x'+m[5])`,
+		`C2kSpeedSampleRef`,
+		`C2kSpeedSampleRef.current.lastUpdateTime`,
+		`E.sendCommand("AT^DSFLOWQRY")`,
+		`PDCP \u4E0A\u62A5\u4E0D\u53EF\u7528`,
+		`an(_e.upSpeed)`,
+		`an(_e.downSpeed)`,
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("network-speed fallback is missing %q", expected)
+		}
+	}
+	if strings.Contains(content, `se?an(se.ulPdcpRate):"0 bps"`) ||
+		strings.Contains(content, `se?an(se.dlPdcpRate):"0 bps"`) {
+		t.Fatal("real-time speed still falls back to a zero PDCP value")
+	}
+	if strings.Contains(content, `Ce("networkSpeed",!0,1)`) {
+		t.Fatal("real-time speed still relies on the unrelated one-second scheduler")
+	}
+	if strings.Contains(content, `C2kSpeedPollRef`) {
+		t.Fatal("network-speed fallback still relies on a minified React polling hook")
+	}
+}
+
+func TestNetworkSpeedAssetDisablesBrowserCaching(t *testing.T) {
+	server := httptest.NewServer(testApp(t))
+	defer server.Close()
+	response, err := http.Get(server.URL + "/5700/" + networkInfoAsset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if cacheControl := response.Header.Get("Cache-Control"); cacheControl != "no-store" {
+		t.Fatalf("network-speed asset cache policy = %q", cacheControl)
 	}
 }
 

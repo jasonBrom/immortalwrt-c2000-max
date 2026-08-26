@@ -64,6 +64,33 @@ msgstr "MLO AP"
 msgid "Add MLO AP"
 msgstr "添加 MLO AP"
 
+msgid "MLO Multi-Link Overview"
+msgstr "MLO 多链路概览"
+
+msgid "Runtime links"
+msgstr "运行链路"
+
+msgid "%d MLD / %d links"
+msgstr "%d 个 MLD / %d 条链路"
+
+msgid "Links"
+msgstr "链路"
+
+msgid "MLO · %d links"
+msgstr "MLO · %d 条链路"
+
+msgid "MLO aggregate"
+msgstr "MLO 汇总"
+
+msgid "Receive"
+msgstr "接收"
+
+msgid "Transmit"
+msgstr "发送"
+
+msgid "Link %d"
+msgstr "链路 %d"
+
 msgid "MLO Access Point (MLO AP)"
 msgstr "MLO 接入点 (MLO AP)"
 
@@ -120,3 +147,12 @@ msgstr "当前 MLO STA 仅支持 WPA3-SAE 加密。"
 
 msgid "The scan result does not identify whether this network supports MLO. Select this mode only for a known MLO AP."
 msgstr "扫描结果无法确认该网络是否支持 MLO。请仅对已知的 MLO AP 选择此模式。"
+
+msgid "MLO interlock"
+msgstr "MLO 互锁"
+
+msgid "This ordinary wireless network is temporarily disabled while MLO is enabled. Disable MLO before enabling it."
+msgstr "MLO 启用期间，普通无线网络由互锁临时关闭。请先禁用 MLO，再启用普通无线网络。"
+
+msgid "Ordinary SSIDs are temporarily disabled while MLO is enabled."
+msgstr "MLO 已启用，普通 2.4G/5G SSID 已由互锁临时关闭。"

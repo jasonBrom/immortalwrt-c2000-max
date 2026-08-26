@@ -1,5 +1,6 @@
 'use strict';
 'require c2000max.traffic-chart as trafficChart';
+'require dom';
 'require form';
 'require poll';
 'require rpc';
@@ -765,6 +766,18 @@ var TimeWindowSelector = form.DynamicList.extend({
             return '%s@%s-%s'.format(day, start, end);
         });
     },
+    formvalue: function(sectionId) {
+        var element = this.getUIElement(sectionId),
+            values = element ? element.getValue() : null;
+
+        if (values != null)
+            return L.toArray(values);
+
+        var node = this.map.findElement('id', this.cbid(sectionId));
+        return node ? Array.prototype.map.call(node.querySelectorAll('.item > input[type="hidden"]'), function(input) {
+            return input.value;
+        }) : [];
+    },
     renderWidget: function(sectionId, optionIndex, cfgvalue) {
         var dayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
         var items = L.toArray(cfgvalue != null ? cfgvalue : this.default);
@@ -777,7 +790,6 @@ var TimeWindowSelector = form.DynamicList.extend({
         var widget = new ui.DynamicList(items, choices, {
             id: this.cbid(sectionId),
             optional: false,
-            validate: this.getValidator(sectionId),
             disabled: (this.readonly != null) ? this.readonly : this.map.readonly
         });
         var widgetNode = widget.render();
@@ -820,9 +832,10 @@ var TimeWindowSelector = form.DynamicList.extend({
                 'type': 'button',
                 'click': function(ev) {
                     ev.preventDefault();
-                    widget.setValue(days.map(function(value) {
+                    var values = days.map(function(value) {
                         return '%s@00:00-00:00'.format(value);
-                    }));
+                    });
+                    widget.setValue(values);
                 }
             }, label);
         }
@@ -835,6 +848,14 @@ var TimeWindowSelector = form.DynamicList.extend({
         }, [day, start, E('span', {}, '至'), end, add]), widgetNode, E('div', {
             'style': 'color:#777;margin-top:.35em'
         }, '每条规则可添加任意多个独立时段；起止相同表示全天，结束早于开始表示跨午夜。')]);
+    },
+    isValid: function(sectionId) {
+        var result = this.validate(sectionId, this.formvalue(sectionId));
+        this.timeWindowValidationError = result === true ? '' : String(result);
+        return result === true;
+    },
+    getValidationError: function() {
+        return this.timeWindowValidationError || '';
     },
     validate: function(sectionId, value) {
         var values = L.toArray(value);
@@ -895,6 +916,86 @@ var TimeWindowSelector = form.DynamicList.extend({
                     return '生效时段冲突：%s 与 %s 在%s重叠。'.format(intervals[d][j - 1].label, intervals[d][j].label, dayNames[d]);
         }
         return true;
+    }
+});
+
+var RuleGridSection = form.GridSection.extend({
+    handleAdd: function() {
+        if (!currentProfileId) {
+            ui.addNotification(null, E('p', {}, '当前规则库尚未初始化，暂时不能创建管控规则。请先在“设置”中安装或激活规则库。'));
+            return Promise.resolve();
+        }
+        var sectionId = this.map.data.add(this.uciconfig || this.map.config, this.sectiontype);
+        this.map.data.set('c2000max_traffic', sectionId, 'enabled', '1');
+        this.map.data.set('c2000max_traffic', sectionId, 'name', '新管控规则');
+        this.map.data.set('c2000max_traffic', sectionId, 'ruleset', currentProfileId);
+        this.map.data.set('c2000max_traffic', sectionId, 'target', 'all');
+        this.map.data.set('c2000max_traffic', sectionId, 'match_mode', 'category');
+        this.map.data.set('c2000max_traffic', sectionId, 'time_windows', ['0@00:00-00:00', '1@00:00-00:00', '2@00:00-00:00', '3@00:00-00:00', '4@00:00-00:00', '5@00:00-00:00', '6@00:00-00:00']);
+        this.map.addedSection = sectionId;
+        return this.renderMoreOptionsModal(sectionId);
+    },
+    handleModalSave: function(modalMap, ev) {
+        var mapNode = this.getActiveModalMap();
+        var activeMap = mapNode ? dom.findClassInstance(mapNode) : null;
+        var invalid;
+        var saveTasks;
+
+        function reportSaveError(error) {
+            var message = error && error.message ? String(error.message) : '',
+                oldError = mapNode && mapNode.querySelector('.c2000max-rule-save-error'),
+                inlineError;
+            invalid = mapNode && mapNode.querySelector('.cbi-input-invalid, .cbi-value-error');
+            if (!message || message === '[object Object]')
+                message = invalid ? '保存失败，请检查弹窗中标红或提示有误的字段。' : '保存失败，未能写入这条管控规则。';
+            if (oldError)
+                oldError.remove();
+            inlineError = E('div', {
+                'class': 'alert-message error c2000max-rule-save-error',
+                'style': 'position:relative;z-index:1;margin:.5em 0 1em'
+            }, E('p', {}, safeText(message)));
+            if (mapNode)
+                mapNode.insertBefore(inlineError, mapNode.firstChild);
+            else
+                ui.addNotification(null, E('p', {}, safeText(message)));
+            if (invalid) {
+                invalid.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center'
+                });
+                if (invalid.focus)
+                    invalid.focus();
+            }
+        }
+
+        if (!activeMap) {
+            reportSaveError(new Error('保存失败：规则编辑窗口已经失效，请关闭后重新打开。'));
+            return Promise.resolve();
+        }
+
+        var oldError = mapNode.querySelector('.c2000max-rule-save-error');
+        if (oldError)
+            oldError.remove();
+
+        try {
+            saveTasks = activeMap.save(null, true);
+        } catch (error) {
+            reportSaveError(error);
+            return Promise.resolve();
+        }
+
+        while (activeMap.parent) {
+            activeMap = activeMap.parent;
+            saveTasks = saveTasks
+                .then(L.bind(activeMap.load, activeMap))
+                .then(L.bind(activeMap.reset, activeMap));
+        }
+
+        return saveTasks
+            .then(L.bind(this.handleModalCancel, this, modalMap, ev, true))
+            .catch(function(error) {
+                reportSaveError(error);
+            });
     }
 });
 
@@ -1086,6 +1187,7 @@ function createAlwaysBlock(device, app) {
     uci.set('c2000max_traffic', sid, 'target', 'selected');
     uci.set('c2000max_traffic', sid, 'devices', [device.mac]);
     uci.set('c2000max_traffic', sid, 'apps', [String(app.id)]);
+    uci.set('c2000max_traffic', sid, 'match_mode', 'app');
     uci.set('c2000max_traffic', sid, 'ruleset', app.profile_id || currentProfileId);
     uci.set('c2000max_traffic', sid, 'time_windows', ['0@00:00-00:00', '1@00:00-00:00', '2@00:00-00:00', '3@00:00-00:00', '4@00:00-00:00', '5@00:00-00:00', '6@00:00-00:00']);
     return uci.save().then(function() {
@@ -1997,21 +2099,11 @@ return view.extend({
                 ui.addNotification(null, E('p', {}, safeText(uploadCompleted && !startResponseReceived ? '无法确认安装任务是否已提交；请稍后重新进入页面查看状态。' : error.message)));
             });
         };
-        s = rulesMap.section(form.GridSection, 'schedule', '管控规则', '多条规则可重叠，任一命中即阻断。每条规则可以设置多个不同星期、不同时间段；当前仅显示活动库的规则%s。'.format(inactiveSchedules ? '，另有 %d 条其他库规则已隐藏且不生效'.format(inactiveSchedules) : ''));
+        s = rulesMap.section(RuleGridSection, 'schedule', '管控规则', '多条规则可重叠，任一命中即阻断。每条规则可以设置多个不同星期、不同时间段；当前仅显示活动库的规则%s。'.format(inactiveSchedules ? '，另有 %d 条其他库规则已隐藏且不生效'.format(inactiveSchedules) : ''));
         s.anonymous = true;
         s.addremove = true;
         s.sortable = true;
         s.nodescriptions = true;
-        s.handleAdd = function() {
-            var sectionId = uci.add('c2000max_traffic', 'schedule');
-            uci.set('c2000max_traffic', sectionId, 'enabled', '1');
-            uci.set('c2000max_traffic', sectionId, 'name', '新管控规则');
-            uci.set('c2000max_traffic', sectionId, 'ruleset', currentProfileId);
-            uci.set('c2000max_traffic', sectionId, 'target', 'all');
-            uci.set('c2000max_traffic', sectionId, 'time_windows', ['0@00:00-00:00', '1@00:00-00:00', '2@00:00-00:00', '3@00:00-00:00', '4@00:00-00:00', '5@00:00-00:00', '6@00:00-00:00']);
-            rulesMap.addedSection = sectionId;
-            return this.renderMoreOptionsModal(sectionId);
-        };
         s.filter = function(sectionId) {
             return String(uci.get('c2000max_traffic', sectionId, 'ruleset') || currentProfileId) === currentProfileId;
         };
@@ -2051,14 +2143,34 @@ return view.extend({
         devices.forEach(function(device) {
             if (device.mac) o.value(device.mac, safeChoice('%s（%s）'.format(device.name || device.ip || device.mac, device.mac)));
         });
+        var matchModeOption = o = s.option(form.ListValue, 'match_mode', '应用管控方式', '选择一种管控依据后，只显示并保存对应的选择菜单。');
+        o.value('category', '按照应用分类管控');
+        o.value('app', '按照指定应用管控');
+        o.default = 'category';
+        o.rmempty = false;
+        o.modalonly = true;
+        o.cfgvalue = function(sectionId) {
+            var configured = uci.get('c2000max_traffic', sectionId, 'match_mode');
+            if (configured === 'category' || configured === 'app')
+                return configured;
+            return L.toArray(uci.get('c2000max_traffic', sectionId, 'apps')).length &&
+                !L.toArray(uci.get('c2000max_traffic', sectionId, 'categories')).length ? 'app' : 'category';
+        };
+        o.write = function(sectionId, value) {
+            uci.set('c2000max_traffic', sectionId, 'match_mode', value);
+            uci.unset('c2000max_traffic', sectionId, value === 'category' ? 'apps' : 'categories');
+        };
         var categoryOption = o = s.option(form.MultiValue, 'categories', '应用分类', '勾选后阻断该分类下的全部应用；分类来自当前特征库。');
+        o.depends('match_mode', 'category');
+        o.rmempty = false;
         o.modalonly = true;
         categories.forEach(function(category) {
             o.value(String(category.id), safeChoice(category.name));
         });
-        var appOption = o = s.option(LazyAppSelector, 'apps', '指定应用', '打开搜索器后才按 50 条/页查询，不会一次加载整个软件库。可与整个分类同时选择，生成规则时自动去重。');
+        var appOption = o = s.option(LazyAppSelector, 'apps', '指定应用', '打开搜索器后才按 50 条/页查询，不会一次加载整个软件库。');
+        o.depends('match_mode', 'app');
         o.modalonly = true;
-        o.rmempty = true;
+        o.rmempty = false;
         o.profile = currentProfileId;
         o.categories = categories;
         o.labelCache = selectedLabels;

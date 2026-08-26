@@ -7,7 +7,7 @@ LUCI_DEPENDS:=+tc +nftables +conntrack +kmod-sched-core +kmod-sched-flower +kmod
 PKG_MAINTAINER:=Jianhui Zhao <jianhuizhao329@gmail.com>
 PKG_NAME:=luci-app-eqos-mtk
 PKG_VERSION:=26.235.1
-PKG_RELEASE:=3
+PKG_RELEASE:=5
 
 define Package/luci-app-eqos-mtk/conffiles
 /etc/config/eqos

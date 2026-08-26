@@ -11,6 +11,7 @@ LUCI_DEPENDS:=+mtwifi-cfg-ucode +rpcd-mod-ucode +rpcd-mod-iwinfo
 LUCI_PKGARCH:=all
 
 PKG_VERSION:=1
+PKG_RELEASE:=11
 
 include $(TOPDIR)/feeds/luci/luci.mk
 

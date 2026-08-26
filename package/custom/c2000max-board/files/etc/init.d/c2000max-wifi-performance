@@ -1,0 +1,20 @@
+#!/bin/sh /etc/rc.common
+
+# Update the vendor card profile before netifd loads the MT7993 driver.  The
+# selected mode is also sent at runtime by the helper when a user toggles it.
+START=17
+STOP=89
+
+apply_profile()
+{
+	/usr/sbin/c2000max-wifi-performance profile >/dev/null 2>&1 || {
+		logger -t c2000max-wifi-performance "无法同步 MT7993 高性能配置"
+		return 1
+	}
+}
+
+start() { apply_profile; }
+reload() {
+	apply_profile || return 1
+	/usr/sbin/c2000max-wifi-performance reapply >/dev/null 2>&1 || true
+}

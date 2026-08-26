@@ -448,6 +448,13 @@ eqos_stop_service_locked() {
 	rm -f "$EQOS_PROFILE_FILE" "$EQOS_PROFILE_FILE.tmp"
 }
 
+eqos_runtime_active() {
+	# BACKEND_FILE is written only after the selected backend has been fully
+	# installed.  /var/run is volatile, so absence also proves that a fresh boot
+	# has no EQoS-owned hardware state to tear down.
+	[ -s "$EQOS_RUNTIME_DIR/backend" ]
+}
+
 eqos_reload_service_locked() {
 	local enabled
 
@@ -455,8 +462,15 @@ eqos_reload_service_locked() {
 	config_get_bool enabled config enabled 0
 	if [ "$enabled" -eq 1 ]; then
 		eqos_start_service_locked
-	else
+	elif eqos_runtime_active; then
+		# A 1 -> 0 configuration transition must remove the active limiter and
+		# invalidate its cached accelerated flows exactly once.
 		eqos_stop_service_locked
+	else
+		# Repeated uplink/HNAT reloads while EQoS is already disabled are true
+		# no-ops.  Calling `eqos stop` here resets QDMA and clears every FoE entry,
+		# which can interrupt an otherwise healthy WAN during DHCP/IPv6 bring-up.
+		rm -f "$EQOS_PROFILE_FILE" "$EQOS_PROFILE_FILE.tmp" "$EQOS_ERROR_FILE"
 	fi
 }
 

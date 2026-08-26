@@ -473,6 +473,7 @@ export function convert(uci_cfg) {
 		set_token("MuOfdmaUlEnable", strict_bool(c.ofdma_ul));
 
 		set_token("PweMethod", defs.SAE_PWE_2_DAT[c.sae_pwe]);
+		set_token("Mrsno_En", strict_bool(c.rsn_override));
 
 		// AuthMode + EncrypType
 		let enc_def = defs.ENC_2_AP_DAT[c.encryption] || defs.ENC_2_COMMON_DAT[c.encryption] || ["OPEN", "NONE"];

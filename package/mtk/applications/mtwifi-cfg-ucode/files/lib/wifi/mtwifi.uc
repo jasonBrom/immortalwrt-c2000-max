@@ -53,7 +53,7 @@ let all_devnames = l1.list();
  */
 function get_band_defaults(band) {
     if (band == "2g") {
-        return { channel: "auto", htmode: "EHT40", htbsscoex: 1, ssid: "ImmortalWrt-2.4G" };
+        return { channel: "6", htmode: "EHT40", htbsscoex: 1, ssid: "ImmortalWrt-2.4G" };
     } else if (band == "5g") {
         /* Fixed at the requested maximum-width profile.  In CN the 36-64
          * 160 MHz block includes DFS spectrum, so beaconing still waits for

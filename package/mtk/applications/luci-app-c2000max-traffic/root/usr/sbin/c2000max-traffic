@@ -1358,7 +1358,7 @@ compile_schedule_domains()
 
 compile_schedule()
 {
-	local section="$1" mode apps categories category category_ids="" ruleset
+	local section="$1" mode match_mode apps categories category category_ids="" ruleset
 	local devices whitelist selector expanded normalized app_count rest truncated app_elements
 
 	config_get ruleset "$section" ruleset ""
@@ -1368,6 +1368,11 @@ compile_schedule()
 	config_get mode "$section" target "all"
 	config_get apps "$section" apps ""
 	config_get categories "$section" categories ""
+	config_get match_mode "$section" match_mode ""
+	case "$match_mode" in
+		category) apps="" ;;
+		app) categories="" ;;
+	esac
 	for category in $categories; do
 		case "$category" in ''|*[!0-9]*) continue ;; esac
 		category_ids="$category_ids $category"

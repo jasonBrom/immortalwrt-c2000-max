@@ -1490,6 +1490,14 @@ local function dat2uci_encryption(auth, encr)
         encryption = "wpa-mixed+tkip+ccmp"
     elseif auth == "WPA3WPA2" then
         encryption = "wpa3-mixed"
+    elseif auth == "OWE" and encr == "CCMP128" then
+        encryption = "owe+ccmp"
+    elseif auth == "OWE" and encr == "GCMP128" then
+        encryption = "owe+gcmp"
+    elseif auth == "OWE" and encr == "CCMP256" then
+        encryption = "owe+ccmp256"
+    elseif auth == "OWE" and encr == "GCMP256" then
+        encryption = "owe+gcmp256"
     elseif auth == "OWE" and encr == "AES" then
         encryption = "owe"
     else
@@ -1648,6 +1656,18 @@ local function uci2dat_encryption(encryption, pmf_sha256, apcli)
     elseif encryption == "owe" then
         auth = "OWE"
         encr = "AES"
+    elseif encryption == "owe+ccmp" then
+        auth = "OWE"
+        encr = "CCMP128"
+    elseif encryption == "owe+gcmp" then
+        auth = "OWE"
+        encr = "GCMP128"
+    elseif encryption == "owe+ccmp256" then
+        auth = "OWE"
+        encr = "CCMP256"
+    elseif encryption == "owe+gcmp256" then
+        auth = "OWE"
+        encr = "GCMP256"
     else
         auth = "OPEN"
         encr = "NONE"
@@ -1838,6 +1858,26 @@ local function uci2hostapd_encryption(encryption, hostapd_cfg)
         hostapd_cfg.wpa = '2'
         hostapd_cfg.wpa_key_mgmt = 'OWE'
         hostapd_cfg.rsn_pairwise = 'CCMP'
+    elseif encryption == "owe+ccmp" then
+        hostapd_cfg.auth_algs = '1'
+        hostapd_cfg.wpa = '2'
+        hostapd_cfg.wpa_key_mgmt = 'OWE'
+        hostapd_cfg.rsn_pairwise = 'CCMP'
+    elseif encryption == "owe+gcmp" then
+        hostapd_cfg.auth_algs = '1'
+        hostapd_cfg.wpa = '2'
+        hostapd_cfg.wpa_key_mgmt = 'OWE'
+        hostapd_cfg.rsn_pairwise = 'GCMP'
+    elseif encryption == "owe+ccmp256" then
+        hostapd_cfg.auth_algs = '1'
+        hostapd_cfg.wpa = '2'
+        hostapd_cfg.wpa_key_mgmt = 'OWE'
+        hostapd_cfg.rsn_pairwise = 'CCMP-256'
+    elseif encryption == "owe+gcmp256" then
+        hostapd_cfg.auth_algs = '1'
+        hostapd_cfg.wpa = '2'
+        hostapd_cfg.wpa_key_mgmt = 'OWE'
+        hostapd_cfg.rsn_pairwise = 'GCMP-256'
     else
         hostapd_cfg.auth_algs = '1'
         hostapd_cfg.wpa = ''
@@ -2098,6 +2138,7 @@ local function cfg2iface(cfg, devname, ifname, iface, i)
     iface.rekey_interval = token_get(cfg.RekeyInterval, i, mtkdat.split(cfg.RekeyInterval,";")[1])
     iface.rekey_meth = token_get(cfg.RekeyMethod, i, mtkdat.split(cfg.RekeyMethod,";")[1])
     iface.pmk_cache_period = token_get(cfg.PMKCachePeriod, i, mtkdat.split(cfg.PMKCachePeriod ,";")[1])
+    iface.mrsno_enable = token_get(cfg.Mrsno_En, i, "0")
 
     iface.ieee8021x = token_get(cfg.IEEE8021X, i, mtkdat.split(cfg.IEEE8021X,";")[1])
     iface.auth_server = token_get(cfg.RADIUS_Server, i)

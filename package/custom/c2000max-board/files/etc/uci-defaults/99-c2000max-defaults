@@ -200,14 +200,19 @@ uci -q set "firewall.${wan_zone}.masq=1"
 uci -q set "firewall.${wan_zone}.mtu_fix=1"
 
 uci -q set luci.main.lang='zh_cn'
-uci -q set luci.main.mediaurlbase='/luci-static/argon'
+case "$(uci -q get luci.main.mediaurlbase)" in
+	/luci-static/argon|/luci-static/design) ;;
+	*)
+		uci -q set luci.main.mediaurlbase='/luci-static/argon'
+		;;
+esac
 uci -q set argon.@global[0].online_wallpaper='bing'
 uci -q set argon.@global[0].primary='#168ab0'
 uci -q set argon.@global[0].dark_primary='#168ab0'
 
 # V35.16 retires the optional iStoreX/Quickstart integration.  Remove only
-# their preserved configuration and startup hooks, keep Argon as the sole
-# LuCI theme, and leave unrelated user settings untouched.
+# their preserved configuration and startup hooks. Argon remains the default,
+# while a user-selected Design theme and unrelated settings stay untouched.
 [ ! -x /etc/init.d/quickstart ] || \
 	/etc/init.d/quickstart stop >/dev/null 2>&1 || true
 [ ! -x /etc/init.d/quickstart ] || \
@@ -313,10 +318,49 @@ if [ "$wireless_is_new" = '1' ]; then
 		for iface in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)\.device='$radio'$/\1/p"); do
 			uci -q set "wireless.$iface.disabled=0"
 			uci -q set "wireless.$iface.ssid=$ssid"
-			uci -q set "wireless.$iface.encryption=none"
+			uci -q set "wireless.$iface.encryption=owe+gcmp256"
 			uci -q delete "wireless.$iface.key"
+			uci -q set "wireless.$iface.ieee80211w=2"
+			uci -q set "wireless.$iface.rsn_override=0"
 		done
 	done
+fi
+
+# Seed one fully described MLO AP group without bringing it on air.  Run this
+# once for both fresh installs and preserved upgrades so the wireless overview
+# can expose MLO immediately, while a later user deletion remains respected.
+if [ "$(uci -q get c2000max.migration.mlo_overview_v39)" != '1' ]; then
+	mlo_exists=0
+	for iface in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-iface$/\1/p"); do
+		[ "$(uci -q get "wireless.${iface}.mlo")" != '1' ] || mlo_exists=1
+	done
+	if [ "$mlo_exists" = 0 ]; then
+		mlo_2g=
+		mlo_5g=
+		for radio in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p"); do
+			[ "$(uci -q get "wireless.${radio}.type")" = mtwifi ] || continue
+			case "$(uci -q get "wireless.${radio}.band")" in
+				2g) [ -n "$mlo_2g" ] || mlo_2g="$radio" ;;
+				5g) [ -n "$mlo_5g" ] || mlo_5g="$radio" ;;
+			esac
+		done
+		if [ -n "$mlo_2g" ] && [ -n "$mlo_5g" ]; then
+			uci -q set wireless.c2000max_mlo='wifi-iface'
+			uci -q add_list "wireless.c2000max_mlo.device=$mlo_2g"
+			uci -q add_list "wireless.c2000max_mlo.device=$mlo_5g"
+			uci -q set wireless.c2000max_mlo.network='lan'
+			uci -q set wireless.c2000max_mlo.mode='ap'
+			uci -q set wireless.c2000max_mlo.mlo='1'
+			uci -q set wireless.c2000max_mlo.disabled='1'
+			uci -q set wireless.c2000max_mlo.ssid='ImmortalWrt-MLO'
+			uci -q set wireless.c2000max_mlo.encryption='sae'
+			uci -q set wireless.c2000max_mlo.key='C2000MAX-MLO'
+			uci -q set wireless.c2000max_mlo.ieee80211w='2'
+			uci -q set wireless.c2000max_mlo.sae_pwe='2'
+		fi
+	fi
+	uci -q set c2000max.migration='migration'
+	uci -q set c2000max.migration.mlo_overview_v39='1'
 fi
 
 # V35.14 accidentally branded the factory SSIDs as OpenWRT.  On preserved
@@ -335,6 +379,43 @@ if [ "$(uci -q get c2000max.migration.wifi_ssid_brand_v1)" != '1' ]; then
 	done
 	uci -q set c2000max.migration='migration'
 	uci -q set c2000max.migration.wifi_ssid_brand_v1='1'
+fi
+
+# V36.01-r16 keeps the two ordinary factory SSIDs passwordless while replacing
+# legacy OPEN/NONE with Enhanced Open (OWE) and the Wi-Fi 7 GCMP-256 cipher.
+# Migrate only exact factory names which still have no key and use either the
+# former open mode or the earlier basic OWE test; custom security is untouched.
+if [ "$(uci -q get c2000max.migration.wifi_owe_gcmp256_v1)" != '1' ]; then
+	for iface in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-iface$/\1/p"); do
+		case "$(uci -q get wireless.$iface.ssid)" in
+			ImmortalWrt-2.4G|ImmortalWrt-5G) ;;
+			*) continue ;;
+		esac
+		case "$(uci -q get wireless.$iface.encryption)" in
+			none|owe) ;;
+			*) continue ;;
+		esac
+		[ -z "$(uci -q get wireless.$iface.key)" ] || continue
+		uci -q set "wireless.$iface.encryption=owe+gcmp256"
+		uci -q delete "wireless.$iface.key"
+		uci -q set "wireless.$iface.ieee80211w=2"
+		uci -q set "wireless.$iface.rsn_override=0"
+	done
+	uci -q set c2000max.migration='migration'
+	uci -q set c2000max.migration.wifi_owe_gcmp256_v1='1'
+fi
+
+# MLO on this dual-band profile requires the 2.4 GHz link to use the vendor's
+# fixed primary channel.  Migrate only radios which still use the former
+# generated "auto" value; every user-selected fixed channel remains intact.
+if [ "$(uci -q get c2000max.migration.wifi_2g_channel_v40)" != '1' ]; then
+	for radio in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p"); do
+		[ "$(uci -q get wireless.$radio.band)" = '2g' ] || continue
+		[ "$(uci -q get wireless.$radio.channel)" = 'auto' ] || continue
+		uci -q set "wireless.$radio.channel=6"
+	done
+	uci -q set c2000max.migration='migration'
+	uci -q set c2000max.migration.wifi_2g_channel_v40='1'
 fi
 
 # One-time V17 migration.  Touch only the exact former factory combination;
@@ -360,6 +441,7 @@ fi
 /etc/init.d/c2000max-access enable
 /etc/init.d/c2000max-swap-tune enable
 /etc/init.d/c2000max-uplink enable
+/etc/init.d/c2000max-mlo-interlock enable
 /etc/init.d/c2000max-service-worker enable
 /etc/init.d/cpufreq enable
 /etc/init.d/turboacc enable >/dev/null 2>&1
@@ -478,6 +560,10 @@ for modem in $(uci -q show qmodem 2>/dev/null |
 	esac
 done
 uci -q commit qmodem
+
+# Enforce the private-driver MLO/ordinary-BSS exclusion before the first
+# wireless start.  This changes only disabled state and never SSID/security.
+/usr/sbin/c2000max-mlo-interlock sync >/dev/null 2>&1 || true
 
 uci -q commit network
 uci -q commit system

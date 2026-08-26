@@ -456,6 +456,6 @@ Single_RNR=1
 QoSEnable=1
 EHT_ApScsTraffic=1
 DscpPriMapEnable=1
-EHT_ApT2lmNegoSupport=1
+EHT_ApT2lmNegoSupport=0
 Band4DfsEnable=0
 ApEnable=1

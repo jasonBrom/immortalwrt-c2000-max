@@ -1,0 +1,181 @@
+#!/bin/sh
+
+# The MT7993 private driver cannot reliably run an MLO AP together with an
+# ordinary AP BSS on the same member radios.  Keep both configurations in UCI,
+# but allow only one side on air.  A marker is written only when this helper
+# temporarily disables an otherwise-enabled ordinary AP, so pre-existing user
+# choices survive an MLO enable/disable cycle.
+
+IFACE_LOCK_OPTION=c2000max_mlo_locked
+RADIO_LOCK_OPTION=c2000max_mlo_radio_locked
+C2000_MLO_CHANGED=0
+C2000_MLO_ACTIVE_RADIOS=
+
+list_has()
+{
+	case " $1 " in
+		*" $2 "*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+list_add_unique()
+{
+	local current="$1" value="$2"
+
+	list_has "$current" "$value" || current="${current:+$current }$value"
+	printf '%s\n' "$current"
+}
+
+wireless_sections()
+{
+	local type="$1"
+	uci -q show wireless 2>/dev/null |
+		sed -n "s/^wireless\.\([^.]*\)=${type}$/\1/p"
+}
+
+uci_set_changed()
+{
+	uci -q set "$1" || return 1
+	C2000_MLO_CHANGED=1
+}
+
+uci_delete_changed()
+{
+	uci -q delete "$1" || return 1
+	C2000_MLO_CHANGED=1
+}
+
+collect_active_mlo_radios()
+{
+	local section radio
+
+	C2000_MLO_ACTIVE_RADIOS=
+	for section in $(wireless_sections wifi-iface); do
+		[ "$(uci -q get "wireless.${section}.mlo")" = 1 ] || continue
+		[ "$(uci -q get "wireless.${section}.disabled")" != 1 ] || continue
+		for radio in $(uci -q get "wireless.${section}.device"); do
+			[ -n "$radio" ] || continue
+			C2000_MLO_ACTIVE_RADIOS="$(list_add_unique "$C2000_MLO_ACTIVE_RADIOS" "$radio")"
+		done
+	done
+}
+
+restore_stale_iface_locks()
+{
+	local section radio mode mlo
+
+	for section in $(wireless_sections wifi-iface); do
+		[ "$(uci -q get "wireless.${section}.${IFACE_LOCK_OPTION}")" = 1 ] || continue
+		radio="$(uci -q get "wireless.${section}.device")"
+		mode="$(uci -q get "wireless.${section}.mode")"
+		mlo="$(uci -q get "wireless.${section}.mlo")"
+		if [ "$mlo" = 1 ] || [ "$mode" != ap ] || ! list_has "$C2000_MLO_ACTIVE_RADIOS" "$radio"; then
+			uci_delete_changed "wireless.${section}.disabled" || true
+			uci_delete_changed "wireless.${section}.${IFACE_LOCK_OPTION}" || return 1
+		fi
+	done
+}
+
+lock_ordinary_aps()
+{
+	local section radio mode mlo
+
+	for section in $(wireless_sections wifi-iface); do
+		radio="$(uci -q get "wireless.${section}.device")"
+		mode="$(uci -q get "wireless.${section}.mode")"
+		mlo="$(uci -q get "wireless.${section}.mlo")"
+		[ "$mlo" != 1 ] || continue
+		[ "$mode" = ap ] || continue
+		list_has "$C2000_MLO_ACTIVE_RADIOS" "$radio" || continue
+
+		if [ "$(uci -q get "wireless.${section}.${IFACE_LOCK_OPTION}")" = 1 ]; then
+			[ "$(uci -q get "wireless.${section}.disabled")" = 1 ] ||
+				uci_set_changed "wireless.${section}.disabled=1" || return 1
+		elif [ "$(uci -q get "wireless.${section}.disabled")" != 1 ]; then
+			uci_set_changed "wireless.${section}.disabled=1" || return 1
+			uci_set_changed "wireless.${section}.${IFACE_LOCK_OPTION}=1" || return 1
+		fi
+	done
+}
+
+sync_member_radios()
+{
+	local radio name
+
+	for radio in $(wireless_sections wifi-device); do
+		name="wireless.${radio}"
+		if list_has "$C2000_MLO_ACTIVE_RADIOS" "$radio"; then
+			if [ "$(uci -q get "${name}.disabled")" = 1 ]; then
+				uci_set_changed "${name}.${RADIO_LOCK_OPTION}=1" || return 1
+				uci_delete_changed "${name}.disabled" || return 1
+			fi
+		elif [ "$(uci -q get "${name}.${RADIO_LOCK_OPTION}")" = 1 ]; then
+			uci_set_changed "${name}.disabled=1" || return 1
+			uci_delete_changed "${name}.${RADIO_LOCK_OPTION}" || return 1
+		fi
+	done
+}
+
+verify_interlock()
+{
+	local section radio mode mlo
+
+	for section in $(wireless_sections wifi-iface); do
+		radio="$(uci -q get "wireless.${section}.device")"
+		mode="$(uci -q get "wireless.${section}.mode")"
+		mlo="$(uci -q get "wireless.${section}.mlo")"
+		[ "$mlo" != 1 ] || continue
+		[ "$mode" = ap ] || continue
+		list_has "$C2000_MLO_ACTIVE_RADIOS" "$radio" || continue
+		[ "$(uci -q get "wireless.${section}.disabled")" = 1 ] || {
+			logger -t c2000max-mlo-interlock \
+				"拒绝启动：MLO 成员 ${radio} 上的普通 AP ${section} 未被禁用"
+			return 1
+		}
+	done
+}
+
+sync_interlock()
+{
+	C2000_MLO_CHANGED=0
+	collect_active_mlo_radios || return 1
+	restore_stale_iface_locks || return 1
+	lock_ordinary_aps || return 1
+	sync_member_radios || return 1
+	verify_interlock || return 1
+
+	if [ "$C2000_MLO_CHANGED" = 1 ]; then
+		uci -q commit wireless || return 1
+		logger -t c2000max-mlo-interlock \
+			"已同步 MLO 互锁，活动成员：${C2000_MLO_ACTIVE_RADIOS:-无}"
+	fi
+}
+
+status_interlock()
+{
+	local section locked=
+
+	collect_active_mlo_radios || return 1
+	for section in $(wireless_sections wifi-iface); do
+		[ "$(uci -q get "wireless.${section}.${IFACE_LOCK_OPTION}")" = 1 ] || continue
+		locked="${locked:+$locked }$section"
+	done
+	printf 'active_radios=%s\nlocked_ifaces=%s\n' \
+		"$C2000_MLO_ACTIVE_RADIOS" "$locked"
+}
+
+[ "${C2000MAX_MLO_INTERLOCK_SOURCE_ONLY:-0}" != 1 ] || return 0
+
+case "${1:-sync}" in
+	sync)
+		sync_interlock
+		;;
+	status)
+		status_interlock
+		;;
+	*)
+		echo "Usage: $0 [sync|status]" >&2
+		exit 2
+		;;
+esac

@@ -858,23 +858,74 @@ local function handle_develop(payload)
 	}, "develop"
 end
 
+local function control_item(value, depth)
+	if type(value) ~= "table" or (depth or 0) > 5 then return nil end
+	if value.mac ~= nil or
+	   (value.client ~= nil and type(value.client) ~= "table") or
+	   value.real_mac ~= nil or
+	   value.macaddr ~= nil or value.device_mac ~= nil or value.sta_mac ~= nil then
+		return value
+	end
+	local keys = {
+		"control", "data", "payload", "item", "client", "clients",
+		"station", "stations", "terminal", "terminals", "stacontrol",
+		"sta_control", "clientcontrol", "terminalcontrol"
+	}
+	for _, key in ipairs(keys) do
+		local item = control_item(value[key], (depth or 0) + 1)
+		if item then return item end
+	end
+	for _, item in ipairs(value) do
+		local nested = control_item(item, (depth or 0) + 1)
+		if nested then return nested end
+	end
+	return nil
+end
+
+local function control_flag(value)
+	if type(value) == "boolean" then return value end
+	local number = tonumber(value)
+	if number ~= nil then return number ~= 0 end
+	value = tostring(value or ""):lower()
+	if value == "true" or value == "on" or value == "yes" or
+	   value == "allow" or value == "allowed" or value == "enable" or
+	   value == "enabled" then return true end
+	if value == "false" or value == "off" or value == "no" or
+	   value == "deny" or value == "denied" or value == "disable" or
+	   value == "disabled" or value == "block" or value == "blocked" then
+		return false
+	end
+	return nil
+end
+
 local function terminal_control(payload)
-	local item = type(payload.client) == "table" and payload.client or
-		(type(payload.station) == "table" and payload.station or
-		(type(payload.terminal) == "table" and payload.terminal or
-		(type(payload.stacontrol) == "table" and payload.stacontrol or
-		(type(payload.sta_control) == "table" and payload.sta_control or payload))))
-	local mac = item.mac or item.client or item.real_mac or item.macaddr
+	local item = control_item(payload) or payload
+	local mac = item.mac or item.client or item.real_mac or item.macaddr or
+		item.device_mac or item.sta_mac
 	if not mac then return nil end
 	local allowed
 	if item.switch_off ~= nil then
-		allowed = tonumber(item.switch_off) == 0
+		local blocked = control_flag(item.switch_off)
+		if blocked ~= nil then allowed = not blocked end
 	elseif item.switch ~= nil then
-		allowed = tonumber(item.switch) ~= 0
+		allowed = control_flag(item.switch)
 	elseif item.online ~= nil then
-		allowed = tonumber(item.online) ~= 0
+		allowed = control_flag(item.online)
 	elseif item.deny ~= nil then
-		allowed = not (item.deny == true or tonumber(item.deny) == 1)
+		local denied = control_flag(item.deny)
+		if denied ~= nil then allowed = not denied end
+	elseif item.blocked ~= nil then
+		local blocked = control_flag(item.blocked)
+		if blocked ~= nil then allowed = not blocked end
+	elseif item.disabled ~= nil then
+		local disabled = control_flag(item.disabled)
+		if disabled ~= nil then allowed = not disabled end
+	elseif item.internet ~= nil then
+		allowed = control_flag(item.internet)
+	elseif item.allow ~= nil then
+		allowed = control_flag(item.allow)
+	elseif item.enabled ~= nil then
+		allowed = control_flag(item.enabled)
 	end
 	if allowed == nil then return nil end
 	return core.set_device_internet(mac, allowed)
@@ -889,8 +940,12 @@ function M.handle(event, payload)
 
 	local control_key = tostring(event or ""):lower():gsub("[^a-z0-9]", "")
 	local control_event = control_key == "stacontrol" or
-		control_key == "stationcontrol" or control_key == "clientcontrol" or
-		control_key == "terminalcontrol"
+		control_key == "stactrl" or control_key == "stationcontrol" or
+		control_key == "clientcontrol" or control_key == "terminalcontrol" or
+		control_key == "clientset" or control_key == "terminalset" or
+		control_key == "staset" or control_key == "clientupdate" or
+		control_key == "terminalupdate" or control_key == "accesscontrol" or
+		control_key == "internetcontrol"
 	if control_event then
 		-- Remote access control is an authenticated command, not a periodic
 		-- terminal-tracking report.  It must remain actionable while tracking is
@@ -898,6 +953,11 @@ function M.handle(event, payload)
 		local control = terminal_control(payload)
 		return control or { code = "2", errcode = "2", message = "invalid control" }, event
 	elseif event == "client" or event == "terminal" then
+		-- Factory cloud builds also reuse the ordinary client/terminal event for
+		-- writes.  Treat a payload carrying switch state as a command, while an
+		-- empty payload remains the inventory query.
+		local control = terminal_control(payload)
+		if control then return control, event end
 		if not core.feature_enabled("terminal_tracking_enable") then
 			return disabled("terminal tracking"), event
 		end

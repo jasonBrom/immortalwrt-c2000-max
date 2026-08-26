@@ -75,6 +75,371 @@ function mtwifi_scan_ifname(device) {
 	return ifname;
 }
 
+function ensure_mlo_link(station, index) {
+	while (length(station.links) <= index)
+		push(station.links, { index: length(station.links) });
+
+	return station.links[index];
+}
+
+function local_mlo_bssid_map() {
+	let bssids = {};
+
+	for (let path in fs.glob('/sys/class/net/ra*/address') || []) {
+		let m = match(path, /\/(rai?[0-9]+)\/address$/);
+		if (!m)
+			continue;
+
+		let mac = uc(trim(fs.readfile(path) || ''));
+		if (!match(mac, /^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/))
+			continue;
+
+		bssids[mac] = {
+			ifname: m[1],
+			band: index(m[1], 'rai') == 0 ? '5g' : '2g'
+		};
+	}
+
+	return bssids;
+}
+
+function parse_mlo_station_dump(output, source_ifname) {
+	let stations = [];
+	let station = null;
+
+	for (let line in split(output || '', '\n')) {
+		line = trim(line);
+
+		if (index(line, 'connected sta MLD dump start') == 0) {
+			if (station?.mld_mac)
+				push(stations, station);
+			station = { source_ifname, links: [] };
+			continue;
+		}
+
+		if (index(line, 'Connectd STA MLD dump end') == 0) {
+			if (station?.mld_mac)
+				push(stations, station);
+			station = null;
+			continue;
+		}
+
+		if (!station)
+			continue;
+
+		let m = match(line, /^connected ap mld index=([0-9]+)$/);
+		if (m) {
+			station.index = int(m[1]);
+			continue;
+		}
+
+		m = match(line, /^Connected sta mld macBSSID ([0-9A-Fa-f:]+)$/);
+		if (m) {
+			station.mld_mac = uc(m[1]);
+			continue;
+		}
+
+		m = match(line, /^connected time=([0-9]+)$/);
+		if (m) {
+			station.connected_time = int(m[1]);
+			continue;
+		}
+
+		if (line == 'EMLMR enabled' || line == 'EMLSR enabled' ||
+		    line == 'STR enabled' || line == 'NSTR enabled') {
+			station.mode = split(line, ' ')[0];
+			continue;
+		}
+
+		m = match(line, /^affiliated sta\[([0-9]+)\] mac ([0-9A-Fa-f:]+)$/);
+		if (m) {
+			ensure_mlo_link(station, int(m[1])).mac = uc(m[2]);
+			continue;
+		}
+
+		m = match(line, /^affiliated sta\[([0-9]+)\] BSSID ([0-9A-Fa-f:]+)$/);
+		if (m) {
+			ensure_mlo_link(station, int(m[1])).bssid = uc(m[2]);
+			continue;
+		}
+
+		m = match(line, /^affiliated sta\[([0-9]+)\] Link ID ([0-9]+)$/);
+		if (m) {
+			ensure_mlo_link(station, int(m[1])).link_id = int(m[2]);
+			continue;
+		}
+
+		m = match(line, /^affiliated sta\[([0-9]+)\] signal strength=(-?[0-9]+)$/);
+		if (m) {
+			ensure_mlo_link(station, int(m[1])).signal = int(m[2]);
+			continue;
+		}
+
+		m = match(line, /^affiliated sta\[([0-9]+)\] est dl rate=([0-9]+)$/);
+		if (m) {
+			ensure_mlo_link(station, int(m[1])).est_dl_rate = int(m[2]);
+			continue;
+		}
+
+		m = match(line, /^affiliated sta\[([0-9]+)\] est ul rate=([0-9]+)$/);
+		if (m) {
+			ensure_mlo_link(station, int(m[1])).est_ul_rate = int(m[2]);
+			continue;
+		}
+
+		m = match(line, /^affiliated sta\[([0-9]+)\] last dl rate=([0-9]+)$/);
+		if (m) {
+			ensure_mlo_link(station, int(m[1])).last_dl_rate = int(m[2]);
+			continue;
+		}
+
+		m = match(line, /^affiliated sta\[([0-9]+)\] last ul rate=([0-9]+)$/);
+		if (m) {
+			ensure_mlo_link(station, int(m[1])).last_ul_rate = int(m[2]);
+			continue;
+		}
+
+		m = match(line, /^affiliated sta\[([0-9]+)\] bytes send=([0-9]+)$/);
+		if (m) {
+			ensure_mlo_link(station, int(m[1])).bytes_sent = int(m[2]);
+			continue;
+		}
+
+		m = match(line, /^affiliated sta\[([0-9]+)\] bytes received=([0-9]+)$/);
+		if (m)
+			ensure_mlo_link(station, int(m[1])).bytes_received = int(m[2]);
+	}
+
+	if (station?.mld_mac)
+		push(stations, station);
+
+	return stations;
+}
+
+function get_mlo_stations() {
+	let stations = [];
+	let seen = {};
+	let local_bssids = local_mlo_bssid_map();
+
+	/* The command dumps every MLD known by a radio.  Query only each radio's
+	 * primary netdev; running it against every MBSSID adds needless vendor
+	 * netlink traffic and can make station reporting itself less stable. */
+	for (let ifname in [ 'ra0', 'rai0' ]) {
+		if (!fs.access(`/sys/class/net/${ifname}`))
+			continue;
+
+		let pipe = fs.popen(`/usr/sbin/mwctl ${ifname} dump con_sta_mld all 2>/dev/null`, 'r');
+		if (!pipe)
+			continue;
+
+		let output = pipe.read('all') || '';
+		pipe.close();
+
+		for (let station in parse_mlo_station_dump(output, ifname)) {
+			let key = station.mld_mac;
+			if (!seen[key]) {
+				seen[key] = station;
+				push(stations, station);
+				continue;
+			}
+
+			let existing = seen[key];
+			let link_seen = {};
+			for (let link in existing.links)
+				if (link.mac)
+					link_seen[link.mac] = true;
+			for (let link in station.links)
+				if (link.mac && !link_seen[link.mac])
+					push(existing.links, link);
+			if ((station.connected_time || 0) > (existing.connected_time || 0))
+				existing.connected_time = station.connected_time;
+		}
+	}
+
+	for (let station in stations) {
+		for (let link in station.links) {
+			let local = local_bssids[link.bssid];
+			if (!local)
+				continue;
+
+			link.ifname = local.ifname;
+			link.band = local.band;
+		}
+	}
+
+	return stations;
+}
+
+function run_command(command) {
+	let pipe = fs.popen(command, 'r');
+
+	if (!pipe)
+		return { code: -1, output: '无法启动命令' };
+
+	let output = pipe.read('all') || '';
+	let code = pipe.close();
+
+	return { code, output: trim(output) };
+}
+
+function value_is_one(value) {
+	return value === true || value === 1 || value == '1';
+}
+
+function wifi_performance_state() {
+	let uci = cursor();
+	let enabled = false;
+	let ifname = null;
+	let output = '';
+	let l1ss = null;
+	let lp_select = null;
+	let lp_value = null;
+
+	uci.load('c2000max');
+	enabled = value_is_one(uci.get('c2000max', 'wifi_performance', 'enabled'));
+	uci.unload();
+
+	for (let candidate in [ 'ra0', 'rai0', 'ra1', 'rai1' ]) {
+		if (!fs.access(`/sys/class/net/${candidate}`))
+			continue;
+
+		let info = run_command(`/usr/sbin/mwctl dev ${candidate} show lpinfo 2>/dev/null`);
+		if (info.code != 0 || !info.output)
+			continue;
+
+		ifname = candidate;
+		output = info.output;
+		break;
+	}
+
+	if (ifname) {
+		let m = match(output, /L1ss:\s*([0-9A-Fa-f]+)/);
+		if (m)
+			l1ss = int(m[1], 16);
+
+		m = match(output, /Last LPOption:\s*\(([0-9A-Fa-f]+),([0-9A-Fa-f]+)/);
+		if (m) {
+			lp_select = int(m[1], 16);
+			lp_value = int(m[2], 16);
+		}
+	}
+
+	let runtime_applied = ifname != null &&
+		l1ss === (enabled ? 0 : 1) && lp_select === 2 &&
+		lp_value === (enabled ? 0 : 1);
+
+	return {
+		enabled,
+		mode: enabled ? 'performance' : 'normal',
+		interface: ifname,
+		runtime_available: ifname != null,
+		runtime_applied,
+		l1ss,
+		lp_select,
+		lp_value
+	};
+}
+
+function set_wifi_performance_state(enabled) {
+	let action = enabled ? 'enable' : 'disable';
+	let result = run_command(`/usr/sbin/c2000max-wifi-performance ${action} 2>&1`);
+	let state = wifi_performance_state();
+
+	state.ok = result.code == 0;
+	if (!state.ok)
+		state.error = result.output || `无线模式切换失败（${result.code}）。`;
+
+	return state;
+}
+
+function mlo_interlock_state(section) {
+	let uci = cursor();
+	let active_radios = {};
+	let locked_ssids = [];
+	let conflicts = [];
+
+	uci.load('wireless');
+	uci.foreach('wireless', 'wifi-iface', function(sec) {
+		if (!value_is_one(sec.mlo) || value_is_one(sec.disabled))
+			return;
+
+		let devices = type(sec.device) == 'array' ? sec.device : [ sec.device ];
+		for (let device in devices)
+			if (device)
+				active_radios[device] = true;
+	});
+
+	uci.foreach('wireless', 'wifi-iface', function(sec) {
+		if (value_is_one(sec.c2000max_mlo_locked))
+			push(locked_ssids, sec.ssid || sec['.name']);
+
+		if (value_is_one(sec.mlo) || sec.mode != 'ap' ||
+		    !active_radios[sec.device] || value_is_one(sec.disabled))
+			return;
+
+		push(conflicts, sec.ssid || sec['.name']);
+	});
+
+	return {
+		enabled: !value_is_one(uci.get('wireless', section, 'disabled')),
+		locked_ssids,
+		conflicts
+	};
+}
+
+function set_mlo_state(section, enabled) {
+	let uci = cursor();
+
+	uci.load('wireless');
+	if (uci.get('wireless', section) != 'wifi-iface' ||
+	    !value_is_one(uci.get('wireless', section, 'mlo')))
+		return { ok: false, error: '指定的无线网络不是有效的 MLO 接口。' };
+
+	if (enabled)
+		uci.delete('wireless', section, 'disabled');
+	else
+		uci.set('wireless', section, 'disabled', '1');
+
+	if (!uci.commit('wireless'))
+		return { ok: false, error: '无法提交 MLO 状态。' };
+
+	let sync = run_command('/usr/sbin/c2000max-mlo-interlock sync 2>&1');
+	let state = mlo_interlock_state(section);
+
+	if (sync.code != 0 || length(state.conflicts)) {
+		/* Enabling must fail closed. No wireless reload occurs between the MLO
+		 * write and this rollback, so an unsafe combination never reaches air. */
+		if (enabled) {
+			let rollback = cursor();
+			rollback.load('wireless');
+			rollback.set('wireless', section, 'disabled', '1');
+			rollback.commit('wireless');
+			run_command('/usr/sbin/c2000max-mlo-interlock sync 2>&1');
+		}
+
+		run_command('/bin/ubus call network reload 2>&1');
+		return {
+			ok: false,
+			error: length(state.conflicts)
+				? `互锁验证失败，仍启用的普通 SSID：${join('、', state.conflicts)}`
+				: `互锁助手执行失败：${sync.output || sync.code}`
+		};
+	}
+
+	let reload = run_command('/bin/ubus call network reload 2>&1');
+	state = mlo_interlock_state(section);
+
+	if (reload.code != 0)
+		return { ok: false, error: `无线重载失败：${reload.output || reload.code}` };
+
+	return {
+		ok: true,
+		enabled: state.enabled,
+		locked_ssids: state.locked_ssids,
+		conflicts: state.conflicts
+	};
+}
+
 const methods = {
 	getScanName: {
 		args: {
@@ -86,6 +451,37 @@ const methods = {
 			return {
 				device: ifname
 			};
+		}
+	},
+	getMloStations: {
+		args: {},
+		call: function() {
+			return {
+				stations: get_mlo_stations()
+			};
+		}
+	},
+	setMloState: {
+		args: {
+			section: '',
+			enabled: false
+		},
+		call: function(request) {
+			return set_mlo_state(request.args?.section, request.args?.enabled === true);
+		}
+	},
+	getWifiPerformanceState: {
+		args: {},
+		call: function() {
+			return wifi_performance_state();
+		}
+	},
+	setWifiPerformanceState: {
+		args: {
+			enabled: false
+		},
+		call: function(request) {
+			return set_wifi_performance_state(request.args?.enabled === true);
 		}
 	}
 };

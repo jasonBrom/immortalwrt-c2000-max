@@ -1,0 +1,17 @@
+#!/bin/sh /etc/rc.common
+
+# Run before netifd (S20network).  This prevents the private MT7993 driver
+# from ever seeing the unsupported MLO + ordinary AP combination at boot.
+START=18
+STOP=90
+
+sync_interlock()
+{
+	/usr/sbin/c2000max-mlo-interlock sync >/dev/null 2>&1 || {
+		logger -t c2000max-mlo-interlock "无线 MLO/普通 SSID 互锁失败"
+		return 1
+	}
+}
+
+start() { sync_interlock; }
+reload() { sync_interlock; }

@@ -11,6 +11,7 @@ function action_health()
 		service = "c2000max-app",
 		build = "V36.01",
 		local_enabled = core.local_enabled(),
+		cache_refresh = core.cache_refresh_policy(),
 		signal_refresh = core.signal_refresh_policy()
 	}, { encrypted = false })
 end
@@ -126,6 +127,7 @@ function process(action, body, request_context)
 			service = "c2000max-app",
 			build = "V36.01",
 			local_enabled = core.local_enabled(),
+			cache_refresh = core.cache_refresh_policy(),
 			signal_refresh = core.signal_refresh_policy()
 		}
 	end

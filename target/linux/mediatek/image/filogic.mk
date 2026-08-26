@@ -2855,7 +2855,7 @@ define Device/nradio_c2000-max
 	luci-app-c2000max-traffic c2000max-appfilter kmod-c2000max-oaf \
 	cpufreq luci-app-cpufreq luci-i18n-cpufreq-zh-cn \
 	luci-app-qmodem-next luci-i18n-qmodem-next-zh-cn \
-	luci-app-openclash luci-theme-argon luci-app-argon-config \
+	luci-app-openclash luci-theme-argon luci-theme-design luci-app-argon-config \
 	luci-i18n-argon-config-zh-cn \
 	luci-app-filemanager luci-i18n-filemanager-zh-cn \
 	luci-app-ttyd luci-i18n-ttyd-zh-cn \

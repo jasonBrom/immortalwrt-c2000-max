@@ -40,7 +40,8 @@ while core.local_enabled() or core.remote_enabled() do
 	else
 		write_state("error", tostring(result), nil, elapsed)
 	end
-	nixio.nanosleep(2)
+	local policy = core.cache_refresh_policy()
+	nixio.nanosleep(policy.warm)
 end
 
 write_state("stopped", "APP management disabled", nil, 0)

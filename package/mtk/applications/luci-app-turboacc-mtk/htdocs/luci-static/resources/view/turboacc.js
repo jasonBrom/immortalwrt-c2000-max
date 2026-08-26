@@ -85,10 +85,6 @@ return view.extend({
 			m.description = E('div', { 'class': 'alert-message danger' },
 				_('The C2000-MAX Ethernet topology is inconsistent or degraded. Acceleration is disabled until the port-role controller completes a verified recovery.'));
 		}
-		else if (features.hardHnat) {
-			m.description = E('div', { 'class': 'alert-message notice' },
-				_('C2000-MAX uses MediaTek HNAT only in LAN mode. WAN and WAN+5G keep HNAT and hardware flow offloading disabled, but may use software flow offloading. Port switching preserves your saved selection.'));
-		}
 
 		s = m.section(form.TypedSection);
 		s.anonymous = true;

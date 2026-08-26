@@ -1,0 +1,75 @@
+#!/bin/sh
+
+HNAT_DIR="${C2000_HNAT_DIR:-/sys/kernel/debug/hnat}"
+ROLE_LIB="${C2000_ROLE_LIB:-/usr/lib/c2000max/port-role.sh}"
+
+[ -r "$ROLE_LIB" ] && . "$ROLE_LIB"
+
+read_file()
+{
+	[ -r "$1" ] && cat "$1" 2>/dev/null || printf '%s\n' unavailable
+}
+
+role="$(c2000_actual_role 2>/dev/null)"
+requested="$(uci -q get turboacc.config.fastpath)"
+expected="$(c2000_effective_fastpath "$role" "$requested" 2>/dev/null)"
+effective="$(read_file /var/run/c2000max-hnat-effective)"
+hook="$(read_file "$HNAT_DIR/hook_toggle")"
+topology="$(read_file "$HNAT_DIR/hnat_topology")"
+mode="$(uci -q get c2000max.ethernet.wan_mode)"
+mmx_mask="$(uci -q get mwan3.globals.mmx_mask)"
+bind_total=0
+ppe0=0
+ppe1=0
+ppe2=0
+ipv4=0
+ipv6=0
+
+if [ -r "$HNAT_DIR/all_entry" ]; then
+	while IFS= read -r entry; do
+		case "$entry" in *'|state=BIND|'*) ;; *) continue ;; esac
+		bind_total=$((bind_total + 1))
+		case "$entry" in
+			*'|ppe=0|'*) ppe0=$((ppe0 + 1)) ;;
+			*'|ppe=1|'*) ppe1=$((ppe1 + 1)) ;;
+			*'|ppe=2|'*) ppe2=$((ppe2 + 1)) ;;
+		esac
+		case "$entry" in
+			*'|type=IPV4_'*) ipv4=$((ipv4 + 1)) ;;
+			*'|type=IPV6_'*) ipv6=$((ipv6 + 1)) ;;
+		esac
+	done < "$HNAT_DIR/all_entry"
+fi
+
+cat <<EOF
+C2000MAX HNAT diagnostic (read-only)
+role=$role
+wan_mode=${mode:-unknown}
+requested_fastpath=${requested:-unknown}
+expected_fastpath=${expected:-unknown}
+effective_fastpath=${effective:-unknown}
+hook=${hook:-unknown}
+topology=${topology:-unknown}
+mwan3_mmx_mask=${mmx_mask:-unknown}
+foe_bind_total=$bind_total
+foe_bind_ppe0=$ppe0
+foe_bind_ppe1=$ppe1
+foe_bind_ppe2=$ppe2
+foe_bind_ipv4=$ipv4
+foe_bind_ipv6=$ipv6
+EOF
+
+if command -v mwan3 >/dev/null 2>&1; then
+	printf '%s\n' '--- mwan3 status ---'
+	mwan3 status 2>/dev/null || true
+fi
+
+printf '%s\n' '--- active uplinks ---'
+for network in "$(uci -q get c2000max.ethernet.wan4)" \
+	"$(uci -q get c2000max.ethernet.cellular_interface)"; do
+	[ -n "$network" ] || continue
+	ubus call "network.interface.${network}" status 2>/dev/null |
+		jsonfilter -e 'interface=@.interface' -e 'up=@.up' \
+			-e 'device=@.l3_device' -e 'address=@["ipv4-address"][0].address' \
+			2>/dev/null || true
+done

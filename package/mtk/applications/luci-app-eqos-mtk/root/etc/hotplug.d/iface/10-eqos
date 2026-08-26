@@ -9,6 +9,13 @@ if [ "$(board_name)" = "nradio,c2000-max" ]; then
 		*) exit 0 ;;
 	esac
 	[ ! -e /var/run/c2000max-port-role.switching ] || exit 0
+	# An inactive limiter owns no runtime state.  In particular, do not route
+	# ordinary IPv4/IPv6 uplink hotplug through `eqos reload`: its disabled
+	# branch is a cleanup transaction and resetting HQoS invalidates every FoE
+	# entry.  The UCI reload trigger still performs that cleanup exactly once
+	# when a user changes enabled from 1 to 0.
+	EQOS_ENABLED="$(uci -q get eqos.config.enabled)"
+	[ "$EQOS_ENABLED" = 1 ] || exit 0
 	if [ "$INTERFACE" = "lan" ] && [ "$ACTION" = "ifdown" ]; then
 		/etc/init.d/eqos stop >/dev/null 2>&1
 	fi

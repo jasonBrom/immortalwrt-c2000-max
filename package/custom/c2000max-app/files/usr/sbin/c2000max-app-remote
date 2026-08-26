@@ -233,7 +233,7 @@ local connection_topic =
 	"$SYS/broker/connection/" .. device_id .. "/state"
 local subscriptions = {
 	connection_topic,
-	"kp/" .. device_id .. "/+/#"
+	"kp/" .. device_id .. "/#"
 }
 if core.feature_enabled("command_enable") or
    core.feature_enabled("developer_enable") then
@@ -319,6 +319,10 @@ for line in pipe:lines() do
 			rest = topic:sub(#direct + 1)
 			local sender
 			sender, event = rest:match("^([^/]+)/([^/]+)")
+			if not event then
+				event = rest:match("^([^/]+)$")
+				sender = ""
+			end
 			if sender == "mosca" and
 			   core.feature_enabled("broadcast_enable") then
 				is_broadcast = true

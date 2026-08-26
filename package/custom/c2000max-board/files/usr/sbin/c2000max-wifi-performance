@@ -1,0 +1,209 @@
+#!/bin/sh
+
+# Select between the MT7993 vendor defaults and a reversible high-performance
+# profile.  The private driver exposes both controls at runtime, while the
+# card-level profile makes the choice survive a driver reload and reboot.
+
+PROFILE_PATH="${C2000MAX_WIFI_PERF_PROFILE:-/etc/wireless/mediatek/mt7993.1.dat}"
+NET_CLASS_PATH="${C2000MAX_WIFI_PERF_NET_CLASS:-/sys/class/net}"
+FORCED_INTERFACE="${C2000MAX_WIFI_PERF_INTERFACE:-}"
+MWCTL_BIN="${C2000MAX_WIFI_PERF_MWCTL:-/usr/sbin/mwctl}"
+
+mode_values()
+{
+	case "$1" in
+		1) C2000_PERF_PCI=0; C2000_PERF_LP_SELECT=2; C2000_PERF_LP_VALUE=0 ;;
+		0) C2000_PERF_PCI=1; C2000_PERF_LP_SELECT=2; C2000_PERF_LP_VALUE=1 ;;
+		*) return 1 ;;
+	esac
+
+	C2000_PERF_LP="${C2000_PERF_LP_SELECT}:${C2000_PERF_LP_VALUE}"
+}
+
+configured_mode()
+{
+	local value
+	value="$(uci -q get c2000max.wifi_performance.enabled 2>/dev/null || true)"
+	[ "$value" = 1 ] && printf '1\n' || printf '0\n'
+}
+
+runtime_interfaces()
+{
+	local ifname
+
+	if [ -n "$FORCED_INTERFACE" ]; then
+		printf '%s\n' "$FORCED_INTERFACE"
+		return 0
+	fi
+
+	# Try every live main/member interface; some vendor builds accept NIC-level
+	# private commands only through one band even though the setting is shared.
+	# Ordinary BSSes normally use index 0; MLO-only operation may leave only
+	# the index-1 member interfaces.  All of them share one physical device.
+	for ifname in ra0 rai0 ra1 rai1; do
+		[ -d "$NET_CLASS_PATH/$ifname" ] || continue
+		printf '%s\n' "$ifname"
+	done
+}
+
+run_mwctl()
+{
+	# mwctl explicitly recommends the "dev" form for scripts.
+	"$MWCTL_BIN" dev "$@"
+}
+
+runtime_info()
+{
+	local ifname="$1"
+	run_mwctl "$ifname" show lpinfo 2>/dev/null
+}
+
+runtime_matches()
+{
+	local mode="$1" ifname="$2" info
+	mode_values "$mode" || return 1
+	info="$(runtime_info "$ifname")" || return 1
+	[ -n "$info" ] || return 1
+
+	printf '%s\n' "$info" |
+		grep -Eq "L1ss:[[:space:]]*${C2000_PERF_PCI}([[:space:]]|$)" || return 1
+	printf '%s\n' "$info" |
+		grep -Eq "Last LPOption:[[:space:]]*\\(${C2000_PERF_LP_SELECT},${C2000_PERF_LP_VALUE}," || return 1
+}
+
+write_profile()
+{
+	local mode="$1" tmp
+	mode_values "$mode" || return 1
+	[ -f "$PROFILE_PATH" ] || {
+		echo "缺少 MT7993 卡级配置：$PROFILE_PATH" >&2
+		return 1
+	}
+
+	tmp="${PROFILE_PATH}.c2000max.$$"
+	if ! sed \
+		-e "s/^PciL1ss=.*/PciL1ss=${C2000_PERF_PCI}/" \
+		-e "s/^LpOption=.*/LpOption=${C2000_PERF_LP}/" \
+		"$PROFILE_PATH" > "$tmp"; then
+		rm -f "$tmp"
+		return 1
+	fi
+
+	grep -q '^PciL1ss=' "$tmp" || printf 'PciL1ss=%s\n' "$C2000_PERF_PCI" >> "$tmp"
+	grep -q '^LpOption=' "$tmp" || printf 'LpOption=%s\n' "$C2000_PERF_LP" >> "$tmp"
+	chmod --reference="$PROFILE_PATH" "$tmp" 2>/dev/null || chmod 0644 "$tmp"
+	mv -f "$tmp" "$PROFILE_PATH"
+}
+
+write_config()
+{
+	local mode="$1"
+	case "$mode" in 0|1) ;; *) return 1 ;; esac
+
+	uci -q get c2000max.wifi_performance >/dev/null 2>&1 ||
+		uci -q set c2000max.wifi_performance=wifi_performance || return 1
+	uci -q set "c2000max.wifi_performance.enabled=$mode" || return 1
+	uci -q commit c2000max
+}
+
+persist_mode()
+{
+	local mode="$1" previous="$2"
+
+	write_profile "$mode" || return 1
+	if ! write_config "$mode"; then
+		write_profile "$previous" >/dev/null 2>&1 || true
+		return 1
+	fi
+}
+
+apply_runtime()
+{
+	local mode="$1" ifname found=0
+	mode_values "$mode" || return 1
+
+	for ifname in $(runtime_interfaces); do
+		found=1
+		# A vendor command may return an error while the asynchronous state
+		# transition was already accepted.  Always verify the driver's actual
+		# state instead of treating the command return code as authoritative.
+		run_mwctl "$ifname" set "PciL1ss=${C2000_PERF_PCI}" >/dev/null 2>&1 || true
+		run_mwctl "$ifname" set "LpOption=${C2000_PERF_LP}" >/dev/null 2>&1 || true
+		sleep 1
+		runtime_matches "$mode" "$ifname" && return 0
+	done
+
+	# No interface means the driver is not loaded. The persisted card profile
+	# will be consumed on the next wireless start, so this is not a failure.
+	[ "$found" -eq 0 ] && return 0
+
+	echo 'MT7993 未确认新的运行状态；已尝试全部可用无线接口。' >&2
+	return 1
+}
+
+set_mode()
+{
+	local mode="$1" previous
+	case "$mode" in 0|1) ;; *) return 1 ;; esac
+	previous="$(configured_mode)"
+
+	persist_mode "$mode" "$previous" || return 1
+	if ! apply_runtime "$mode"; then
+		persist_mode "$previous" "$mode" >/dev/null 2>&1 || true
+		apply_runtime "$previous" >/dev/null 2>&1 || true
+		echo '驱动拒绝运行时切换，已回退到原来的无线模式。' >&2
+		return 1
+	fi
+
+	logger -t c2000max-wifi-performance \
+		"无线模式已切换为 $([ "$mode" = 1 ] && echo 高性能 || echo 普通)"
+}
+
+status_mode()
+{
+	local mode ifname info candidate candidate_info profile_pci profile_lp
+	mode="$(configured_mode)"
+	ifname=
+	info=
+	for candidate in $(runtime_interfaces); do
+		candidate_info="$(runtime_info "$candidate" 2>/dev/null || true)"
+		[ -n "$candidate_info" ] || continue
+		ifname="$candidate"
+		info="$candidate_info"
+		break
+	done
+	profile_pci="$(sed -n 's/^PciL1ss=//p' "$PROFILE_PATH" 2>/dev/null | head -n 1)"
+	profile_lp="$(sed -n 's/^LpOption=//p' "$PROFILE_PATH" 2>/dev/null | head -n 1)"
+
+	printf 'enabled=%s\nmode=%s\ninterface=%s\nprofile_pci_l1ss=%s\nprofile_lp_option=%s\n' \
+		"$mode" "$([ "$mode" = 1 ] && echo performance || echo normal)" \
+		"${ifname:-none}" "${profile_pci:-unknown}" "${profile_lp:-unknown}"
+
+	[ -n "$info" ] && printf '%s\n' "$info"
+}
+
+[ "${C2000MAX_WIFI_PERF_SOURCE_ONLY:-0}" != 1 ] || return 0
+
+case "${1:-status}" in
+	enable)
+		set_mode 1 || exit 1
+		status_mode
+		;;
+	disable)
+		set_mode 0 || exit 1
+		status_mode
+		;;
+	profile)
+		write_profile "$(configured_mode)"
+		;;
+	reapply)
+		apply_runtime "$(configured_mode)"
+		;;
+	status)
+		status_mode
+		;;
+	*)
+		echo "Usage: $0 [enable|disable|profile|reapply|status]" >&2
+		exit 2
+		;;
+esac

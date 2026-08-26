@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=c2000max-board
 PKG_VERSION:=2.36.01
-PKG_RELEASE:=11
+PKG_RELEASE:=29
 PKG_LICENSE:=GPL-2.0-or-later
 
 include $(INCLUDE_DIR)/package.mk
@@ -16,7 +16,7 @@ define Package/c2000max-board
 	+kmod-dummy +kmod-mediatek_hnat +mtkhnat_util +hnat-detect \
 	+luci-app-turboacc-mtk +luci-app-eqos-mtk +luci-app-c2000max-traffic \
 	+mwan3 +coreutils-timeout \
-	+flock +uboot-envtools +zram-swap +gawk +grep +sed +coreutils-sort +sfdisk \
+	+flock +uboot-envtools +zram-swap +gawk +grep +sed +coreutils-sort +sfdisk +mwctl \
 	+luci-app-netbird +netbird
 endef
 
@@ -43,6 +43,8 @@ define Package/c2000max-board/install
 	$(INSTALL_BIN) ./files/etc/init.d/c2000max-access $(1)/etc/init.d/c2000max-access
 	$(INSTALL_BIN) ./files/etc/init.d/c2000max-swap-tune $(1)/etc/init.d/c2000max-swap-tune
 	$(INSTALL_BIN) ./files/etc/init.d/c2000max-uplink $(1)/etc/init.d/c2000max-uplink
+	$(INSTALL_BIN) ./files/etc/init.d/c2000max-mlo-interlock $(1)/etc/init.d/c2000max-mlo-interlock
+	$(INSTALL_BIN) ./files/etc/init.d/c2000max-wifi-performance $(1)/etc/init.d/c2000max-wifi-performance
 	$(INSTALL_BIN) ./files/etc/init.d/c2000max-service-worker $(1)/etc/init.d/c2000max-service-worker
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/iface
 	$(INSTALL_BIN) ./files/etc/hotplug.d/iface/98-c2000max-uplink $(1)/etc/hotplug.d/iface/98-c2000max-uplink
@@ -52,6 +54,8 @@ define Package/c2000max-board/install
 	$(INSTALL_BIN) ./files/lib/preinit/79_c2000max_grow_tf $(1)/lib/preinit/79_c2000max_grow_tf
 	ln -sf ../init.d/c2000max-hnat $(1)/etc/rc.d/S91c2000max-hnat
 	ln -sf ../init.d/eqos $(1)/etc/rc.d/S99eqos
+	ln -sf ../init.d/c2000max-mlo-interlock $(1)/etc/rc.d/S18c2000max-mlo-interlock
+	ln -sf ../init.d/c2000max-wifi-performance $(1)/etc/rc.d/S17c2000max-wifi-performance
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-sim $(1)/usr/sbin/c2000max-sim
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-leds $(1)/usr/sbin/c2000max-leds
@@ -60,12 +64,15 @@ define Package/c2000max-board/install
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-port-role $(1)/usr/sbin/c2000max-port-role
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-eqos-locked $(1)/usr/sbin/c2000max-eqos-locked
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-hnat-locked $(1)/usr/sbin/c2000max-hnat-locked
+	$(INSTALL_BIN) ./files/usr/sbin/c2000max-hnat-diag $(1)/usr/sbin/c2000max-hnat-diag
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-access $(1)/usr/sbin/c2000max-access
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-swap $(1)/usr/sbin/c2000max-swap
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-adblock-compat $(1)/usr/sbin/c2000max-adblock-compat
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-netbird-job $(1)/usr/sbin/c2000max-netbird-job
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-service-worker $(1)/usr/sbin/c2000max-service-worker
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-factory $(1)/usr/sbin/c2000max-factory
+	$(INSTALL_BIN) ./files/usr/sbin/c2000max-mlo-interlock $(1)/usr/sbin/c2000max-mlo-interlock
+	$(INSTALL_BIN) ./files/usr/sbin/c2000max-wifi-performance $(1)/usr/sbin/c2000max-wifi-performance
 	$(INSTALL_DIR) $(1)/usr/lib/c2000max
 	$(INSTALL_DATA) ./files/usr/lib/c2000max/port-role.sh $(1)/usr/lib/c2000max/port-role.sh
 	$(INSTALL_DATA) ./files/usr/lib/c2000max/uplink-mode.sh $(1)/usr/lib/c2000max/uplink-mode.sh

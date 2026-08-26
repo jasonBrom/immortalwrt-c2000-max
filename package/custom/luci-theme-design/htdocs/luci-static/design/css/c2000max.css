@@ -1,0 +1,119 @@
+/* C2000MAX compatibility for current LuCI form and modal DOM. */
+html body #modal_overlay {
+	top: 0;
+	z-index: 2000;
+}
+
+html body #modal_overlay .modal.cbi-modal {
+	box-sizing: border-box;
+	width: calc(100vw - 3rem);
+	max-width: 1280px;
+	max-height: calc(100vh - 3rem);
+	margin: 1.5rem auto;
+	overflow-x: hidden;
+	overflow-y: auto;
+	align-items: stretch;
+}
+
+body.modal-overlay-active #maincontent > .alert-message {
+	position: fixed;
+	z-index: 2200;
+	top: .75rem;
+	left: 50%;
+	box-sizing: border-box;
+	width: min(900px, calc(100vw - 2rem));
+	max-height: 40vh;
+	margin: 0;
+	overflow: auto;
+	transform: translateX(-50%);
+}
+
+.modal.cbi-modal .cbi-map,
+.modal.cbi-modal .cbi-section,
+.modal.cbi-modal .cbi-section-node,
+.modal.cbi-modal .cbi-value,
+.modal.cbi-modal .cbi-value-field,
+.modal.cbi-modal .c2000max-time-windows,
+.modal.cbi-modal .c2000max-app-selector {
+	box-sizing: border-box;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.modal.cbi-modal .cbi-value {
+	display: grid;
+	grid-template-columns: minmax(10rem, 24%) minmax(0, 1fr);
+	align-items: start;
+	gap: .5rem 1rem;
+}
+
+.modal.cbi-modal .cbi-value-title,
+.modal.cbi-modal .cbi-value-field {
+	display: block;
+	float: none;
+	box-sizing: border-box;
+	width: auto;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.modal.cbi-modal .cbi-value-title {
+	padding: .8rem .25rem;
+}
+
+.modal.cbi-modal .cbi-value-description {
+	display: block;
+	width: 100%;
+}
+
+.modal.cbi-modal .cbi-dynlist,
+.modal.cbi-modal .cbi-dynlist > .item,
+.modal.cbi-modal .cbi-dynlist > .add-item,
+.modal.cbi-modal .cbi-dropdown,
+.modal.cbi-modal .cbi-input-select,
+.modal.cbi-modal .cbi-input-text,
+.modal.cbi-modal .cbi-input-password {
+	box-sizing: border-box;
+	width: 100%;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.modal.cbi-modal .cbi-dynlist > .item,
+.modal.cbi-modal .cbi-dropdown > ul > li {
+	overflow: hidden;
+	white-space: normal;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
+.modal.cbi-modal .cbi-dropdown > ul,
+.modal.cbi-modal .cbi-dropdown[open] > ul.dropdown {
+	box-sizing: border-box;
+	width: 100%;
+	min-width: 0;
+	max-width: 100%;
+	left: 0;
+	right: auto;
+}
+
+.c2000max-mlo-overview-title > td {
+	padding: 1.25rem .75rem .5rem !important;
+	color: var(--active_color);
+	background: var(--sectionbg_color);
+}
+
+.c2000max-mlo-overview-title h3 {
+	margin: 0;
+}
+
+@media (max-width: 760px) {
+	html body #modal_overlay .modal.cbi-modal {
+		width: calc(100vw - 1rem);
+		max-height: calc(100vh - 1rem);
+		margin: .5rem auto;
+	}
+	.modal.cbi-modal .cbi-value {
+		display: block;
+	}
+}

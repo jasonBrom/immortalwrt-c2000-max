@@ -28,6 +28,15 @@ appstore_enable
 developer_enable
 "
 
+NUMBER_OPTIONS="
+modem_cache_interval
+selector_cache_interval
+cache_warm_interval
+signal_normal_interval
+signal_test_interval
+signal_carrier_interval
+"
+
 normalize_bool()
 {
 	case "$1" in
@@ -35,6 +44,17 @@ normalize_bool()
 		0|false) printf '0\n' ;;
 		*) return 1 ;;
 	esac
+}
+
+normalize_number()
+{
+	local value="$1" minimum="$2" maximum="$3"
+	case "$value" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	[ "$value" -ge "$minimum" ] 2>/dev/null || return 1
+	[ "$value" -le "$maximum" ] 2>/dev/null || return 1
+	printf '%s\n' "$value"
 }
 
 status()
@@ -162,6 +182,16 @@ status()
 	for option in $OPTIONS; do
 		value="$(uci -q get "c2000max_app.main.$option")"
 		json_add_boolean "$option" "$([ "$value" = 1 ] && echo 1 || echo 0)"
+	done
+	for option in $NUMBER_OPTIONS; do
+		value="$(uci -q get "c2000max_app.main.$option")"
+		case "$option" in
+			modem_cache_interval) value="${value:-10}" ;;
+			selector_cache_interval) value="${value:-15}" ;;
+			cache_warm_interval) value="${value:-2}" ;;
+			*) value="${value:-1}" ;;
+		esac
+		json_add_int "$option" "$value"
 	done
 	json_add_string device_id "$device_id"
 	json_add_string factory_id "$factory_id"
@@ -376,7 +406,13 @@ case "$1" in
 		"command_enable": "bool",
 		"file_enable": "bool",
 		"appstore_enable": "bool",
-		"developer_enable": "bool"
+		"developer_enable": "bool",
+		"modem_cache_interval": "int",
+		"selector_cache_interval": "int",
+		"cache_warm_interval": "int",
+		"signal_normal_interval": "int",
+		"signal_test_interval": "int",
+		"signal_carrier_interval": "int"
 	}
 }
 EOF
@@ -415,6 +451,29 @@ EOF
 					uci -q set "c2000max_app.main.$option=$value" || {
 						uci -q revert c2000max_app
 						echo '{"success":false,"message":"无法保存 APP 管理设置"}'
+						exit 0
+					}
+				done
+				for option in $NUMBER_OPTIONS; do
+					json_get_var raw "$option"
+					case "$option" in
+						modem_cache_interval|selector_cache_interval|cache_warm_interval)
+							minimum=1; maximum=60 ;;
+						signal_normal_interval)
+							minimum=1; maximum=30 ;;
+						signal_test_interval)
+							minimum=1; maximum=10 ;;
+						signal_carrier_interval)
+							minimum=2; maximum=120 ;;
+					esac
+					value="$(normalize_number "$raw" "$minimum" "$maximum")" || {
+						uci -q revert c2000max_app
+						echo '{"success":false,"message":"APP 缓存或刷新时长无效"}'
+						exit 0
+					}
+					uci -q set "c2000max_app.main.$option=$value" || {
+						uci -q revert c2000max_app
+						echo '{"success":false,"message":"无法保存 APP 刷新设置"}'
 						exit 0
 					}
 				done

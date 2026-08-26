@@ -74,9 +74,9 @@ const no_foreign_port_refs = (network, role, bridge_name) => {
 };
 
 /*
- * The role marker is display metadata only.  Derive the authoritative role
- * from the network UCI graph so direct edits and interrupted switches fail
- * closed instead of accidentally enabling HNAT on eth1-as-WAN.
+ * The role marker is display metadata only. Derive the authoritative role
+ * from the network UCI graph so direct edits and interrupted switches report
+ * an inconsistent topology and keep acceleration fail-closed.
  */
 const actual_port_role = () => {
 	let cursor = uci.cursor();

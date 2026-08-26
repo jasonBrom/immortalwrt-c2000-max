@@ -44,3 +44,6 @@ config access_control 'access_control'
 	option enabled '0'
 	option mode 'blacklist'
 	option lan_device 'auto'
+
+config wifi_performance 'wifi_performance'
+	option enabled '0'

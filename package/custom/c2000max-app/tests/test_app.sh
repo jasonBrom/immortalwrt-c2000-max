@@ -157,6 +157,9 @@ done
 assert_not_contains "$CONFIG" "option upgrade_enable"
 assert_not_contains "$CONFIG" "option device_id"
 assert_not_contains "$CONFIG" "option allow_sensitive"
+assert_contains "$CONFIG" "option modem_cache_interval '10'"
+assert_contains "$CONFIG" "option selector_cache_interval '15'"
+assert_contains "$CONFIG" "option cache_warm_interval '2'"
 assert_contains "$CONFIG" "option signal_normal_interval '3'"
 assert_contains "$CONFIG" "option signal_test_interval '1'"
 assert_contains "$CONFIG" "option signal_carrier_interval '10'"
@@ -189,7 +192,9 @@ assert_contains "$CORE" 'return "0", "2"'
 assert_contains "$CORE" 'return "4", "1"'
 assert_contains "$CORE" 'local APP_SOFTWARE_VERSION = "9.9.13.n0.c1"'
 assert_contains "$CORE" 'function M.software_version()'
-assert_contains "$CORE" 'local MODEM_CACHE_INTERVAL = 10'
+assert_contains "$CORE" 'local DEFAULT_MODEM_CACHE_INTERVAL = 10'
+assert_contains "$CORE" 'local DEFAULT_SELECTOR_CACHE_INTERVAL = 15'
+assert_contains "$CORE" 'local DEFAULT_CACHE_WARM_INTERVAL = 2'
 assert_contains "$CORE" 'function M.signal_refresh_policy()'
 assert_contains "$CORE" 'DEFAULT_SIGNAL_NORMAL_INTERVAL = 3'
 assert_contains "$CORE" 'DEFAULT_SIGNAL_TEST_INTERVAL = 1'
@@ -226,12 +231,21 @@ assert_contains "$CORE" 'for value in tostring(values or ""):gmatch("[^:;/%s]+")
 assert_contains "$CORE" 'local function apply_huawei_network_mode(modem, mode)'
 assert_contains "$CORE" 'status = (lock_type == 1 or lock_type == 2) and "1" or "0"'
 assert_contains "$CORE" 'function M.station_status()'
+assert_contains "$CORE" 'local function valid_client_mac(value)'
+assert_contains "$CORE" 'station.mld_mac = mld:upper()'
+assert_contains "$CORE" 'station_aliases[link_mac] = device_mac'
+assert_contains "$CORE" 'expiry == 0 or expiry > math.floor(precise_time())'
+assert_contains "$CORE" 'if live[mac] and not local_macs[mac] then'
 assert_contains "$CORE" 'local function normalize_sms_read(value, requested_type)'
 assert_contains "$CORE" 'local function normalize_qmodem_neighbor_cells(value)'
 assert_contains "$CORE" 'local function app_operator_plmn(fields, imsi, operator)'
 assert_contains "$CORE" 'local function shared_cache_read(name, maximum_age, allow_stale)'
 assert_contains "$CORE" 'local function shared_cache_write(name, value)'
 assert_contains "$CORE" 'function M.prewarm()'
+assert_contains "$CORE" 'function M.cache_refresh_policy()'
+assert_contains "$CORE" 'M.set_device_internet(mac, allowed)'
+assert_contains "$CORE" 'rv.result = { client = list_clients() }'
+assert_contains "$CORE" 'uci:set("c2000max", "access_control", "enabled", "1")'
 assert_contains "$CORE" 'item.rule_name or item.ruleName or "t0"'
 assert_contains "$CORE" '"/usr/sbin/c2000max-app-wifi-apply >/dev/null 2>&1 &"'
 assert_contains "$CORE" 'name == "upgrade_enable"'
@@ -245,6 +259,13 @@ do
 	assert_contains "$CORE" "\"${permission}_enable\""
 done
 assert_contains "$CORE" '系统 → APP 支持'
+
+CLOUD="$ROOT/files/usr/lib/lua/c2000max_app/cloud.lua"
+REMOTE="$ROOT/files/usr/sbin/c2000max-app-remote"
+assert_contains "$CLOUD" 'local function control_item(value, depth)'
+assert_contains "$CLOUD" 'control_key == "internetcontrol"'
+assert_contains "$REMOTE" '"kp/" .. device_id .. "/#"'
+assert_contains "$REMOTE" 'event = rest:match("^([^/]+)$")'
 assert_not_contains "$CORE" '/dev/ttyUSB'
 assert_not_contains "$CORE" '/dev/ttyACM'
 if rg -n 'io\.open\([^)]*(at_port|control|tty|serial)' "$CORE"; then
@@ -383,7 +404,7 @@ assert_contains "$INIT" 'procd_set_param command /usr/sbin/c2000max-app-bridge'
 assert_contains "$INIT" 'procd_set_param command /usr/sbin/c2000max-app-cache'
 
 REMOTE="$ROOT/files/usr/sbin/c2000max-app-remote"
-assert_contains "$REMOTE" '"kp/" .. device_id .. "/+/#"'
+assert_contains "$REMOTE" '"kp/" .. device_id .. "/#"'
 assert_contains "$REMOTE" '"$SYS/broker/connection/" .. device_id .. "/state"'
 assert_contains "$REMOTE" '"rpc/exec/#"'
 assert_contains "$REMOTE" 'LOCAL_BROKER = "127.0.0.1"'
@@ -471,6 +492,8 @@ assert_contains "$CLOUD" 'local result, output = execute(prepared_command, 60)'
 assert_contains "$CLOUD" 'fs.chmod(path, "0600")'
 assert_contains "$CLOUD" 'return remote_sim_switch(payload), "simswitch"'
 assert_contains "$CLOUD" 'schedule_remote_sim_switch(slot, requested_mode)'
+assert_contains "$CLOUD" 'local control = terminal_control(payload)'
+assert_contains "$CLOUD" 'return control, event'
 assert_contains "$CLOUD" 'return remote_sms(payload), "sms"'
 assert_contains "$CLOUD" 'return station_status(), "stalist"'
 assert_contains "$CLOUD" 'state = 6'
@@ -485,7 +508,7 @@ assert_contains "$REPORTER" '"report_interval"'
 MAKEFILE="$ROOT/Makefile"
 assert_contains "$MAKEFILE" '+mosquitto-nossl'
 assert_contains "$MAKEFILE" 'PKG_VERSION:=1.10.0'
-assert_contains "$MAKEFILE" 'PKG_RELEASE:=5'
+assert_contains "$MAKEFILE" 'PKG_RELEASE:=8'
 for dependency in '+flock' '+blkid' '+ip-full' '+iw' '+uclient-fetch'; do
 	assert_contains "$MAKEFILE" "$dependency"
 done
@@ -501,7 +524,7 @@ assert_not_contains "$MAKEFILE" 'app_v30.js $(1)'
 LUCI_MAKEFILE="$LUCI_ROOT/Makefile"
 assert_contains "$LUCI_MAKEFILE" 'LUCI_TITLE:=LuCI configuration for C2000-MAX APP support'
 assert_contains "$LUCI_MAKEFILE" 'LUCI_DEPENDS:=+c2000max-app'
-assert_contains "$LUCI_MAKEFILE" 'PKG_RELEASE:=2'
+assert_contains "$LUCI_MAKEFILE" 'PKG_RELEASE:=3'
 assert_contains "$LUCI_MAKEFILE" '# call BuildPackage - OpenWrt buildroot signature'
 assert_contains "$ACL" '"c2000max_app": [ "set", "restart" ]'
 
@@ -520,3 +543,10 @@ assert_contains "$QMODEM_HUAWEI" 'cache_c2000max_huawei_detail_'
 assert_contains "$QMODEM_HUAWEI" '[ "$age" -ge 0 ] && [ "$age" -le 60 ]'
 
 echo "PASS: V36.01 local cellular and official remote-control compatibility"
+for interval in modem_cache selector_cache cache_warm signal_normal \
+	signal_test signal_carrier
+do
+	assert_contains "$VIEW" "${interval}_interval"
+done
+assert_contains "$VIEW" '数据刷新与缓存'
+assert_contains "$RPC" '"modem_cache_interval": "int"'

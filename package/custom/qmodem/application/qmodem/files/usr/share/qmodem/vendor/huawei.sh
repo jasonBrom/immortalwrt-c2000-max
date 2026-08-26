@@ -772,30 +772,81 @@ cell_info()
     
 }
 
+function huawei_dsflow_payload() {
+    awk '
+        function emit(value) {
+            gsub(/[[:space:]]/, "", value)
+            if (value ~ /^[0-9A-Fa-f]+(,[0-9A-Fa-f]+)+$/) {
+                print value
+                exit
+            }
+        }
+        /\^DSFLOWQRY:/ {
+            value = $0
+            sub(/^.*\^DSFLOWQRY:[[:space:]]*/, "", value)
+            if (value != "")
+                emit(value)
+            waiting = 1
+            next
+        }
+        waiting {
+            value = $0
+            sub(/\r$/, "", value)
+            if (value ~ /^[[:space:]]*[0-9A-Fa-f]+,/)
+                emit(value)
+            if (value ~ /^[[:space:]]*(OK|ERROR|\+CME ERROR)/)
+                waiting = 0
+        }
+    '
+}
+
+function huawei_hex_flow_to_dec() {
+    local value="$1"
+
+    case "$value" in
+        ''|*[!0-9A-Fa-f]*) return 1 ;;
+    esac
+    # MT5700 reports byte counters as 16 hexadecimal digits.  BusyBox ash on
+    # the aarch64 target evaluates 0x-prefixed values with 64-bit arithmetic.
+    value=$((0x$value))
+    [ "$value" -ge 0 ] || return 1
+    printf '%s\n' "$value"
+}
+
 function network_info() {
-    local netdev rx_bytes tx_bytes now state_file old_time old_rx old_tx
+    local response payload pdp_id rx_hex tx_hex rx_bytes tx_bytes now state_dir state_file old_time old_rx old_tx old_ifs
     local rx_rate=0 tx_rate=0 elapsed
 
-    # MT5700 does not provide the QNWCFG speed command used by Quectel
-    # modems.  Its USB ECM/NCM interface counters are authoritative and also
-    # include accelerated traffic, so derive the live rate from two samples.
-    netdev=$(uci -q get "qmodem.${config_section}.network")
-    [ -n "$netdev" ] && [ -d "/sys/class/net/${netdev}" ] || netdev=""
-    if [ -z "$netdev" ] && [ -n "$modem_path" ]; then
-        netdev=$(find "$modem_path" -type d -name net 2>/dev/null |
-            while read -r netdir; do
-                ls "$netdir" 2>/dev/null
-            done | head -n1)
+    # MT5700M-CN exposes authoritative DS byte counters through its private
+    # interface.  Query the active PDP context first, then fall back to the
+    # all-context form for firmware variants that do not accept a CID.
+    pdp_id="${pdp_index:-1}"
+    case "$pdp_id" in
+        ''|*[!0-9]*|0|1[2-9]|[2-9][0-9]*) pdp_id=1 ;;
+    esac
+    response=$(at "$at_port" "AT^DSFLOWQRY=$pdp_id" 2>/dev/null)
+    payload=$(printf '%s\n' "$response" | huawei_dsflow_payload)
+    if [ -z "$payload" ]; then
+        response=$(at "$at_port" "AT^DSFLOWQRY" 2>/dev/null)
+        payload=$(printf '%s\n' "$response" | huawei_dsflow_payload)
     fi
-    [ -n "$netdev" ] || return 0
+    [ -n "$payload" ] || return 0
 
-    rx_bytes=$(cat "/sys/class/net/${netdev}/statistics/rx_bytes" 2>/dev/null)
-    tx_bytes=$(cat "/sys/class/net/${netdev}/statistics/tx_bytes" 2>/dev/null)
-    case "$rx_bytes" in ''|*[!0-9]*) return 0 ;; esac
-    case "$tx_bytes" in ''|*[!0-9]*) return 0 ;; esac
+    old_ifs="$IFS"
+    IFS=,
+    set -- $payload
+    IFS="$old_ifs"
+    [ "$#" -ge 6 ] || return 0
+    tx_hex="$5"
+    rx_hex="$6"
+    tx_bytes=$(huawei_hex_flow_to_dec "$tx_hex") || return 0
+    rx_bytes=$(huawei_hex_flow_to_dec "$rx_hex") || return 0
 
-    now=$(date +%s)
-    state_file="/tmp/qmodem_huawei_speed_${config_section}"
+    now="${QMODEM_SPEED_NOW:-$(date +%s)}"
+    case "$now" in ''|*[!0-9]*) return 0 ;; esac
+    state_dir="${QMODEM_SPEED_STATE_DIR:-/tmp}"
+    state_file="${state_dir}/qmodem_huawei_speed_${config_section}"
+    mkdir -p "$state_dir" 2>/dev/null || return 0
     if [ -r "$state_file" ]; then
         read -r old_time old_rx old_tx < "$state_file" || true
         case "$old_time:$old_rx:$old_tx" in

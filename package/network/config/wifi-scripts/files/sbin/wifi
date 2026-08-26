@@ -12,6 +12,14 @@ EOF
 	exit 1
 }
 
+wifi_interlock_sync() {
+	[ -x /usr/sbin/c2000max-mlo-interlock ] || return 0
+	/usr/sbin/c2000max-mlo-interlock sync || {
+		>&2 echo "Failed to synchronize the C2000MAX MLO interlock"
+		return 1
+	}
+}
+
 ubus_wifi_cmd() {
 	local cmd="$1"
 	local dev="$2"
@@ -40,11 +48,13 @@ wifi_isup() {
 wifi_updown() {
 	cmd=down
 	[ enable = "$1" ] && {
+		wifi_interlock_sync || return 1
 		ubus_wifi_cmd "$cmd" "$2"
 		ubus call network reload
 		cmd=up
 	}
 	[ reconf = "$1" ] && {
+		wifi_interlock_sync || return 1
 		ubus call network reload
 		cmd=reconf
 	}
@@ -52,6 +62,7 @@ wifi_updown() {
 }
 
 wifi_reload() {
+	wifi_interlock_sync || return 1
 	ubus call network reload
 }
 

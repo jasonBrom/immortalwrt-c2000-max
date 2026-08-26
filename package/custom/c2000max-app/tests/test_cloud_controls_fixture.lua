@@ -61,6 +61,7 @@ module("c2000max_app.rweb", {
 
 local sim_requests = {}
 local reboot_requests = 0
+local internet_requests = {}
 local core = {
 	device_id = function() return "021122334455" end,
 	software_version = function() return "9.9.13.n0.c1" end,
@@ -80,6 +81,11 @@ local core = {
 		}
 	end
 }
+function core.set_device_internet(mac, allowed)
+	internet_requests[#internet_requests + 1] = { mac = mac, allowed = allowed }
+	return { code = "0", errcode = "0", mac = mac,
+		switch = allowed and 1 or 0 }
+end
 function core.handle(action, data)
 	if action == "cpesel" then
 		sim_requests[#sim_requests + 1] = data
@@ -181,6 +187,50 @@ equal(terminal_event, "terminal", "terminal reply event")
 equal(terminal.auth_on, 0, "terminal auth flag is numeric")
 equal(terminal.client[1].client, "AA:BB:CC:DD:EE:FF",
 	"terminal client list")
+local controlled, controlled_event = cloud.handle("client", {
+	client = "AA:BB:CC:DD:EE:FF", switch = 0
+})
+equal(controlled_event, "client", "remote client control reply event")
+equal(controlled.code, "0", "remote client control result")
+equal(internet_requests[1].mac, "AA:BB:CC:DD:EE:FF",
+	"remote client control MAC")
+equal(internet_requests[1].allowed, false,
+	"remote client switch zero blocks internet")
+equal(#internet_requests, 1, "remote client control is not treated as inventory query")
+
+local array_control = cloud.handle("terminal", {
+	client = { {
+		mac = "33:44:55:66:77:88", switch = 0
+	} }
+})
+equal(array_control.code, "0", "client-array remote control result")
+equal(internet_requests[2].mac, "33:44:55:66:77:88",
+	"client-array remote control MAC")
+equal(internet_requests[2].allowed, false,
+	"client-array switch zero blocks internet")
+
+local nested, nested_event = cloud.handle("terminalset", {
+	data = { clients = { {
+		device_mac = "11:22:33:44:55:66", switch_off = "0"
+	} } }
+})
+equal(nested_event, "terminalset", "nested remote control reply event")
+equal(nested.code, "0", "nested remote control result")
+equal(internet_requests[3].mac, "11:22:33:44:55:66",
+	"nested remote control MAC")
+equal(internet_requests[3].allowed, true,
+	"nested switch_off zero allows internet")
+
+local blocked_alias = cloud.handle("internet-control", {
+	control = { station = { {
+		sta_mac = "22:33:44:55:66:77", blocked = "enabled"
+	} } }
+})
+equal(blocked_alias.code, "0", "remote internet-control alias result")
+equal(internet_requests[4].mac, "22:33:44:55:66:77",
+	"remote internet-control alias MAC")
+equal(internet_requests[4].allowed, false,
+	"remote blocked alias disables internet")
 
 local stations, station_event = cloud.handle("stastatus", {})
 equal(station_event, "stalist", "station reply uses factory event")

@@ -1,0 +1,4 @@
+Upstream: https://github.com/0x676e67/luci-theme-design
+Branch: js
+Commit: 9e1108b21a964a0c34f5db32f70817f1fc98318e
+Local change: register Design without replacing the C2000-MAX Argon default.

@@ -162,9 +162,11 @@ def validate_reference(path: Path, gpt: GPT) -> None:
     for name, expected in EXPECTED_LAYOUT.items():
         actual = layout[name]
         if name == "rootfs":
-            # Later C2000-MAX images already expanded rootfs_data.  Its start
-            # LBA is part of the OEM boot contract; its end LBA is not.
-            if actual[0] != expected[0] or actual[1] < expected[1]:
+            # C2000-MAX images assembled by this tool size rootfs_data from
+            # the current SquashFS payload, so they can be smaller or larger
+            # than the OEM reference. Its start LBA is part of the boot
+            # contract; its end LBA is not and the rootfs is never preserved.
+            if actual[0] != expected[0] or actual[1] < actual[0]:
                 raise ValueError(f"reference GPT layout mismatch: {layout!r}")
         elif actual != expected:
             raise ValueError(f"reference GPT layout mismatch: {layout!r}")

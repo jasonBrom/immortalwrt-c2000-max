@@ -254,8 +254,14 @@ if [ -n "$ROOTFS" ]; then
 	module_layout_size=
 	module_count=0
 	for module in $(find "$ROOTFS/lib/modules" -type f -name '*.ko' | sort); do
-		this_module_size="$(readelf -SW "$module" 2>/dev/null |
-			awk '$2 == ".gnu.linkonce.this_module" { print $6; exit }')"
+		# readelf renders one-digit section indexes as "[ 7]" and two-digit
+		# indexes as "[17]", shifting every fixed awk field by one. Locate the
+		# section-name token first, then read its Size column relative to it.
+		this_module_size="$(readelf -SW "$module" 2>/dev/null | awk '
+		{
+			for (i = 1; i <= NF; i++)
+				if ($i == ".gnu.linkonce.this_module") { print $(i + 4); exit }
+		}')"
 		[ -n "$this_module_size" ] ||
 			fail "cannot read .gnu.linkonce.this_module from $module"
 		if [ -z "$module_layout_size" ]; then

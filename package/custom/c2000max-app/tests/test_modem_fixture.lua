@@ -100,6 +100,8 @@ local serialized_at_calls = 0
 local neighbor_signal_calls = 0
 local lock_commands = {}
 local last_exec = ""
+local client_neighbor = false
+local wireless_mlo_fixture = false
 local fast_signal_should_fail = false
 local monsc_earfcn = "504990"
 local carrier_response = "^HFREQINFO: 0,7," ..
@@ -251,6 +253,41 @@ module("luci.util", {
 	ubus = ubus,
 	exec = function(command)
 		last_exec = tostring(command or "")
+		if wireless_mlo_fixture and last_exec == "iw dev 2>/dev/null" then
+			return table.concat({
+				"phy#0", "\tInterface ra0", "\t\taddr 02:11:22:33:44:55",
+				"\t\tssid ImmortalWrt-MLO", "\t\ttype AP",
+				"\t\tchannel 6 (2437 MHz), width: 40 MHz",
+				"phy#1", "\tInterface rai0", "\t\taddr 02:66:77:88:99:AA",
+				"\t\tssid ImmortalWrt-MLO", "\t\ttype AP",
+				"\t\tchannel 36 (5180 MHz), width: 160 MHz"
+			}, "\n") .. "\n"
+		elseif wireless_mlo_fixture and last_exec:find("iw dev ra0 station dump", 1, true) then
+			return table.concat({
+				"Station 12:34:56:78:9A:BC (on ra0)",
+				"\trx bytes: 100", "\ttx bytes: 200", "\tsignal: -52 dBm",
+				"\trx bitrate: 100.0 MBit/s", "\ttx bitrate: 80.0 MBit/s",
+				"\tconnected time: 30 seconds", "\tMLD address: AA:BB:CC:DD:EE:FF"
+			}, "\n") .. "\n"
+		elseif wireless_mlo_fixture and last_exec:find("iw dev rai0 station dump", 1, true) then
+			return table.concat({
+				"Station 22:34:56:78:9A:BC (on rai0)",
+				"\trx bytes: 300", "\ttx bytes: 400", "\tsignal: -61 dBm",
+				"\trx bitrate: 200.0 MBit/s", "\ttx bitrate: 160.0 MBit/s",
+				"\tconnected time: 31 seconds", "\tmld addr: AA:BB:CC:DD:EE:FF"
+			}, "\n") .. "\n"
+		elseif wireless_mlo_fixture and last_exec == "ip -o link show 2>/dev/null" then
+			return "5: ra0: <UP> link/ether 02:11:22:33:44:55 brd ff:ff:ff:ff:ff:ff\n" ..
+				"6: rai0: <UP> link/ether 02:66:77:88:99:AA brd ff:ff:ff:ff:ff:ff\n"
+		end
+		if client_neighbor and last_exec:find("ip neigh show dev br%-lan") then
+			if wireless_mlo_fixture then
+				return "192.168.1.10 dev br-lan lladdr AA:BB:CC:DD:EE:FF REACHABLE\n" ..
+					"192.168.1.1 dev br-lan lladdr 02:11:22:33:44:55 STALE\n" ..
+					"224.0.0.1 dev br-lan lladdr 01:00:5E:00:00:01 REACHABLE\n"
+			end
+			return "192.168.1.10 dev br-lan lladdr AA:BB:CC:DD:EE:FF REACHABLE\n"
+		end
 		return ""
 	end,
 	shellquote = function(value) return tostring(value) end
@@ -260,9 +297,15 @@ local app_options = {
 	signal_report_enable = "1",
 	cellular_record_enable = "0",
 	local_signal_enable = "1",
+	local_client_enable = "1",
 	local_network_write_enable = "1",
-	sim_mode = "1"
+	sim_mode = "1",
+	modem_cache_interval = "10",
+	selector_cache_interval = "15",
+	cache_warm_interval = "2"
 }
+local access_control
+local access_devices = {}
 local wireless = {
 	radio0 = { [".name"] = "radio0", [".type"] = "wifi-device",
 		channel = "auto" },
@@ -281,8 +324,14 @@ local uci = {}
 function uci:get(config, section, option)
 	if config == "c2000max_app" and section == "main" then
 		return app_options[option] or "0"
+	elseif config == "dhcp" and section == "@dnsmasq[0]" and option == "leasefile" then
+		return "/tmp/c2000max-app-fixture.leases"
 	elseif config == "wireless" and wireless[section] then
 		return wireless[section][option]
+	elseif config == "c2000max" and section == "access_control" and access_control then
+		return access_control[option]
+	elseif config == "c2000max" and access_devices[section] then
+		return access_devices[section][option]
 	end
 	return nil
 end
@@ -293,6 +342,12 @@ function uci:set(config, section, option, value)
 	elseif config == "wireless" and wireless[section] then
 		wireless[section][option] = tostring(value)
 		return true
+	elseif config == "c2000max" and section == "access_control" and access_control then
+		access_control[option] = tostring(value)
+		return true
+	elseif config == "c2000max" and access_devices[section] then
+		access_devices[section][option] = tostring(value)
+		return true
 	end
 	return false
 end
@@ -302,6 +357,21 @@ function uci:delete(config, section, option)
 		return true
 	end
 	return false
+end
+function uci:load()
+	return true
+end
+function uci:section(config, section_type, name, values)
+	if config ~= "c2000max" then return nil end
+	values = values or {}
+	values[".name"] = name
+	values[".type"] = section_type
+	if name == "access_control" then
+		access_control = values
+	else
+		access_devices[name] = values
+	end
+	return name
 end
 function uci:commit()
 	return true
@@ -324,6 +394,10 @@ function uci:foreach(config, section_type, callback)
 	elseif config == "wireless" and section_type == "wifi-iface" then
 		callback(wireless.default_radio0)
 		callback(wireless.default_radio1)
+	elseif config == "c2000max" and section_type == "access_device" then
+		for _, section in pairs(access_devices) do
+			callback(section)
+		end
 	end
 end
 
@@ -341,6 +415,27 @@ module("c2000max_app.identity", {
 		return { device_id = "021122334455" }
 	end
 })
+
+local real_io_open = io.open
+io.open = function(path, mode)
+	if path == "/tmp/c2000max-app-fixture.leases" then
+		local lines = {
+			"1786000000 AA:BB:CC:DD:EE:FF 192.168.1.10 phone *",
+			"1785000000 DE:AD:BE:EF:00:02 192.168.1.99 expired *"
+		}
+		local index = 0
+		return {
+			lines = function()
+				return function()
+					index = index + 1
+					return lines[index]
+				end
+			end,
+			close = function() end
+		}
+	end
+	return real_io_open(path, mode)
+end
 
 local function equal(actual, expected, label)
 	if actual ~= expected then
@@ -857,6 +952,57 @@ equal(automatic.result.cpesel[1].mode, 0,
 	"automatic SIM mode reflected in APP response")
 equal(app_options.sim_mode, "0", "automatic SIM mode persisted")
 equal(sim_switch_calls, 1, "mode-only request does not switch hardware")
+
+local refresh = core.cache_refresh_policy()
+equal(refresh.modem, 10, "configurable modem snapshot lifetime")
+equal(refresh.selector, 15, "configurable SIM selector lifetime")
+equal(refresh.warm, 2, "configurable cache prewarm interval")
+
+client_neighbor = true
+wireless_mlo_fixture = true
+access_control = nil
+access_devices = {}
+local inventory = core.handle("client", { trans_id = "mlo-inventory" })
+equal(#inventory.result.client, 1,
+	"MLO link, router, multicast and expired lease MACs are de-duplicated")
+equal(inventory.result.client[1].mac, "AA:BB:CC:DD:EE:FF",
+	"MLO inventory uses the canonical MLD MAC")
+equal(inventory.result.client[1].type, "wireless",
+	"canonical MLO terminal remains wireless")
+equal(inventory.result.client[1].rxbytes, 400,
+	"MLO receive counters are aggregated across links")
+equal(inventory.result.client[1].txbytes, 600,
+	"MLO transmit counters are aggregated across links")
+local station_inventory = core.station_status()
+equal(station_inventory.list[1].list[1], "AA:BB:CC:DD:EE:FF",
+	"2.4 GHz station status publishes the MLD MAC")
+equal(station_inventory.list[2].list[1], "AA:BB:CC:DD:EE:FF",
+	"5 GHz station status publishes the same MLD MAC")
+app_options.local_network_write_enable = "0"
+local can_control = core.local_action_allowed("client", {
+	client = "AA:BB:CC:DD:EE:FF", switch = 0
+})
+equal(can_control, false, "client switch requires local network-write permission")
+app_options.local_network_write_enable = "1"
+local blocked = core.handle("client", {
+	trans_id = "client-block",
+	client = "AA:BB:CC:DD:EE:FF",
+	switch = 0
+})
+equal(blocked.code, "0", "local APP client block result")
+equal(access_control.enabled, "1", "client block automatically enables access control")
+equal(access_control.mode, "blacklist", "client block uses shared blacklist mode")
+equal(access_devices.app_aabbccddeeff.source, "official_app",
+	"APP-created device rule source")
+equal(blocked.result.client[1].switch, 0, "client list reflects blocked state")
+local unblocked = core.handle("client", {
+	trans_id = "client-allow",
+	client = "AA:BB:CC:DD:EE:FF",
+	switch = 1
+})
+equal(unblocked.code, "0", "local APP client allow result")
+equal(access_devices.app_aabbccddeeff.enabled, "0", "shared device rule is disabled")
+equal(unblocked.result.client[1].switch, 1, "client list reflects allowed state")
 
 local cloud = require "c2000max_app.cloud"
 local cpe, event = cloud.handle("cpestatus", {})

@@ -12,7 +12,9 @@ local M = {}
 -- It is the only software version exposed to the NRadio APP, so the APP must
 -- never offer or request a firmware update for this privacy-oriented image.
 local APP_SOFTWARE_VERSION = "9.9.13.n0.c1"
-local MODEM_CACHE_INTERVAL = 10
+local DEFAULT_MODEM_CACHE_INTERVAL = 10
+local DEFAULT_SELECTOR_CACHE_INTERVAL = 15
+local DEFAULT_CACHE_WARM_INTERVAL = 2
 local DEFAULT_SIGNAL_NORMAL_INTERVAL = 3
 local DEFAULT_SIGNAL_TEST_INTERVAL = 1
 local DEFAULT_SIGNAL_CARRIER_INTERVAL = 10
@@ -140,14 +142,25 @@ local function shared_cache_remove_prefix(prefix)
 	end
 end
 
+function M.cache_refresh_policy()
+	return {
+		modem = number_option("modem_cache_interval",
+			DEFAULT_MODEM_CACHE_INTERVAL, 1, 60),
+		selector = number_option("selector_cache_interval",
+			DEFAULT_SELECTOR_CACHE_INTERVAL, 1, 60),
+		warm = number_option("cache_warm_interval",
+			DEFAULT_CACHE_WARM_INTERVAL, 1, 60)
+	}
+end
+
 function M.signal_refresh_policy()
 	return {
 		normal = number_option("signal_normal_interval",
-			DEFAULT_SIGNAL_NORMAL_INTERVAL, 2, 10),
+			DEFAULT_SIGNAL_NORMAL_INTERVAL, 1, 30),
 		test = number_option("signal_test_interval",
-			DEFAULT_SIGNAL_TEST_INTERVAL, 1, 3),
+			DEFAULT_SIGNAL_TEST_INTERVAL, 1, 10),
 		carrier = number_option("signal_carrier_interval",
-			DEFAULT_SIGNAL_CARRIER_INTERVAL, 5, 60),
+			DEFAULT_SIGNAL_CARRIER_INTERVAL, 2, 120),
 		backend = "qmodem-serialized-single-at",
 		carrier_backend = "qmodem-serialized-hfreqinfo"
 	}
@@ -584,11 +597,12 @@ local carrier_failure_at = {}
 
 local function cached_sim_status(force)
 	local now = precise_time()
-	if not force and selector_cache and now - selector_cache_at < 15 then
+	local maximum_age = M.cache_refresh_policy().selector
+	if not force and selector_cache and now - selector_cache_at < maximum_age then
 		return selector_cache
 	end
 	if not force then
-		local shared, updated = shared_cache_read("selector", 15, false)
+		local shared, updated = shared_cache_read("selector", maximum_age, false)
 		if shared then
 			selector_cache = shared
 			selector_cache_at = updated
@@ -610,13 +624,14 @@ end
 
 local function list_modems(force)
 	local now = precise_time()
+	local maximum_age = M.cache_refresh_policy().modem
 	if not force and modem_cache and
-	   now - modem_cache_at < MODEM_CACHE_INTERVAL then
+	   now - modem_cache_at < maximum_age then
 		return modem_cache
 	end
 	if not force then
 		local shared, updated = shared_cache_read(
-			"modems", MODEM_CACHE_INTERVAL, false)
+			"modems", maximum_age, false)
 		if shared then
 			modem_cache = shared
 			modem_cache_at = updated
@@ -910,6 +925,20 @@ local function valid_mac_address(value)
 			"[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]$") ~= nil
 end
 
+local function valid_client_mac(value)
+	if not valid_mac_address(value) then
+		return false
+	end
+	value = value:upper()
+	if value == "00:00:00:00:00:00" or value == "FF:FF:FF:FF:FF:FF" then
+		return false
+	end
+	local first = tonumber(value:sub(1, 2), 16)
+	-- Keep locally administered/private phone addresses, but never expose a
+	-- multicast address as an APP terminal.
+	return first ~= nil and first % 2 == 0
+end
+
 local function wireless_band(frequency)
 	local value = tonumber(frequency)
 	if not value then
@@ -986,6 +1015,12 @@ local function wireless_interfaces()
 					elseif key == "tx bitrate" then
 						station.txrate = math.floor((tonumber(tostring(value):match(
 							"[%d%.]+")) or 0) * 1000)
+					elseif key == "mld address" or key == "mld addr" or
+					       key == "mld mac address" then
+						local mld = tostring(value or ""):match("([%x][%x]:[%x][%x]:[%x][%x]:[%x][%x]:[%x][%x]:[%x][%x])")
+						if valid_client_mac(mld) then
+							station.mld_mac = mld:upper()
+						end
 					end
 				end
 			end
@@ -994,13 +1029,69 @@ local function wireless_interfaces()
 	return interfaces
 end
 
+local function device_internet_allowed(mac)
+	mac = tostring(mac or ""):upper()
+	if not valid_mac_address(mac) then
+		return true
+	end
+	uci:load("c2000max")
+	if tostring(uci:get("c2000max", "access_control", "enabled") or "0") ~= "1" then
+		return true
+	end
+	local mode = tostring(uci:get("c2000max", "access_control", "mode") or
+		"blacklist")
+	local selected = false
+	uci:foreach("c2000max", "access_device", function(section)
+		if tostring(section.enabled or "1") ~= "0" and
+		   tostring(section.mac or ""):upper() == mac then
+			selected = true
+		end
+	end)
+	if mode == "whitelist" then
+		return selected
+	end
+	return not selected
+end
+
 local function list_clients()
 	local clients = {}
-	local function client_for(mac)
-		if not valid_mac_address(mac) then
+	local live = {}
+	local interfaces = wireless_interfaces()
+	local local_macs = {}
+	local station_aliases = {}
+	local function remember_local(value)
+		if valid_mac_address(value) then
+			local_macs[value:upper()] = true
+		end
+	end
+
+	for _, interface in ipairs(interfaces) do
+		remember_local(interface.mac)
+		for _, station in ipairs(interface.stations) do
+			local link_mac = tostring(station.mac or ""):upper()
+			local device_mac = tostring(station.mld_mac or station.mac or ""):upper()
+			if valid_client_mac(link_mac) and valid_client_mac(device_mac) then
+				station_aliases[link_mac] = device_mac
+			end
+		end
+	end
+	for line in tostring(util.exec("ip -o link show 2>/dev/null") or ""):gmatch(
+	    "[^\r\n]+") do
+		remember_local(line:match("%slink/ether%s+(%S+)"))
+	end
+
+	local function canonical_mac(mac)
+		if not valid_client_mac(mac) then
 			return nil
 		end
 		mac = mac:upper()
+		return station_aliases[mac] or mac
+	end
+	local function client_for(mac)
+		mac = canonical_mac(mac)
+		if not mac or local_macs[mac] then
+			return nil
+		end
 		if not clients[mac] then
 			clients[mac] = {
 				client = mac, mac = mac, real_mac = mac,
@@ -1021,13 +1112,17 @@ local function list_clients()
 		for line in file:lines() do
 			local expires, mac, ip, hostname =
 				line:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
-			local item = client_for(mac)
+			local expiry = tonumber(expires) or 0
+			local item
+			if expiry == 0 or expiry > math.floor(precise_time()) then
+				item = client_for(mac)
+			end
 			if item and ip then
 				item.ip = ip
 				item.ipaddr = ip
 				item.hostname = hostname == "*" and "" or hostname
 				item.name = item.hostname
-				item.expires = tonumber(expires) or 0
+				item.expires = expiry
 			end
 		end
 		file:close()
@@ -1040,39 +1135,65 @@ local function list_clients()
 		if state ~= "FAILED" and state ~= "INCOMPLETE" then
 			local item = client_for(mac)
 			if item and ip then
+				local canonical = canonical_mac(mac)
+				live[canonical] = true
 				item.ip = ip
 				item.ipaddr = ip
 			end
 		end
 	end
 
-	for _, interface in ipairs(wireless_interfaces()) do
+	for _, interface in ipairs(interfaces) do
 		for _, station in ipairs(interface.stations) do
-			local item = client_for(station.mac)
+			local mac = station.mld_mac or station.mac
+			local item = client_for(mac)
 			if item then
+				local canonical = canonical_mac(mac)
+				local was_wireless = item.type == "wireless"
+				live[canonical] = true
 				item.type = "wireless"
-				item.ifname = station.ifname
+				if not was_wireless then
+					item.ifname = station.ifname
+				elseif not tostring(item.ifname):find(station.ifname, 1, true) then
+					item.ifname = item.ifname .. "," .. station.ifname
+				end
 				item.ssid = station.ssid
 				item.channel = station.channel
 				item.frequency = station.frequency
-				item.band = wireless_band(station.frequency)
-				item.rssi = station.rssi or 0
-				item.rxbytes = station.rxbytes or 0
-				item.txbytes = station.txbytes or 0
-				item.rxrate = station.rxrate or 0
-				item.txrate = station.txrate or 0
-				item.assoctime = tostring(station.connected or 0) .. "s"
+				local band = wireless_band(station.frequency)
+				if not was_wireless then
+					item.band = band
+				elseif item.band ~= band then
+					item.band = "MLO"
+				end
+				local rssi = station.rssi or 0
+				if not was_wireless or item.rssi == 0 or rssi > item.rssi then
+					item.rssi = rssi
+				end
+				item.rxbytes = (item.rxbytes or 0) + (station.rxbytes or 0)
+				item.txbytes = (item.txbytes or 0) + (station.txbytes or 0)
+				item.rxrate = (item.rxrate or 0) + (station.rxrate or 0)
+				item.txrate = (item.txrate or 0) + (station.txrate or 0)
+				local connected = math.max(tonumber(tostring(item.assoctime or ""):match("%d+")) or 0,
+					tonumber(station.connected) or 0)
+				item.assoctime = tostring(connected) .. "s"
 			end
 		end
 	end
 
 	local macs, result = {}, {}
 	for mac in pairs(clients) do
-		macs[#macs + 1] = mac
+		if live[mac] and not local_macs[mac] then
+			macs[#macs + 1] = mac
+		end
 	end
 	table.sort(macs)
 	for _, mac in ipairs(macs) do
-		result[#result + 1] = clients[mac]
+		local item = clients[mac]
+		local allowed = device_internet_allowed(mac)
+		item.switch = allowed and 1 or 0
+		item.switch_off = allowed and 0 or 1
+		result[#result + 1] = item
 	end
 	if #result == 0 then
 		result[1] = {}
@@ -1128,14 +1249,19 @@ function M.station_status()
 	local list = {}
 	for _, interface in ipairs(wireless_interfaces()) do
 		if interface.type == "AP" or interface.type == "ap" then
-			local stations = {}
+			local stations, seen = {}, {}
 			for _, item in ipairs(interface.stations) do
-				stations[#stations + 1] = item.mac
+				local mac = tostring(item.mld_mac or item.mac or ""):upper()
+				if valid_client_mac(mac) and not seen[mac] then
+					seen[mac] = true
+					stations[#stations + 1] = mac
+				end
 			end
+			local online = #stations
 			if #stations == 0 then stations[1] = "" end
 			list[#list + 1] = {
 				band = wireless_band(interface.frequency),
-				online = #interface.stations,
+				online = online,
 				servied = 0,
 				list = stations,
 				mac = interface.mac or ""
@@ -1144,6 +1270,33 @@ function M.station_status()
 	end
 	if #list == 0 then list[1] = "" end
 	return { list = list, deny = denied_station_macs() }
+end
+
+local function device_internet_request(data)
+	data = type(data) == "table" and data or {}
+	local item = type(data.client) == "table" and data.client or
+		(type(data.station) == "table" and data.station or
+		(type(data.terminal) == "table" and data.terminal or data))
+	local mac = item.mac or item.client or item.real_mac or item.macaddr
+	local allowed
+	local requested = false
+	if item.switch_off ~= nil then
+		allowed = tonumber(item.switch_off) == 0
+		requested = true
+	elseif item.switch ~= nil then
+		allowed = tonumber(item.switch) ~= 0
+		requested = true
+	elseif item.online ~= nil then
+		allowed = tonumber(item.online) ~= 0
+		requested = true
+	elseif item.deny ~= nil then
+		allowed = not (item.deny == true or tonumber(item.deny) == 1)
+		requested = true
+	end
+	if requested and not valid_mac_address(mac) then
+		return nil, nil, true
+	end
+	return mac and tostring(mac):upper() or nil, allowed, requested
 end
 
 function M.set_device_internet(mac, allowed)
@@ -2866,7 +3019,23 @@ function M.handle(action, data, context)
 		rv.result = { list = list_wifi() }
 		return rv
 	elseif action == "client" then
+		local mac, allowed, requested = device_internet_request(data)
+		local control
+		if requested then
+			control = M.set_device_internet(mac, allowed)
+			if tostring(control.code or control.errcode or "2") ~= "0" then
+				rv.code = tostring(control.code or control.errcode or "2")
+				rv.message = control.message or "device internet control failed"
+				return rv
+			end
+		end
 		rv.result = { client = list_clients() }
+		if control then
+			rv.result.control = control
+			rv.mac = control.mac
+			rv.switch = control.switch
+			rv.switch_off = control.switch_off
+		end
 		return rv
 	elseif action == "cpesel" then
 		local fresh_selector = sim_status(true)
@@ -3113,6 +3282,10 @@ function M.local_action_allowed(action, data)
 		end
 		return true
 	elseif action == "client" then
+		local _, _, requested = device_internet_request(data)
+		if requested and not bool_option("local_network_write_enable") then
+			return local_denied()
+		end
 		return local_permission("local_client_enable")
 	elseif action == "speed" then
 		return local_permission("local_traffic_enable")

@@ -516,11 +516,13 @@ OAF_SYSCTL_DIR="$OLD_OAF_SYSCTL_DIR"
 SCHEDULE_APPS="$(awk '/^[0-9]+[[:space:]]+[^:]+:\[/ {printf "%s ",$1}' \
 	"$PROFILE_ROOT/$PROFILE_B/feature.cfg")"
 SCHEDULE_RULESET="$PROFILE_A"
+SCHEDULE_MATCH_MODE=""
 config_get()
 {
 	local value="${4:-}"
 	case "$3" in
 		ruleset) value="$SCHEDULE_RULESET" ;;
+		match_mode) value="$SCHEDULE_MATCH_MODE" ;;
 		target) value=all ;;
 		apps) value="$SCHEDULE_APPS" ;;
 		categories|whitelist) value="" ;;
@@ -548,6 +550,19 @@ compile_schedule regression
 	grep -Fq '[ "$POLICY_ACTIVE_PROFILE" = "$current_profile_sha" ]' "$TRAFFIC" &&
 	grep -Fq '[ "$ruleset" = "$POLICY_ACTIVE_PROFILE" ]' "$TRAFFIC" ||
 	fail "application policy is not one set bound to active profile and feature SHA"
+
+# New rules explicitly choose either categories or individual applications.
+# Legacy rules without match_mode retain their former combined semantics.
+SCHEDULE_MATCH_MODE=category
+: > "$POLICY_RULE_FILE"
+POLICY_ACTIVE_COUNT=0
+compile_schedule regression
+[ ! -s "$POLICY_RULE_FILE" ] && [ "$POLICY_ACTIVE_COUNT" -eq 0 ] ||
+	fail "category-only mode still compiled hidden individual applications"
+SCHEDULE_MATCH_MODE=app
+compile_schedule regression
+[ -s "$POLICY_RULE_FILE" ] && [ "$POLICY_ACTIVE_COUNT" -eq 60 ] ||
+	fail "individual-application mode did not compile the selected applications"
 
 # DNS-assisted control complements DPI without globally disabling HNAT.  Each
 # active schedule owns bounded IPv4/IPv6 timeout sets, directs client DNS to the
@@ -1277,6 +1292,22 @@ sh -n "$TRAFFIC" "$EQOS_ROOT/root/usr/sbin/eqos" \
 
 TRAFFIC_VIEW="$ROOT/htdocs/luci-static/resources/view/c2000max/traffic.js"
 TRAFFIC_CHART="$ROOT/htdocs/luci-static/resources/c2000max/traffic-chart.js"
+grep -Fq "'require dom';" "$TRAFFIC_VIEW" &&
+	grep -Fq 'var RuleGridSection = form.GridSection.extend' "$TRAFFIC_VIEW" &&
+	grep -Fq 's = rulesMap.section(RuleGridSection' "$TRAFFIC_VIEW" ||
+	fail "traffic rule modal does not use the save-aware section"
+grep -Fq '保存失败，请检查弹窗中标红或提示有误的字段' "$TRAFFIC_VIEW" &&
+	grep -Fq '当前规则库尚未初始化' "$TRAFFIC_VIEW" ||
+	fail "traffic rule modal can still swallow save/validation failures"
+if grep -Fq 's.handleAdd = function()' "$TRAFFIC_VIEW"; then
+	fail "traffic rule form still replaces the save-aware add handler"
+fi
+grep -Fq "o.value('category', '按照应用分类管控')" "$TRAFFIC_VIEW" &&
+	grep -Fq "o.value('app', '按照指定应用管控')" "$TRAFFIC_VIEW" &&
+	grep -Fq "o.depends('match_mode', 'category')" "$TRAFFIC_VIEW" &&
+	grep -Fq "o.depends('match_mode', 'app')" "$TRAFFIC_VIEW" &&
+	grep -Fq "value === 'category' ? 'apps' : 'categories'" "$TRAFFIC_VIEW" ||
+	fail "traffic rules do not provide mutually exclusive category/application selectors"
 grep -Fq "require c2000max.traffic-chart as trafficChart" "$TRAFFIC_VIEW" ||
 	fail "traffic UI does not load the reusable chart component"
 grep -Fq "'require baseclass';" "$TRAFFIC_CHART" &&
@@ -1938,5 +1969,29 @@ if grep -Eq '^\+.*!\(val & BIT_MIB_BUSY\), 20, 10000' "$HNAT_PATCH"; then
 fi
 grep -Eq '^\+.*!\(val & BIT_MIB_BUSY\), 20, 1000' "$HNAT_PATCH" ||
 	fail "HNAT final-layer patch does not cap each atomic MIB poll at 1ms"
+
+TRAFFIC_VIEW="$ROOT/htdocs/luci-static/resources/view/c2000max/traffic.js"
+grep -Fq 'formvalue: function(sectionId)' "$TRAFFIC_VIEW" &&
+	grep -Fq 'widget.setValue(values);' "$TRAFFIC_VIEW" &&
+	grep -Fq 'var result = this.validate(sectionId, this.formvalue(sectionId));' "$TRAFFIC_VIEW" &&
+	grep -Fq 'getValidationError: function()' "$TRAFFIC_VIEW" ||
+	fail "time-window validation does not validate the complete published list"
+time_window_block="$(sed -n '/var TimeWindowSelector =/,/var RuleGridSection =/p' "$TRAFFIC_VIEW")"
+if printf '%s\n' "$time_window_block" | grep -Fq 'validate: this.getValidator(sectionId)'; then
+	fail "time-window aggregate validator is still attached to the empty add-item field"
+fi
+if grep -Fq "mapNode.querySelectorAll('.cbi-dynlist')" "$TRAFFIC_VIEW"; then
+	fail "rule modal still validates empty dynamic-list add-item fields before save"
+fi
+grep -Fq 'activeMap.save(null, true)' "$TRAFFIC_VIEW" &&
+	grep -Fq 'c2000max-rule-save-error' "$TRAFFIC_VIEW" ||
+	fail "rule modal does not save through the map validator or show inline errors"
+
+EQOS_VIEW="$EQOS_ROOT/htdocs/luci-static/resources/view/eqos.js"
+	grep -Fq 'function totalRateValidate(sectionId, value)' "$EQOS_VIEW" &&
+	grep -Fq "if (text === '-1')" "$EQOS_VIEW" &&
+	[ "$(grep -Fc 'o.validate = totalRateValidate' "$EQOS_VIEW")" -eq 2 ] &&
+	grep -Fq -- '-1 表示不限速' "$EQOS_VIEW" ||
+	fail "EQoS LuCI does not accept or explain -1 as unlimited total bandwidth"
 
 echo "PASS: acceleration-aware traffic accounting fixtures"

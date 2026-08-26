@@ -125,6 +125,19 @@ function integerWrite(sectionId, value) {
 	uci.set('eqos', sectionId, this.option, String(Number(value)));
 }
 
+function totalRateValidate(sectionId, value) {
+	var text = String(value == null ? '' : value).trim();
+	var rate;
+
+	if (text === '-1')
+		return true;
+	if (!/^[0-9]+$/.test(text))
+		return '请输入 -1（不限速）或 1 到 1000 的正整数。';
+	rate = Number(text);
+	return rate >= 1 && rate <= 1000 ? true :
+		'请输入 -1（不限速）或 1 到 1000 的正整数。';
+}
+
 function uniqueSelector(sectionId, value) {
 	var sections = uci.sections('eqos', 'device');
 	for (var i = 0; i < sections.length; i++) {
@@ -163,8 +176,8 @@ return view.extend({
 		s.anonymous = true;
 
 		o = s.option(form.Flag, 'enabled', '启用网络限速'); o.default = o.disabled; o.rmempty = false;
-		o = s.option(form.Value, 'download', '总下载带宽（Mbit/s）'); o.datatype = 'and(uinteger,min(1),max(1000))'; o.rmempty = false; o.write = integerWrite;
-		o = s.option(form.Value, 'upload', '总上传带宽（Mbit/s）'); o.datatype = 'and(uinteger,min(1),max(1000))'; o.rmempty = false; o.write = integerWrite;
+		o = s.option(form.Value, 'download', '总下载带宽（Mbit/s）', '-1 表示不限速；也可填写 1 到 1000 的正整数。'); o.rmempty = false; o.placeholder = '-1'; o.validate = totalRateValidate; o.write = integerWrite;
+		o = s.option(form.Value, 'upload', '总上传带宽（Mbit/s）', '-1 表示不限速；也可填写 1 到 1000 的正整数。'); o.rmempty = false; o.placeholder = '-1'; o.validate = totalRateValidate; o.write = integerWrite;
 
 		s = m.section(form.GridSection, 'device', '设备限速规则');
 		s.addremove = true; s.anonymous = true; s.sortable = true; s.nodescriptions = true;

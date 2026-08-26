@@ -9,7 +9,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/version.mk
 
 PKG_NAME:=wifi-profile
-PKG_RELEASE:=1
+PKG_RELEASE:=4
 PKG_BUILD_DEPENDS:=
 PKG_FILE_DEPENDS:=
 PKG_LICENSE:=GPL-2.0

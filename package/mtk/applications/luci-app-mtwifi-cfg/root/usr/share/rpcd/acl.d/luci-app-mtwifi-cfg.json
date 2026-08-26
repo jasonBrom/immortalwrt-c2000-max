@@ -1,9 +1,14 @@
 {
 	"luci-mod-network-config": {
 		"description": "Grant access to MTK wireless scan helper",
+		"read": {
+			"ubus": {
+				"luci.mtwifi": [ "getMloStations", "getWifiPerformanceState" ]
+			}
+		},
 		"write": {
 			"ubus": {
-				"luci.mtwifi": [ "getScanName" ]
+				"luci.mtwifi": [ "getScanName", "getMloStations", "setMloState", "getWifiPerformanceState", "setWifiPerformanceState" ]
 			}
 		}
 	}

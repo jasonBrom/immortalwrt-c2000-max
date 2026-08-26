@@ -83,8 +83,7 @@ function accelerationLabel(status) {
 	if (status.effective_fastpath === 'mediatek_hnat')
 		return 'MediaTek HNAT';
 	if (status.effective_fastpath === 'flow_offloading')
-		return status.role === 'wan' ?
-			'软件流量分载（HNAT 已关闭）' : '软件流量分载';
+		return '软件流量分载';
 	if (status.effective_fastpath === 'disabled')
 		return '已关闭';
 	return '状态未知';
@@ -215,7 +214,7 @@ return view.extend({
 		let message = '确认切换为“%s”吗？'.format(modeLabel(mode));
 
 		if (role === 'wan') {
-			message += '\n\nWAN 和 WAN＋5G 模式会关闭 MediaTek HNAT，并按 TurboACC 设置使用软件流量分载。';
+			message += '\n\nMediaTek HNAT 将按新的网口拓扑重新收敛；WAN＋5G 由 MWAN3 选择每条新连接的出口。';
 			if (this.currentStatus.role !== 'wan')
 				message += '\n有线管理连接将断开，请确认 Wi-Fi 可用。';
 		}
@@ -296,7 +295,7 @@ return view.extend({
 		const root = E('div', {}, [
 			E('h2', {}, '网口模式'),
 			E('div', { 'class': 'cbi-map-descr' },
-				'选择 2.5G 网口用途。LAN 模式可使用 MediaTek HNAT；WAN 和 WAN＋5G 模式关闭 HNAT，但可以使用软件流量分载。'),
+				'选择 2.5G 网口用途。LAN、WAN 和 WAN＋5G 均可按 TurboACC 设置使用 MediaTek HNAT；双 WAN 的新连接由 MWAN3 按权重选择出口。'),
 			E('div', { 'class': 'cbi-section' }, [
 				E('div', { 'id': 'c2000max-port-status' },
 					this.renderStatus(status))

@@ -29,6 +29,20 @@ var callMtwifiScanDevice = rpc.declare({
 	expect: { device: '' }
 });
 
+var callMtwifiMloStations = rpc.declare({
+	object: 'luci.mtwifi',
+	method: 'getMloStations',
+	expect: { stations: [] }
+});
+
+var callMtwifiSetMloState = rpc.declare({
+	object: 'luci.mtwifi',
+	method: 'setMloState',
+	params: [ 'section', 'enabled' ],
+	nobatch: true,
+	expect: { ok: false, locked_ssids: [] }
+});
+
 function count_changes(section_id) {
 	var changes = ui.changes.changes, n = 0;
 
@@ -232,6 +246,108 @@ function is_mlo_sta_section(section) {
 	return is_mlo_section(section, 'sta');
 }
 
+function get_active_mlo_radios() {
+	var sections = uci.sections('wireless', 'wifi-iface'),
+	    radios = {};
+
+	for (var i = 0; i < sections.length; i++) {
+		if (sections[i].mlo != '1' || sections[i].disabled == '1')
+			continue;
+
+		var devices = get_iface_devices(sections[i]);
+		for (var j = 0; j < devices.length; j++)
+			radios[devices[j]] = true;
+	}
+
+	return radios;
+}
+
+function sync_mlo_interlock() {
+	var ifaces = uci.sections('wireless', 'wifi-iface'),
+	    radios = uci.sections('wireless', 'wifi-device'),
+	    active = get_active_mlo_radios();
+
+	/* Restore only sections previously disabled by this interlock. */
+	for (var i = 0; i < ifaces.length; i++) {
+		var sid = ifaces[i]['.name'],
+		    radio = ifaces[i].device;
+
+		if (ifaces[i].c2000max_mlo_locked == '1' &&
+		    (ifaces[i].mlo == '1' || ifaces[i].mode != 'ap' || !active[radio])) {
+			uci.unset('wireless', sid, 'disabled');
+			uci.unset('wireless', sid, 'c2000max_mlo_locked');
+		}
+	}
+
+	/* Lock every ordinary AP BSS sharing a currently active MLO member radio. */
+	for (var i = 0; i < ifaces.length; i++) {
+		var sid = ifaces[i]['.name'],
+		    radio = ifaces[i].device;
+
+		if (ifaces[i].mlo == '1' || ifaces[i].mode != 'ap' || !active[radio])
+			continue;
+
+		if (ifaces[i].c2000max_mlo_locked == '1')
+			uci.set('wireless', sid, 'disabled', '1');
+		else if (ifaces[i].disabled != '1') {
+			uci.set('wireless', sid, 'disabled', '1');
+			uci.set('wireless', sid, 'c2000max_mlo_locked', '1');
+		}
+	}
+
+	/* MLO needs its member radios up. Restore a pre-existing radio disable
+	 * after the last active MLO interface using that radio is disabled. */
+	for (var i = 0; i < radios.length; i++) {
+		var sid = radios[i]['.name'];
+
+		if (active[sid] && radios[i].disabled == '1') {
+			uci.set('wireless', sid, 'c2000max_mlo_radio_locked', '1');
+			uci.unset('wireless', sid, 'disabled');
+		}
+		else if (!active[sid] && radios[i].c2000max_mlo_radio_locked == '1') {
+			uci.set('wireless', sid, 'disabled', '1');
+			uci.unset('wireless', sid, 'c2000max_mlo_radio_locked');
+		}
+	}
+}
+
+function get_mlo_interlock_targets(section_id) {
+	var devices = get_iface_devices(section_id),
+	    member = {},
+	    targets = [];
+
+	for (var i = 0; i < devices.length; i++)
+		member[devices[i]] = true;
+
+	var ifaces = uci.sections('wireless', 'wifi-iface');
+	for (var i = 0; i < ifaces.length; i++) {
+		if (ifaces[i].mlo == '1' || ifaces[i].mode != 'ap' ||
+		    !member[ifaces[i].device] || ifaces[i].disabled == '1')
+			continue;
+
+		targets.push(ifaces[i].ssid || ifaces[i]['.name']);
+	}
+
+	return targets;
+}
+
+function show_mlo_interlock_notice() {
+	return ui.showModal('MLO 互锁', [
+		E('p', '当前普通无线网络已由 MLO 互锁临时停用。请先关闭 MLO，再启用普通 SSID。'),
+		E('div', { 'class': 'right' }, E('button', {
+			'class': 'btn',
+			'click': ui.hideModal
+		}, '关闭'))
+	]);
+}
+
+function mlo_result_error(result) {
+	if (result && result.error)
+		return result.error;
+
+	return 'MLO 互锁执行失败，已保持或回退为安全状态。';
+}
+
 /* Preserve the validated 2.4 GHz main / 5 GHz member order. */
 function get_mlo_sta_devices(radios) {
 	var bands = [ '2g', '5g' ],
@@ -368,14 +484,19 @@ function render_mlo_badge(section_id) {
 	]);
 }
 
-function render_mlo_status(section_id) {
+function render_mlo_status(section_id, mloStations) {
 	var changecount = count_changes(section_id),
 	    disabled = (uci.get('wireless', section_id, 'disabled') == '1'),
 	    devices = get_iface_devices(section_id),
 	    is_sta = is_mlo_sta_section(section_id),
 	    encryption = uci.get('wireless', section_id, 'encryption'),
+	    stations = L.toArray(mloStations),
+	    linkCount = 0,
 	    enc = null,
 	    status_text = null;
+
+	for (var i = 0; i < stations.length; i++)
+		linkCount += L.toArray(stations[i].links).length;
 
 	if (encryption == 'sae')
 		enc = { enabled: true, wpa: [ 3 ], authentication: [ 'sae' ], ciphers: [ 'ccmp' ] };
@@ -391,12 +512,15 @@ function render_mlo_status(section_id) {
 		}, _('Interface has %d pending changes').format(changecount));
 	else if (disabled)
 		status_text = E('em', _('Wireless is disabled'));
+	else if (!is_sta)
+		status_text = E('em', _('Ordinary SSIDs are temporarily disabled while MLO is enabled.'));
 
 	return L.itemlist(E('div'), [
 		_('SSID'),          uci.get('wireless', section_id, 'ssid') || '?',
 		_('Mode'),          is_sta ? _('MLO STA') : _('MLO AP'),
 		_('Member radios'), devices.join(' + '),
 		_('Encryption'),    network.formatWifiEncryption(enc) || '-',
+		_('Runtime links'), (!disabled && !is_sta) ? _('%d MLD / %d links').format(stations.length, linkCount) : null,
 		null,               status_text
 	], [ ' | ', E('br') ]);
 }
@@ -444,7 +568,12 @@ function render_modal_status(node, radioNet) {
 }
 
 function format_wifirate(rate) {
-	let s = `${rate.rate / 1000}\xa0${_('Mbit/s')}, ${rate.mhz}\xa0${_('MHz')}`;
+	if (!rate || !isFinite(Number(rate.rate)))
+		return '-';
+
+	let s = `${Math.round(Number(rate.rate) / 100) / 10}\xa0${_('Mbit/s')}`;
+	if (Number(rate.mhz) > 0)
+		s += `, ${rate.mhz}\xa0${_('MHz')}`;
 
 	if (rate?.ht || rate?.vht) s += [
 		rate?.vht && `, VHT-MCS\xa0${rate?.mcs}`,
@@ -470,6 +599,135 @@ function format_wifirate(rate) {
 	return s;
 }
 
+function normalize_station_mac(value) {
+	value = String(value || '').toUpperCase();
+	return /^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/.test(value) ? value : null;
+}
+
+function find_mlo_link_member(members, link) {
+	var mac = normalize_station_mac(link && link.mac);
+
+	for (var i = 0; mac && i < members.length; i++)
+		if (normalize_station_mac(members[i].mac) == mac)
+			return members[i];
+
+	return null;
+}
+
+function mlo_link_rate(link, member, field) {
+	/* The vendor MLO dump reports integer Mbit/s. From the AP perspective,
+	 * uplink is receive and downlink is transmit. The "last" rate describes
+	 * the most recent packet and may legitimately fall to the 1 Mbit/s basic
+	 * rate for an idle 2.4 GHz link, so prefer the driver's estimated PHY
+	 * rate and retain the last-packet value only as a compatibility fallback. */
+	var estimatedRate = Number(field == 'rx' ? link.est_ul_rate : link.est_dl_rate),
+	    lastRate = Number(field == 'rx' ? link.last_ul_rate : link.last_dl_rate),
+	    nativeRate = isFinite(estimatedRate) && estimatedRate > 0 ? estimatedRate : lastRate,
+	    rate = member && member[field] ? Object.assign({}, member[field]) : {};
+
+	if (isFinite(nativeRate) && nativeRate > 0 && nativeRate < 100000)
+		rate.rate = nativeRate * 1000;
+
+	return (isFinite(Number(rate.rate)) && Number(rate.rate) > 0) ? rate : null;
+}
+
+function mlo_link_label(link, member, index) {
+	var band = String(link && link.band || '').toLowerCase(),
+	    ifname = String(link && link.ifname || '') || (member && member.network && member.network.getIfname
+		? String(member.network.getIfname() || '')
+		: '');
+
+	if (band == '5g' || /^rai/i.test(ifname))
+		return '5 GHz';
+	if (band == '2g' || /^ra/i.test(ifname))
+		return '2.4 GHz';
+
+	var linkId = Number(link && link.link_id);
+	return _('Link %d').format(isFinite(linkId) ? linkId : index + 1);
+}
+
+function format_mlo_compact_rate(rate) {
+	var value = Number(rate && rate.rate) / 1000;
+
+	if (!isFinite(value) || value <= 0)
+		return '-';
+
+	return value >= 100 ? '%.0f'.format(value) : '%.1f'.format(value);
+}
+
+function render_mlo_rates(station, members) {
+	var links = L.toArray(station && station.links).slice(),
+	    totalRx = 0,
+	    totalTx = 0,
+	    details = [],
+	    rates = [];
+
+	if (!links.length)
+		for (var i = 0; i < members.length; i++)
+			links.push({ mac: members[i].mac });
+
+	links.sort(function(a, b) {
+		var order = { '2g': 0, '5g': 1, '6g': 2 },
+		    aOrder = order[String(a && a.band || '').toLowerCase()],
+		    bOrder = order[String(b && b.band || '').toLowerCase()];
+		return (aOrder != null ? aOrder : 9) - (bOrder != null ? bOrder : 9);
+	});
+
+	for (var i = 0; i < links.length; i++) {
+		var member = find_mlo_link_member(members, links[i]),
+		    rx = mlo_link_rate(links[i], member, 'rx'),
+		    tx = mlo_link_rate(links[i], member, 'tx');
+
+		if (rx)
+			totalRx += Number(rx.rate);
+		if (tx)
+			totalTx += Number(tx.rate);
+
+		rates.push({
+			label: mlo_link_label(links[i], member, i),
+			rx: rx,
+			tx: tx
+		});
+	}
+
+	for (var i = 0; i < rates.length; i++)
+		details.push(E('span', {}, [
+			i ? ' · ' : '',
+			rates[i].label,
+			' ↓', format_mlo_compact_rate(rates[i].rx),
+			' ↑', format_mlo_compact_rate(rates[i].tx)
+		]));
+
+	return E('div', {
+		'class': 'mlo-rate-details',
+		'title': '%s / %s'.format(_('Receive'), _('Transmit'))
+	}, [
+		E('strong', {}, [
+			'MLO ↓', totalRx > 0 ? format_mlo_compact_rate({ rate: totalRx }) : '-',
+			' ↑', totalTx > 0 ? format_mlo_compact_rate({ rate: totalTx }) : '-',
+			'\xa0', _('Mbit/s')
+		]),
+		E('br'),
+		E('small', {}, details)
+	]);
+}
+
+function best_station_signal(members, station) {
+	var best = null;
+
+	for (var i = 0; i < members.length; i++)
+		if (members[i].signal != null && (best == null || members[i].signal > best.signal))
+			best = { signal: members[i].signal, noise: members[i].noise };
+
+	for (var i = 0; i < L.toArray(station && station.links).length; i++) {
+		var signal = Number(station.links[i].signal);
+		if (isFinite(signal) && signal < 0 && (best == null || signal > best.signal))
+			best = { signal: signal, noise: null };
+	}
+
+	return best;
+}
+
 function radio_restart(id, ev) {
 	var row = document.querySelector('.cbi-section-table-row[data-sid="%s"]'.format(id)),
 	    dsc = row.querySelector('[data-name="_stat"] > div'),
@@ -484,6 +742,9 @@ function radio_restart(id, ev) {
 }
 
 function network_updown(id, map, ev) {
+	if (uci.get('wireless', id, 'c2000max_mlo_locked') == '1')
+		return show_mlo_interlock_notice();
+
 	var radio = uci.get('wireless', id, 'device'),
 	    disabled = (uci.get('wireless', id, 'disabled') == '1') ||
 	               (uci.get('wireless', radio, 'disabled') == '1');
@@ -940,7 +1201,34 @@ var CBIWifiCountryValue = form.Value.extend({
 });
 
 return view.extend({
+	mloStationCache: {},
+
+	cache_mlo_stations: function(stations) {
+		var now = Date.now(),
+		    current = L.toArray(stations),
+		    result = [];
+
+		for (var i = 0; i < current.length; i++) {
+			var mac = normalize_station_mac(current[i].mld_mac);
+			if (!mac)
+				continue;
+			current[i].mld_mac = mac;
+			current[i]._lastSeen = now;
+			this.mloStationCache[mac] = current[i];
+		}
+
+		for (var mac in this.mloStationCache) {
+			if (now - this.mloStationCache[mac]._lastSeen > 15000)
+				delete this.mloStationCache[mac];
+			else
+				result.push(this.mloStationCache[mac]);
+		}
+
+		return result;
+	},
+
 	poll_status: function(map, data) {
+		var mloStations = this.cache_mlo_stations(data[4]);
 		var rows = map.querySelectorAll('.cbi-section-table-row[data-sid]');
 
 		for (var i = 0; i < rows.length; i++) {
@@ -958,7 +1246,7 @@ return view.extend({
 			}
 			else if (is_mlo_section(section_id)) {
 				dom.content(badge, render_mlo_badge(section_id));
-				dom.content(stat, render_mlo_status(section_id));
+				dom.content(stat, render_mlo_status(section_id, mloStations));
 			}
 			else {
 				dom.content(badge, render_network_badge(radioNet));
@@ -975,16 +1263,76 @@ return view.extend({
 
 		var table = document.querySelector('#wifi_assoclist_table'),
 		    hosts = data[0],
-		    trows = [];
+		    trows = [],
+		    groups = [],
+		    linkGroups = {};
+
+		for (var i = 0; i < mloStations.length; i++) {
+			var station = mloStations[i],
+			    networkObj = data[2].filter(function(n) {
+				return is_mlo_ap_section(n.getName()) && n.getIfname() == station.source_ifname;
+			    })[0] || data[2].filter(function(n) { return is_mlo_ap_section(n.getName()); })[0],
+			    group = {
+				isMlo: true,
+				station: station,
+				members: [],
+				network: networkObj,
+				radio: networkObj ? data[1].filter(function(r) {
+					return r.getName() == networkObj.getWifiDeviceName();
+				})[0] : null
+			    };
+
+			groups.push(group);
+			for (var j = 0; j < L.toArray(station.links).length; j++) {
+				var linkMac = normalize_station_mac(station.links[j].mac);
+				if (linkMac)
+					linkGroups[linkMac] = group;
+			}
+		}
 
 		for (var i = 0; i < data[3].length; i++) {
 			var bss = data[3][i],
-			    name = hosts.getHostnameByMACAddr(bss.mac),
-			    ipv4 = hosts.getIPAddrByMACAddr(bss.mac),
-			    ipv6 = hosts.getIP6AddrByMACAddr(bss.mac);
+			    linkGroup = linkGroups[normalize_station_mac(bss.mac)];
+
+			if (linkGroup) {
+				linkGroup.members.push(bss);
+				linkGroup.network = linkGroup.network || bss.network;
+				linkGroup.radio = linkGroup.radio || bss.radio;
+			}
+			else
+				groups.push({ isMlo: false, members: [ bss ], network: bss.network, radio: bss.radio });
+		}
+
+		for (var i = 0; i < groups.length; i++) {
+			var group = groups[i],
+			    members = group.members,
+			    bss = members[0],
+			    station = group.station,
+			    networkObj = group.network,
+			    radioObj = group.radio;
+
+			if (!networkObj)
+				continue;
+
+			var displayMac = group.isMlo ? station.mld_mac : bss.mac,
+			    candidateMacs = [ displayMac ],
+			    name = null,
+			    ipv4 = null,
+			    ipv6 = null;
+
+			for (var j = 0; j < L.toArray(station && station.links).length; j++)
+				if (station.links[j].mac)
+					candidateMacs.push(station.links[j].mac);
+			for (var j = 0; j < members.length; j++)
+				candidateMacs.push(members[j].mac);
+			for (var j = 0; j < candidateMacs.length; j++) {
+				name = name || hosts.getHostnameByMACAddr(candidateMacs[j]);
+				ipv4 = ipv4 || hosts.getIPAddrByMACAddr(candidateMacs[j]);
+				ipv6 = ipv6 || hosts.getIP6AddrByMACAddr(candidateMacs[j]);
+			}
 
 			var hint = '-';
-			if (bss.network.getMode() == 'ap')
+			if (networkObj.getMode() == 'ap')
 			{
 				if (name && ipv4 && ipv6)
 					hint = '%s <span class="hide-xs">(%s, %s)</span>'.format(name, ipv4, ipv6);
@@ -995,49 +1343,70 @@ return view.extend({
 			}
 
 			var timestr = '-';
-			if (bss.connected_time > 0)
-				timestr = '%t'.format(bss.connected_time)
+			var connectedTime = group.isMlo ? Number(station.connected_time || 0) : Number(bss.connected_time || 0);
+			if (connectedTime > 0)
+				timestr = '%t'.format(connectedTime);
+
+			var signal = best_station_signal(members, station),
+			    linkMacs = L.toArray(station && station.links).map(function(link) { return link.mac; }).filter(Boolean),
+			    linkCount = group.isMlo ? Math.max(linkMacs.length, members.length) : 1,
+			    macNode = group.isMlo
+				? E('span', {}, [
+					displayMac,
+					E('br'),
+					E('small', {}, _('Links') + ': ' + (linkMacs.join(' / ') || '-'))
+				  ])
+				: displayMac;
 
 			var row = [
 				E('span', {
 					'class': 'ifacebadge',
-					'data-ifname': bss.network.getIfname(),
-					'data-ssid': bss.network.getSSID()
+					'data-ifname': networkObj.getIfname(),
+					'data-ssid': networkObj.getSSID()
 				}, [
 					E('img', {
-						'src': L.resource('icons/wifi%s.svg').format(bss.network.isUp() ? '' : '_disabled'),
-						'title': bss.radio.getI18n()
+						'src': L.resource('icons/wifi%s.svg').format(networkObj.isUp() ? '' : '_disabled'),
+						'title': radioObj ? radioObj.getI18n() : _('MLO AP')
 					}),
 					E('span', [
-						' %s '.format(bss.network.getShortName()),
-						E('small', '(%s)'.format(bss.network.getIfname()))
+						' %s '.format(networkObj.getShortName()),
+						E('small', group.isMlo
+							? _('MLO · %d links').format(linkCount)
+							: '(%s)'.format(networkObj.getIfname()))
 					])
 				]),
-				bss.mac,
+				macNode,
 				hint,
-				render_signal_badge(Math.min((bss.signal + 110) / 70 * 100, 100), bss.signal, bss.noise),
-				E('span', {}, [
-					E('span', format_wifirate(bss.rx)),
-					E('br'),
-					E('span', format_wifirate(bss.tx))
-				]),
+				signal
+					? render_signal_badge(Math.min((signal.signal + 110) / 70 * 100, 100), signal.signal, signal.noise)
+					: '-',
+				group.isMlo
+					? render_mlo_rates(station, members)
+					: E('span', {}, [
+						E('span', format_wifirate(bss.rx)),
+						E('br'),
+						E('span', format_wifirate(bss.tx))
+					  ]),
 				timestr
 			];
 
-			if (bss.network.isClientDisconnectSupported()) {
+			var disconnectPeers = members.filter(function(peer) {
+				return peer.network.isClientDisconnectSupported();
+			});
+			if (disconnectPeers.length) {
 				if (table.firstElementChild.childNodes.length < 7)
 					table.firstElementChild.appendChild(E('th', { 'class': 'th cbi-section-actions'}));
 
 				row.push(E('button', {
 					'class': 'cbi-button cbi-button-remove',
-					'click': L.bind(function(net, mac, ev) {
+					'click': L.bind(function(peers, ev) {
 						dom.parent(ev.currentTarget, '.tr').style.opacity = 0.5;
 						ev.currentTarget.classList.add('spinning');
 						ev.currentTarget.disabled = true;
 						ev.currentTarget.blur();
-
-						net.disconnectClient(mac, true, 5, 60000);
-					}, this, bss.network, bss.mac),
+						for (var j = 0; j < peers.length; j++)
+							peers[j].network.disconnectClient(peers[j].mac, true, 5, 60000);
+					}, this, disconnectPeers),
 					'disabled': isReadonlyView || null
 				}, [ _('Disconnect') ]));
 			}
@@ -1209,8 +1578,57 @@ return view.extend({
 			return null;
 		};
 
+		s.renderContents = function(cfgsections, nodes) {
+			var section = form.GridSection.prototype.renderContents.call(this, cfgsections, nodes),
+			    firstMlo = null,
+			    rows = section.querySelectorAll('.cbi-section-table-row[data-sid]'),
+			    parent = null;
+
+			for (var i = 0; i < this.mloIfaces.length && !firstMlo; i++)
+				firstMlo = section.querySelector('.cbi-section-table-row[data-sid="%s"]'.format(this.mloIfaces[i]));
+
+			if (firstMlo)
+				firstMlo.classList.add('c2000max-mlo-overview-row');
+
+			parent = firstMlo
+				? firstMlo.parentNode
+				: (rows.length ? rows[rows.length - 1].parentNode : section.querySelector('.cbi-section-table'));
+
+			if (parent) {
+				var titleRow = E('tr', {
+					'class': 'tr c2000max-mlo-overview-title',
+					'style': 'text-align:left'
+				}, E('td', {
+					'class': 'td',
+					'colspan': '64',
+					'style': 'padding:.65rem 1rem'
+				}, E('div', {
+					'style': 'display:flex;align-items:center;justify-content:space-between;gap:1rem'
+				}, [
+					E('h3', {
+						'style': 'margin:0;text-align:left;font-size:1.1rem'
+					}, _('MLO Multi-Link Overview')),
+					E('button', {
+						'class': 'cbi-button cbi-button-add important',
+						'title': _('Add MLO AP'),
+						'click': ui.createHandlerFn(this, 'renderMloOptionsModal', null),
+						'disabled': isReadonlyView || null
+					}, _('Add MLO AP'))
+				])));
+
+				if (firstMlo)
+					parent.insertBefore(titleRow, firstMlo);
+				else
+					parent.appendChild(titleRow);
+			}
+
+			return section;
+		};
+
 		s.renderRowActions = function(section_id) {
 			var inst = this.lookupRadioOrNetwork(section_id), btns;
+			if (!inst)
+				return E('td', { 'class': 'td middle cbi-section-actions' });
 
 			if (inst.isMlo) {
 				var isDisabled = (uci.get('wireless', section_id, 'disabled') == '1');
@@ -1811,7 +2229,9 @@ return view.extend({
 
 				o.write = function(section_id, value) {
 					var e = this.section.children.filter(function(o) { return o.option == 'encryption' })[0].formvalue(section_id),
-					    copt = (hwtype == 'mtwifi' && e == 'sae') ? '_sae_cipher' : 'cipher',
+					    copt = (hwtype == 'mtwifi' && e == 'sae') ? '_sae_cipher'
+						: (hwtype == 'mtwifi' && e == 'owe') ? '_owe_cipher'
+						: 'cipher',
 					    co = this.section.children.filter(function(o) { return o.option == copt })[0],
 					    c = co ? co.formvalue(section_id) : null;
 
@@ -1853,6 +2273,16 @@ return view.extend({
 					o.value('auto', _('auto'));
 					o.value('ccmp', _('Force CCMP (AES)'));
 					o.value('gcmp', _('Force GCMP (AES)'));
+					o.value('gcmp256', _('Force GCMP-256 (AES)'));
+					o.write = ss.children.filter(function(o) { return o.option == 'encryption' })[0].write;
+					o.cfgvalue = cipher.cfgvalue;
+
+					o = ss.taboption('encryption', form.ListValue, '_owe_cipher', _('Cipher'));
+					o.depends('encryption', 'owe');
+					o.value('auto', _('auto'));
+					o.value('ccmp', _('Force CCMP (AES)'));
+					o.value('gcmp', _('Force GCMP (AES)'));
+					o.value('ccmp256', _('Force CCMP-256 (AES)'));
 					o.value('gcmp256', _('Force GCMP-256 (AES)'));
 					o.write = ss.children.filter(function(o) { return o.option == 'encryption' })[0].write;
 					o.cfgvalue = cipher.cfgvalue;
@@ -2050,7 +2480,6 @@ return view.extend({
 						_('Advertise the separate RSN profiles required by Wi-Fi 7 clients. Disable only as a compatibility workaround for a client that cannot complete WPA3/OWE association.'));
 					o.depends({ mode: 'ap', encryption: 'sae' });
 					o.depends({ mode: 'ap', encryption: 'sae-mixed' });
-					o.depends({ mode: 'ap', encryption: 'owe' });
 					o.default = o.enabled;
 					o.rmempty = false;
 				}
@@ -2736,6 +3165,7 @@ return view.extend({
 				}
 
 				this.writeMloApConfig(section_id, values);
+				sync_mlo_interlock();
 			}, this)).then(L.bind(function() {
 				ui.hideModal();
 				return ui.changes.init();
@@ -2887,6 +3317,7 @@ return view.extend({
 
 			return this.map.save(L.bind(function() {
 				this.writeMloStaConfig(section_id, values);
+				sync_mlo_interlock();
 			}, this)).then(L.bind(function() {
 				ui.hideModal();
 				return ui.changes.init();
@@ -2894,7 +3325,8 @@ return view.extend({
 		};
 
 		s.handleMloToggle = function(section_id, map, ev) {
-			var disabled = (uci.get('wireless', section_id, 'disabled') == '1');
+			var disabled = (uci.get('wireless', section_id, 'disabled') == '1'),
+			    targets;
 
 			if (disabled) {
 				var params = {
@@ -2916,15 +3348,59 @@ return view.extend({
 							}, _('Close')))
 					]);
 
-				uci.unset('wireless', section_id, 'disabled');
-			}
-			else {
-				uci.set('wireless', section_id, 'disabled', '1');
+				targets = get_mlo_interlock_targets(section_id);
+
+				return ui.showModal('启用 MLO', [
+					E('p', '启用 MLO 后，下列普通 SSID 会立即被互锁停用：'),
+					targets.length
+						? E('ul', targets.map(function(name) { return E('li', name); }))
+						: E('p', E('em', '该 MLO 成员射频上的所有普通 AP')),
+					E('p', '关闭 MLO 后，只会恢复此前由互锁自动停用的普通 SSID。'),
+					E('p', E('strong', '如果当前通过普通 Wi-Fi 管理路由器，确认后连接会中断；请改连 MLO 或使用网线。')),
+					E('div', { 'class': 'right' }, [
+						E('button', {
+							'class': 'btn',
+							'click': ui.hideModal
+						}, '取消'), ' ',
+						E('button', {
+							'class': 'cbi-button cbi-button-positive important',
+							'click': ui.createHandlerFn(this, 'applyMloState', section_id, map, true)
+						}, '启用 MLO 并停用普通 SSID')
+					])
+				]);
 			}
 
-			return map.save().then(function() {
-				ui.changes.apply()
-			});
+			return this.applyMloState(section_id, map, false, ev);
+		};
+
+		s.applyMloState = function(section_id, map, enabled, ev) {
+			ui.hideModal();
+
+			/* Apply any pending form changes first. The backend then performs the
+			 * MLO switch, ordinary-SSID lock, verification and radio reload as one
+			 * fail-safe operation against committed UCI. */
+			return map.save()
+				.then(function() { return uci.save(); })
+				.then(function() { return ui.changes.apply(); })
+				.then(function() { return callMtwifiSetMloState(section_id, enabled); })
+				.then(function(result) {
+					if (!result || result.ok !== true)
+						throw new Error(mlo_result_error(result));
+
+					var message = enabled
+						? 'MLO 已启用；普通 SSID 已由互锁停用。'
+						: 'MLO 已关闭；此前由互锁停用的普通 SSID 已恢复。';
+
+					if (enabled && result.locked_ssids && result.locked_ssids.length)
+						message += '（' + result.locked_ssids.join('、') + '）';
+
+					ui.addNotification(null, E('p', message), 'info');
+					window.setTimeout(function() { window.location.reload(); }, 1500);
+					return result;
+				})
+				.catch(function(err) {
+					ui.addNotification(null, E('p', err.message || String(err)), 'error');
+				});
 		};
 
 		s.handleMloRemove = function(section_id, ev) {
@@ -2946,7 +3422,11 @@ return view.extend({
 			}
 
 			document.querySelector('.cbi-section-table-row[data-sid="%s"]'.format(section_id)).style.opacity = 0.5;
-			return form.TypedSection.prototype.handleRemove.apply(this, [section_id, ev]);
+			return Promise.resolve(form.TypedSection.prototype.handleRemove.apply(this, [section_id, ev]))
+				.then(function(result) {
+					sync_mlo_interlock();
+					return result;
+				});
 		};
 
 		s.handleRemove = function(section_id, radioNet, ev) {
@@ -3570,7 +4050,10 @@ return view.extend({
 									hosts_radios_wifis[3].push(Object.assign({ radio: radioDev, network: wifiNetwork }, data[i][j]));
 							}
 
-							return hosts_radios_wifis;
+							return L.resolveDefault(callMtwifiMloStations(), []).then(function(stations) {
+								hosts_radios_wifis[4] = stations;
+								return hosts_radios_wifis;
+							});
 						});
 					}, network))
 					.then(L.bind(this.poll_status, this, nodes));
@@ -3589,12 +4072,11 @@ return view.extend({
 
 			cbi_update_table(table, [], E('em', { 'class': 'spinning' }, _('Collecting data...')))
 
-			var dfsNotice = E('div', { 'class': 'alert-message warning' }, [
-				E('strong', {}, '5 GHz 160 MHz 提醒：'),
-				'在中国区使用 5 GHz 160 MHz 时无法避开 DFS 信道；开机或重新加载无线后必须先完成雷达检测（CAC），需等待较长时间才能搜索到 SSID。'
+			return E([
+				nodes,
+				E('h3', _('Associated Stations')),
+				table
 			]);
-
-			return E([ dfsNotice, nodes, E('h3', _('Associated Stations')), table ]);
 		}, this, m));
 	},
 

@@ -424,6 +424,50 @@ function teardown_wpad(dev) {
     remove_wpad_iface('hostapd', ifnames.main);
 }
 
+/**
+ * Last-resort on-air MLO interlock.
+ *
+ * Normal paths persist the disabled state through c2000max-mlo-interlock. If
+ * a caller bypasses that synchronization, never pass an ordinary AP BSS to
+ * the private driver together with an active MLO interface on the same radio.
+ * Disabled MLO interfaces are not present in the normal netifd payload, but
+ * the explicit check keeps this safe if netifd includes one in the future.
+ *
+ * @param {Object} data - Per-radio netifd wireless payload.
+ */
+function enforce_runtime_mlo_interlock(data) {
+    let is_one = function(value) {
+        return value === true || value === 1 || value == '1';
+    };
+    let has_active_mlo = false;
+
+    for (let idx, iface_data in data.interfaces) {
+        let config = iface_data.config || {};
+        if (is_one(config.mlo) && !is_one(config.disabled)) {
+            has_active_mlo = true;
+            break;
+        }
+    }
+
+    if (!has_active_mlo)
+        return;
+
+    let active_interfaces = {};
+    for (let idx, iface_data in data.interfaces) {
+        let config = iface_data.config || {};
+
+        if (config.mode == 'ap' && !is_one(config.mlo)) {
+            log.error(`[MLO interlock] Drop ordinary AP ${iface_data.name || idx} ` +
+                `from ${cur_devname}: an active MLO interface owns this radio`);
+            continue;
+        }
+
+        active_interfaces[idx] = iface_data;
+    }
+
+    data.interfaces = active_interfaces;
+}
+
 // ==========================================
 //              SETUP
 // ==========================================
@@ -494,6 +538,9 @@ function handle_setup(data) {
     // inject cur_devname into UCI cfg data
     // UCI doesnt contain this key
     data.device = cur_devname;
+
+    /* Fail closed even when a reload path bypassed the persistent helper. */
+    enforce_runtime_mlo_interlock(data);
 
     /*****      PREPARE PREFIXES AND COUNTINGS     *******/
 
