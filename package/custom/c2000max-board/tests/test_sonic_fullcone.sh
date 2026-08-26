@@ -27,6 +27,10 @@ grep -Fq 'fullcone_proto=udp' "$DEFAULTS" ||
 	fail 'factory firewall does not restrict FullCone to WAN UDP'
 grep -Fq "SONiC FullCone (UDP)" "$TURBO" ||
 	fail 'network acceleration status does not report native SONiC FullCone'
+grep -Fq 'import { access, open, popen, stat, readfile }' "$TURBO" &&
+grep -Fq "section.name == 'wan'" "$TURBO" &&
+grep -Fq 'active: active_rules' "$TURBO" ||
+	fail 'FullCone status RPC cannot verify the active WAN nftables rules'
 
 if grep -Eq 'kmod-nft-fullcone' "$TOP/configs/c2000max.config" \
 	"$TOP/defconfig/low-mem-512m/c2000max-mt7993-be3600-wifi.config" \

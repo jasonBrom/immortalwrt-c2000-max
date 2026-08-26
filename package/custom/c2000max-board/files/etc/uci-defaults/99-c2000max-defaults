@@ -362,39 +362,20 @@ if [ "$wireless_is_new" = '1' ]; then
 					uci -q delete "wireless.$iface.owe_transition_ssid"
 					;;
 				5g)
-					# The visible half of 5 GHz OWE Transition remains open.
-					uci -q set "wireless.$iface.encryption=none"
-					uci -q set "wireless.$iface.vifidx=1"
-					uci -q set "wireless.$iface.c2000max_owe_transition=1"
-					uci -q set c2000max.wireless='wireless'
-					uci -q set "c2000max.wireless.owe_main=$iface"
-					uci -q delete "wireless.$iface.ieee80211w"
-					uci -q delete "wireless.$iface.rsn_override"
-					uci -q set "wireless.$iface.owe_transition_ifname=rai1"
-					uci -q set "wireless.$iface.owe_transition_ssid=ImmortalWrt-5GOWE"
+					# Use one visible OWE BSS.  The private MT7993 driver cannot
+					# reliably create the second hidden BSS required by OWE
+					# Transition and otherwise tears down the entire 5 GHz radio.
+					uci -q set "wireless.$iface.encryption=owe"
+					uci -q delete "wireless.$iface.vifidx"
+					uci -q set "wireless.$iface.ieee80211w=2"
+					uci -q set "wireless.$iface.rsn_override=0"
+					uci -q delete "wireless.$iface.owe_transition_bssid"
+					uci -q delete "wireless.$iface.owe_transition_ifname"
+					uci -q delete "wireless.$iface.owe_transition_ssid"
+					uci -q delete "wireless.$iface.c2000max_owe_transition"
 					;;
 			esac
 		done
-	done
-
-	# Hidden encrypted half of the 5 GHz OWE Transition pair.  It is appended
-	# after the ordinary BSS, therefore the MT7993 interface is rai1.
-	for radio in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p"); do
-		[ "$(uci -q get wireless.$radio.band)" = 5g ] || continue
-		uci -q set wireless.c2000max_owe_5g='wifi-iface'
-		uci -q set "wireless.c2000max_owe_5g.device=$radio"
-		uci -q set wireless.c2000max_owe_5g.network='lan'
-		uci -q set wireless.c2000max_owe_5g.mode='ap'
-		uci -q set wireless.c2000max_owe_5g.vifidx='2'
-		uci -q set wireless.c2000max_owe_5g.ssid='ImmortalWrt-5GOWE'
-		uci -q set wireless.c2000max_owe_5g.encryption='owe+gcmp256'
-		uci -q set wireless.c2000max_owe_5g.hidden='1'
-		uci -q set wireless.c2000max_owe_5g.ieee80211w='2'
-		uci -q set wireless.c2000max_owe_5g.rsn_override='0'
-		uci -q set wireless.c2000max_owe_5g.owe_transition_ifname='rai0'
-		uci -q set wireless.c2000max_owe_5g.owe_transition_ssid='ImmortalWrt-5G'
-		uci -q set wireless.c2000max_owe_5g.c2000max_factory_owe='1'
-		break
 	done
 fi
 
@@ -453,12 +434,11 @@ if [ "$(uci -q get c2000max.migration.wifi_ssid_brand_v1)" != '1' ]; then
 	uci -q set c2000max.migration.wifi_ssid_brand_v1='1'
 fi
 
-# V36.10 uses OWE Transition only on 5 GHz.  The visible BSS remains open and
-# points to a hidden GCMP-256 OWE partner; 2.4 GHz stays fully open for legacy
-# and IoT compatibility.  Touch only keyless factory SSIDs.
-if [ "$(uci -q get c2000max.migration.wifi_owe_transition_v3610)" != '1' ]; then
-	owe_5g_main=
-	owe_5g_radio=
+# Replace the unreliable two-BSS OWE Transition profile with one visible OWE
+# BSS on 5 GHz.  The private MT7993 driver times out waiting for the hidden
+# rai1 partner and then removes rai0 as well.  2.4 GHz remains open for legacy
+# and IoT clients.  Only the exact keyless factory SSIDs are migrated.
+if [ "$(uci -q get c2000max.migration.wifi_owe_single_v3610)" != '1' ]; then
 	for iface in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-iface$/\1/p"); do
 		case "$(uci -q get wireless.$iface.ssid)" in
 			ImmortalWrt-2.4G)
@@ -470,8 +450,10 @@ if [ "$(uci -q get c2000max.migration.wifi_owe_transition_v3610)" != '1' ]; then
 				uci -q set "wireless.$iface.encryption=none"
 				uci -q delete "wireless.$iface.ieee80211w"
 				uci -q delete "wireless.$iface.rsn_override"
+				uci -q delete "wireless.$iface.owe_transition_bssid"
 				uci -q delete "wireless.$iface.owe_transition_ifname"
 				uci -q delete "wireless.$iface.owe_transition_ssid"
+				uci -q delete "wireless.$iface.c2000max_owe_transition"
 				continue
 				;;
 			ImmortalWrt-5G) ;;
@@ -482,51 +464,22 @@ if [ "$(uci -q get c2000max.migration.wifi_owe_transition_v3610)" != '1' ]; then
 			*) continue ;;
 		esac
 		[ -z "$(uci -q get wireless.$iface.key)" ] || continue
-		owe_5g_main="$iface"
-		owe_5g_radio="$(uci -q get wireless.$iface.device)"
-		uci -q set "wireless.$iface.encryption=none"
-		uci -q set "wireless.$iface.vifidx=1"
-		uci -q set "wireless.$iface.c2000max_owe_transition=1"
-		uci -q set c2000max.wireless='wireless'
-		uci -q set "c2000max.wireless.owe_main=$iface"
+		uci -q set "wireless.$iface.encryption=owe"
+		uci -q delete "wireless.$iface.vifidx"
 		uci -q delete "wireless.$iface.key"
-		uci -q delete "wireless.$iface.ieee80211w"
-		uci -q delete "wireless.$iface.rsn_override"
+		uci -q set "wireless.$iface.ieee80211w=2"
+		uci -q set "wireless.$iface.rsn_override=0"
+		uci -q delete "wireless.$iface.owe_transition_bssid"
+		uci -q delete "wireless.$iface.owe_transition_ifname"
+		uci -q delete "wireless.$iface.owe_transition_ssid"
+		uci -q delete "wireless.$iface.c2000max_owe_transition"
 	done
-	if [ -n "$owe_5g_main" ] && [ -n "$owe_5g_radio" ]; then
-		owe_partner_safe=1
-		for iface in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-iface$/\1/p"); do
-			[ "$(uci -q get wireless.$iface.device)" = "$owe_5g_radio" ] || continue
-			[ "$(uci -q get wireless.$iface.mode)" = ap ] || continue
-			[ "$iface" = c2000max_owe_5g ] && continue
-			[ "$iface" = "$owe_5g_main" ] && continue
-			[ "$(uci -q get wireless.$iface.vifidx)" != 2 ] || owe_partner_safe=0
-		done
-		if [ -n "$(uci -q get wireless.c2000max_owe_5g)" ] &&
-		   [ "$(uci -q get wireless.c2000max_owe_5g.c2000max_factory_owe)" != 1 ]; then
-			owe_partner_safe=0
-		fi
-		if [ "$owe_partner_safe" = 1 ]; then
-			uci -q set "wireless.${owe_5g_main}.owe_transition_ifname=rai1"
-			uci -q set "wireless.${owe_5g_main}.owe_transition_ssid=ImmortalWrt-5GOWE"
-			uci -q set wireless.c2000max_owe_5g='wifi-iface'
-			uci -q set "wireless.c2000max_owe_5g.device=$owe_5g_radio"
-			uci -q set wireless.c2000max_owe_5g.network='lan'
-			uci -q set wireless.c2000max_owe_5g.mode='ap'
-			uci -q set wireless.c2000max_owe_5g.vifidx='2'
-			uci -q set wireless.c2000max_owe_5g.ssid='ImmortalWrt-5GOWE'
-			uci -q set wireless.c2000max_owe_5g.encryption='owe+gcmp256'
-			uci -q set wireless.c2000max_owe_5g.hidden='1'
-			uci -q delete wireless.c2000max_owe_5g.key
-			uci -q set wireless.c2000max_owe_5g.ieee80211w='2'
-			uci -q set wireless.c2000max_owe_5g.rsn_override='0'
-			uci -q set wireless.c2000max_owe_5g.owe_transition_ifname='rai0'
-			uci -q set wireless.c2000max_owe_5g.owe_transition_ssid='ImmortalWrt-5G'
-			uci -q set wireless.c2000max_owe_5g.c2000max_factory_owe='1'
-		fi
+	if [ "$(uci -q get wireless.c2000max_owe_5g.c2000max_factory_owe)" = 1 ]; then
+		uci -q delete wireless.c2000max_owe_5g
 	fi
+	uci -q delete c2000max.wireless.owe_main
 	uci -q set c2000max.migration='migration'
-	uci -q set c2000max.migration.wifi_owe_transition_v3610='1'
+	uci -q set c2000max.migration.wifi_owe_single_v3610='1'
 fi
 
 # MLO on this dual-band profile requires the 2.4 GHz link to use the vendor's

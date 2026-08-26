@@ -1,14 +1,15 @@
 #!/bin/sh
 
-# Keep the private-driver 5 GHz OWE Transition pair coherent when the user
-# edits the visible BSS.  Only sections carrying our explicit ownership marker
-# are touched; custom OWE/open networks are never rewritten.
+# Clean up the board-owned OWE Transition pair shipped by the first V36.10
+# image. MT7993 cannot reliably instantiate its hidden rai1 partner, which
+# causes netifd to tear down the otherwise healthy 5 GHz rai0 interface.
+# Custom wireless sections are never removed or rewritten.
 
 MAIN_MARKER=c2000max_owe_transition
 PARTNER_SECTION=c2000max_owe_5g
 PARTNER_MARKER=c2000max_factory_owe
-SUSPEND_MARKER=c2000max_owe_suspended
-CHANGED=0
+CHANGED_WIRELESS=0
+CHANGED_BOARD=0
 
 wireless_ifaces()
 {
@@ -16,29 +17,17 @@ wireless_ifaces()
 		sed -n 's/^wireless\.\([^.]*\)=wifi-iface$/\1/p'
 }
 
-set_changed()
-{
-	local assignment="$1" option value
-	option="${assignment%%=*}"
-	value="${assignment#*=}"
-	[ "$(uci -q get "$option")" != "$value" ] || return 0
-	uci -q set "$assignment" || return 1
-	CHANGED=1
-}
-
-delete_changed()
+delete_wireless()
 {
 	[ -n "$(uci -q get "$1")" ] || return 0
 	uci -q delete "$1" >/dev/null 2>&1 || return 1
-	CHANGED=1
+	CHANGED_WIRELESS=1
 }
 
-sync_pair()
+sync_legacy_pair()
 {
-	local main= iface= radio= network= ssid= encryption= main_disabled=
-	local partner_disabled= partner_ssid=
+	local main= iface=
 
-	CHANGED=0
 	main="$(uci -q get c2000max.wireless.owe_main)"
 	[ "$(uci -q get "wireless.${main}")" = wifi-iface ] || main=
 	if [ -z "$main" ]; then
@@ -48,63 +37,31 @@ sync_pair()
 			break
 		done
 	fi
-	[ -n "$main" ] || return 0
 
-	[ "$(uci -q get "wireless.${PARTNER_SECTION}.${PARTNER_MARKER}")" = 1 ] || {
-		logger -t c2000max-owe-transition \
-			"受管 5 GHz 主 BSS 存在，但隐藏 OWE 伙伴缺失或不属于本机"
-		return 1
-	}
-
-	radio="$(uci -q get "wireless.${main}.device")"
-	network="$(uci -q get "wireless.${main}.network")"
-	ssid="$(uci -q get "wireless.${main}.ssid")"
-	encryption="$(uci -q get "wireless.${main}.encryption")"
-	main_disabled="$(uci -q get "wireless.${main}.disabled")"
-	partner_disabled="$(uci -q get "wireless.${PARTNER_SECTION}.disabled")"
-	partner_ssid="$(printf '%s' "$ssid" | cut -b 1-28)OWE"
-
-	# MLO interlock owns a temporary disabled=1 together with its lock marker;
-	# do not turn that temporary state into an OWE user-state decision.
-	if [ "$encryption" = none ] && {
-		[ "$main_disabled" != 1 ] ||
-		[ "$(uci -q get "wireless.${main}.c2000max_mlo_locked")" = 1 ];
-	}; then
-		set_changed "wireless.${main}.vifidx=1"
-		set_changed "wireless.${main}.owe_transition_ifname=rai1"
-		set_changed "wireless.${main}.owe_transition_ssid=$partner_ssid"
-		set_changed "wireless.${PARTNER_SECTION}.device=$radio"
-		set_changed "wireless.${PARTNER_SECTION}.network=${network:-lan}"
-		set_changed "wireless.${PARTNER_SECTION}.mode=ap"
-		set_changed "wireless.${PARTNER_SECTION}.vifidx=2"
-		set_changed "wireless.${PARTNER_SECTION}.ssid=$partner_ssid"
-		set_changed "wireless.${PARTNER_SECTION}.encryption=owe+gcmp256"
-		set_changed "wireless.${PARTNER_SECTION}.hidden=1"
-		delete_changed "wireless.${PARTNER_SECTION}.key"
-		set_changed "wireless.${PARTNER_SECTION}.ieee80211w=2"
-		set_changed "wireless.${PARTNER_SECTION}.rsn_override=0"
-		set_changed "wireless.${PARTNER_SECTION}.owe_transition_ifname=rai0"
-		set_changed "wireless.${PARTNER_SECTION}.owe_transition_ssid=$ssid"
-		delete_changed "wireless.${PARTNER_SECTION}.${SUSPEND_MARKER}"
-		if [ "$(uci -q get "wireless.${PARTNER_SECTION}.c2000max_mlo_locked")" != 1 ] &&
-		   [ "$partner_disabled" = 1 ]; then
-			delete_changed "wireless.${PARTNER_SECTION}.disabled"
-		fi
-	else
-		# WPA/SAE, pure OWE or a user-disabled main BSS must never leave the
-		# hidden transition partner broadcasting by itself.
-		delete_changed "wireless.${main}.owe_transition_bssid"
-		delete_changed "wireless.${main}.owe_transition_ifname"
-		delete_changed "wireless.${main}.owe_transition_ssid"
-		set_changed "wireless.${PARTNER_SECTION}.${SUSPEND_MARKER}=1"
-		[ "$partner_disabled" = 1 ] ||
-			set_changed "wireless.${PARTNER_SECTION}.disabled=1"
+	if [ -n "$main" ]; then
+		delete_wireless "wireless.${main}.owe_transition_bssid"
+		delete_wireless "wireless.${main}.owe_transition_ifname"
+		delete_wireless "wireless.${main}.owe_transition_ssid"
+		delete_wireless "wireless.${main}.${MAIN_MARKER}"
 	fi
 
-	[ "$CHANGED" != 1 ] || uci -q commit wireless
+	# Ownership marker is mandatory: a user-created section with the same name
+	# is left untouched.
+	if [ "$(uci -q get "wireless.${PARTNER_SECTION}.${PARTNER_MARKER}")" = 1 ]; then
+		uci -q delete "wireless.${PARTNER_SECTION}" >/dev/null 2>&1 || return 1
+		CHANGED_WIRELESS=1
+	fi
+
+	if [ -n "$(uci -q get c2000max.wireless.owe_main)" ]; then
+		uci -q delete c2000max.wireless.owe_main >/dev/null 2>&1 || return 1
+		CHANGED_BOARD=1
+	fi
+
+	[ "$CHANGED_WIRELESS" != 1 ] || uci -q commit wireless
+	[ "$CHANGED_BOARD" != 1 ] || uci -q commit c2000max
 }
 
 case "${1:-sync}" in
-	sync) sync_pair ;;
+	sync) sync_legacy_pair ;;
 	*) echo "Usage: $0 [sync]" >&2; exit 2 ;;
 esac

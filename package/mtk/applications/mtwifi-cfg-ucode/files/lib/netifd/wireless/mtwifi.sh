@@ -468,61 +468,6 @@ function enforce_runtime_mlo_interlock(data) {
     data.interfaces = active_interfaces;
 }
 
-/**
- * Keep the board-owned OWE transition pair coherent in the exact payload
- * handed to DAT generation and hostapd.  The persistent helper normally edits
- * UCI before netifd reloads; this gate also closes the save/reload race.
- *
- * @param {Object} data - Per-radio netifd wireless payload.
- */
-function enforce_runtime_owe_transition(data) {
-    let is_one = function(value) {
-        return value === true || value === 1 || value == '1';
-    };
-    let main = null;
-    let partner = null;
-
-    for (let idx, iface_data in data.interfaces) {
-        let config = iface_data.config || {};
-        if (is_one(config.c2000max_owe_transition))
-            main = iface_data;
-        else if (is_one(config.c2000max_factory_owe))
-            partner = iface_data;
-    }
-
-    if (!main || !partner)
-        return;
-
-    let main_config = main.config || {};
-    let partner_config = partner.config || {};
-    let transition_active = main_config.mode == 'ap' &&
-        main_config.encryption == 'none' && !is_one(main_config.disabled);
-
-    if (!transition_active) {
-        delete main_config.owe_transition_bssid;
-        delete main_config.owe_transition_ssid;
-        delete main_config.owe_transition_ifname;
-        partner_config.disabled = true;
-        partner_config.c2000max_owe_suspended = true;
-        log.info(`[OWE transition] Disable hidden partner ${partner.name}: ` +
-            `visible BSS encryption=${main_config.encryption || 'unknown'}, ` +
-            `disabled=${is_one(main_config.disabled)}`);
-        return;
-    }
-
-    partner_config.disabled = false;
-    delete partner_config.c2000max_owe_suspended;
-    partner_config.mode = 'ap';
-    partner_config.encryption = 'owe+gcmp256';
-    partner_config.hidden = true;
-    partner_config.ieee80211w = 2;
-    partner_config.rsn_override = 0;
-    main_config.owe_transition_ifname = 'rai1';
-    main_config.owe_transition_ssid = partner_config.ssid;
-    partner_config.owe_transition_ifname = 'rai0';
-    partner_config.owe_transition_ssid = main_config.ssid;
-}
-
 // ==========================================
 //              SETUP
 // ==========================================
@@ -596,7 +541,6 @@ function handle_setup(data) {
 
     /* Fail closed even when a reload path bypassed the persistent helper. */
     enforce_runtime_mlo_interlock(data);
-    enforce_runtime_owe_transition(data);
 
     /*****      PREPARE PREFIXES AND COUNTINGS     *******/
 

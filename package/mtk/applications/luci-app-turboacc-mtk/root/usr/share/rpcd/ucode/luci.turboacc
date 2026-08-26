@@ -5,7 +5,7 @@
 
 'use strict';
 
-import { access, open, stat, readfile } from 'fs';
+import { access, open, popen, stat, readfile } from 'fs';
 import { connect } from 'ubus';
 import * as uci from 'uci';
 
@@ -190,7 +190,8 @@ const methods = {
 			for (let name, section in firewall) {
 				if (section['.type'] == 'defaults' && section.fullcone == '1')
 					global_enabled = true;
-				if (section['.type'] == 'zone' && section.fullcone == '1') {
+				if (section['.type'] == 'zone' && section.name == 'wan' &&
+				    section.fullcone == '1') {
 					zone_enabled = true;
 					let proto = list_values(section.fullcone_proto);
 					if (length(proto) == 1 && proto[0] == 'udp')
@@ -201,7 +202,8 @@ const methods = {
 			let active_rules = false;
 			if (nft) {
 				let output = nft.read('all');
-				active_rules = !!match(output, /\bfullcone\b/);
+				active_rules = type(output) == 'string' &&
+					index(output, 'fullcone') >= 0;
 				nft.close();
 			}
 			if (global_enabled && zone_enabled && active_rules) {
@@ -219,7 +221,11 @@ const methods = {
 					ipt.close();
 				}
 			}
-			return { type: fctype };
+			return {
+				type: fctype,
+				configured: global_enabled && zone_enabled,
+				active: active_rules
+			};
 		}
 	},
 

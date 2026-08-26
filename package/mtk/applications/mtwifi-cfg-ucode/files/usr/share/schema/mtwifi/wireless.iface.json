@@ -102,18 +102,6 @@
             "type": "string",
             "description": "Private-driver ifname of the paired OWE transition BSS"
         },
-        "c2000max_owe_transition": {
-            "type": "boolean",
-            "description": "C2000MAX managed visible OWE transition BSS"
-        },
-        "c2000max_factory_owe": {
-            "type": "boolean",
-            "description": "C2000MAX managed hidden OWE transition BSS"
-        },
-        "c2000max_owe_suspended": {
-            "type": "boolean",
-            "description": "Hidden OWE BSS suspended by encryption lifecycle management"
-        },
         "bridge_isolate": {
             "type": "boolean",
             "description": "Enable bridge port isolation"
