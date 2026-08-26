@@ -54,7 +54,7 @@
 		"description": "Grant access to main status display",
 		"read": {
 			"ubus": {
-				"qmodem": [ "cell_info","base_info" ]
+				"qmodem": [ "overview_info", "cell_info", "base_info" ]
 			}
 		}
 	}

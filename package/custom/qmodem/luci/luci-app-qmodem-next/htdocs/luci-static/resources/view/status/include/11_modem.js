@@ -15,30 +15,63 @@ function progressbar(value, max, min, unit) {
 	}, E('div', { 'style': 'width:%.2f%%'.format(pc) }));
 }
 
+var lastData = [];
+var liveRefresh = null;
+var liveRefreshStarted = 0;
+var LIVE_REFRESH_INTERVAL = 10000;
+
+function mapInfo(section, base, cell) {
+	var allInfo = [];
+
+	if (base && base.modem_info)
+		allInfo = allInfo.concat(base.modem_info);
+	if (cell && cell.modem_info)
+		allInfo = allInfo.concat(cell.modem_info);
+
+	return { section: section, info: allInfo };
+}
+
+function startLiveRefresh(sections) {
+	var now = Date.now();
+
+	if (liveRefresh || now - liveRefreshStarted < LIVE_REFRESH_INTERVAL)
+		return;
+
+	liveRefreshStarted = now;
+	liveRefresh = Promise.all(sections.map(function(section) {
+		return Promise.all([
+			qmodem.getBaseInfo(section.id),
+			qmodem.getCellInfo(section.id)
+		]).then(function(results) {
+			return mapInfo(section, results[0], results[1]);
+		});
+	})).then(function(data) {
+		lastData = data;
+		liveRefresh = null;
+	}, function(error) {
+		console.warn('Background QModem overview refresh failed:', error);
+		liveRefresh = null;
+	});
+}
+
 return baseclass.extend({
 	title: _('Modem Info'),
 
 	load: function() {
 		return qmodem.getModemSections().then(function(sections) {
 			var promises = sections.map(function(section) {
-				return Promise.all([
-					qmodem.getBaseInfo(section.id),
-					qmodem.getCellInfo(section.id)
-				]).then(function(results) {
-					var allInfo = [];
-					if (results[0] && results[0].modem_info) {
-						allInfo = allInfo.concat(results[0].modem_info);
-					}
-					if (results[1] && results[1].modem_info) {
-						allInfo = allInfo.concat(results[1].modem_info);
-					}
-					return {
-						section: section,
-						info: allInfo
-					};
+				return qmodem.getOverviewInfo(section.id).then(function(result) {
+					return mapInfo(section, result, null);
+				}, function() {
+					return mapInfo(section, null, null);
 				});
 			});
-			return Promise.all(promises);
+			return Promise.all(promises).then(function(cachedData) {
+				if (!lastData.length)
+					lastData = cachedData;
+				startLiveRefresh(sections);
+				return lastData;
+			});
 		});
 	},
 

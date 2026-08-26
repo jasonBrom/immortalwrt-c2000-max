@@ -17,6 +17,13 @@ var callCellInfo = rpc.declare({
 	expect: { }
 });
 
+var callOverviewInfo = rpc.declare({
+	object: 'qmodem',
+	method: 'overview_info',
+	params: ['config_section'],
+	expect: { }
+});
+
 var callInfo = rpc.declare({
 	object: 'qmodem',
 	method: 'info',
@@ -264,6 +271,11 @@ return L.Class.extend({
 	// Get modem cell information
 	getCellInfo: function(section) {
 		return callCellInfo(section);
+	},
+
+	// Read the last complete cache without initiating an AT transaction.
+	getOverviewInfo: function(section) {
+		return callOverviewInfo(section);
 	},
 
 	// Get modem general information

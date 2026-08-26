@@ -11,7 +11,7 @@ LUCI_DEPENDS:=+qmodem +luci-base +sms-forwarder-next
 CONFFILES:=luci-app-qmodem
 LUCI_PKGARCH:=all
 PKG_VERSION:=$(QMODEM_VERSION)
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_LICENSE:=GPLv3
 PKG_MAINTAINER:=Tom <fjrcn@outlook.com>
 

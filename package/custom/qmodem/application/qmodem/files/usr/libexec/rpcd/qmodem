@@ -32,6 +32,44 @@ try_cache() {
     fi
 }
 
+# The LuCI system overview must never initiate an AT transaction.  A cache
+# miss in base_info/cell_info can involve several serial commands and an
+# unbounded wait behind another AT owner, which used to keep the entire status
+# page on "Loading view...".  This read-only method merges only complete cache
+# snapshots; the dedicated QModem pages remain responsible for live refreshes.
+overview_info() {
+    local section="$1"
+    local cache_file cache_files=""
+
+    case "$section" in
+        ''|*[!A-Za-z0-9_]*)
+            printf '%s\n' '{"modem_info":[],"cache_only":true}'
+            return 0
+            ;;
+    esac
+
+    for cache_file in \
+        "/tmp/cache_base_info_$section" \
+        "/tmp/cache_cell_info_$section"; do
+        [ -s "$cache_file" ] || continue
+        jq -e '.modem_info | type == "array"' "$cache_file" \
+            >/dev/null 2>&1 || continue
+        cache_files="$cache_files $cache_file"
+    done
+
+    if [ -z "$cache_files" ]; then
+        printf '%s\n' '{"modem_info":[],"cache_only":true}'
+        return 0
+    fi
+
+    # Section names are restricted above, so these generated paths cannot
+    # contain whitespace or shell metacharacters.
+    jq -c -s \
+        '{modem_info: [ .[] | .modem_info[]? ], cache_only: true}' \
+        $cache_files 2>/dev/null ||
+        printf '%s\n' '{"modem_info":[],"cache_only":true}'
+}
+
 # Helper function for SMS retrieval
 get_sms() {
     [ -n "$sms_at_port" ] && at_port=$sms_at_port
@@ -487,6 +525,9 @@ case "$1" in
     "base_info": {
         "config_section": "string"
     },
+    "overview_info": {
+        "config_section": "string"
+    },
     "cell_info": {
         "config_section": "string"
     },
@@ -657,7 +698,7 @@ EOF
         fi
 
         case "$2" in
-            base_info|cell_info|info|network_info|sim_info|get_copyright|\
+            base_info|cell_info|overview_info|info|network_info|sim_info|get_copyright|\
             get_current_band|get_current_band_capabilities|get_disabled_features|get_dns|get_imei|get_lockband|get_mode|\
             get_neighborcell|get_network_prefer|get_reboot_caps|get_stats|save_stats|\
             get_traffic_reset_schedule|\
@@ -676,6 +717,9 @@ EOF
                         json_init
                         cache_file="/tmp/cache_cell_info_$config_section"
                         try_cache 10 "$cache_file" cell_info
+                        ;;
+                    overview_info)
+                        overview_info "$config_section"
                         ;;
                     clear_dial_log)
                         json_init
