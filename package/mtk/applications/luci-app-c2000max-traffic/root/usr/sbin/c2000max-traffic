@@ -1,5 +1,16 @@
 #!/bin/sh
 
+COREUTILS_SORT="${C2000_COREUTILS_SORT:-/usr/libexec/sort-coreutils}"
+COREUTILS_STAT="${C2000_COREUTILS_STAT:-/usr/libexec/stat-coreutils}"
+sort()
+{
+	if [ -x "$COREUTILS_SORT" ]; then "$COREUTILS_SORT" "$@"; else command sort "$@"; fi
+}
+stat()
+{
+	if [ -x "$COREUTILS_STAT" ]; then "$COREUTILS_STAT" "$@"; else command stat "$@"; fi
+}
+
 RUNTIME_DIR="${C2000_TRAFFIC_RUNTIME:-/tmp/c2000max-traffic}"
 PERSIST_DIR="${C2000_TRAFFIC_PERSIST_DIR:-/etc/c2000max-traffic}"
 TOTALS_FILE="$RUNTIME_DIR/totals.tsv"

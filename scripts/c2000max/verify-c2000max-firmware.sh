@@ -223,9 +223,6 @@ if [ -n "$ROOTFS" ]; then
 		etc/init.d/c2000max-appfilter \
 		usr/bin/c2000max-oafd \
 		etc/appfilter/feature.cfg \
-		usr/bin/od \
-		usr/bin/sort \
-		bin/stat \
 		usr/libexec/od-coreutils \
 		usr/libexec/sort-coreutils \
 		usr/libexec/stat-coreutils \
@@ -294,6 +291,12 @@ if [ -n "$ROOTFS" ]; then
 		'recent_audit' "rootfs traffic RPC omits recent application audit"
 	require_contains "$ROOTFS/usr/libexec/rpcd/c2000max.traffic" \
 		'feature_install_status' "rootfs traffic RPC omits asynchronous feature status"
+	require_contains "$ROOTFS/usr/sbin/c2000max-feature-manager" \
+		'/usr/libexec/od-coreutils' "rootfs feature manager does not pin coreutils od"
+	require_contains "$ROOTFS/usr/sbin/c2000max-feature-job" \
+		'/usr/libexec/stat-coreutils' "rootfs feature job does not pin coreutils stat"
+	require_contains "$ROOTFS/usr/sbin/c2000max-traffic" \
+		'/usr/libexec/sort-coreutils' "rootfs traffic collector does not pin coreutils sort"
 	require_contains "$ROOTFS/usr/sbin/c2000max-feature-job" \
 		'run_worker' "rootfs omits asynchronous feature installation"
 	require_contains "$ROOTFS/etc/config/c2000max" "option enabled '1'" \

@@ -8,6 +8,17 @@ LC_ALL=C
 export LC_ALL
 umask 077
 
+COREUTILS_OD="${C2000_COREUTILS_OD:-/usr/libexec/od-coreutils}"
+COREUTILS_STAT="${C2000_COREUTILS_STAT:-/usr/libexec/stat-coreutils}"
+od()
+{
+	if [ -x "$COREUTILS_OD" ]; then "$COREUTILS_OD" "$@"; else command od "$@"; fi
+}
+stat()
+{
+	if [ -x "$COREUTILS_STAT" ]; then "$COREUTILS_STAT" "$@"; else command stat "$@"; fi
+}
+
 FEATURE_DIR="${C2000_FEATURE_DIR:-/etc/appfilter}"
 FEATURE_FILE="${C2000_FEATURE_FILE:-$FEATURE_DIR/feature.cfg}"
 ICON_DIR="${C2000_FEATURE_ICON_DIR:-/www/luci-static/resources/c2000max-app-icons}"

@@ -6,7 +6,7 @@ LUCI_DEPENDS:=+conntrack +ip-full +coreutils-timeout +coreutils-od +coreutils-so
 
 PKG_NAME:=luci-app-c2000max-traffic
 PKG_VERSION:=26.233.1
-PKG_RELEASE:=12
+PKG_RELEASE:=13
 PKG_MAINTAINER:=C2000MAX maintainers
 
 define Package/luci-app-c2000max-traffic/conffiles
