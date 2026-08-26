@@ -45,54 +45,115 @@ jiorouter_initial_setup()
 	fw_setenv ipaddr ''
 }
 
-# C2000MAX uses fixed GPT kernel/rootfs partitions on eMMC.  The generic
-# emmc helper treats a missing partition or an empty tar stream as success and
-# the stage2 upgrade process then reboots into the untouched old system.  Keep
-# this board-specific path deliberately strict: resolve and validate both GPT
-# labels, bound every write by the partition size, and verify the padded image
-# hash from eMMC before the reboot is allowed to continue.
-c2000max_find_emmc_part()
+# C2000MAX boots this image from a GPT-partitioned TF card.  Its factory
+# firmware lives in SPI-NOR and must never be considered an upgrade target.
+# Bind stage2 to the exact SD card backing the currently mounted /rom before
+# pivoting to ramfs, then revalidate its device numbers and CID immediately
+# before any write.  There is deliberately no global MMC scan and no MTD path.
+c2000max_block_info()
 {
-	local label="$1" candidate partname
+	block info 2>/dev/null
+}
 
-	candidate="$(find_mmc_part "$label" "$CI_ROOTDEV")"
-	[ -n "$candidate" ] && {
-		printf '%s\n' "$candidate"
-		return 0
+c2000max_is_block_device()
+{
+	[ -b "$1" ]
+}
+
+c2000max_prepare_tf_targets()
+{
+	local sys_class="${C2000MAX_SYS_CLASS_BLOCK:-/sys/class/block}"
+	local root_candidates root_dev root_node disk_node candidate node
+	local kernel_dev kernel_count=0 type cid disk_dev kernel_devno root_devno
+
+	# `mount` reports /dev/root for squashfs on this board.  `block info`
+	# resolves that alias back to the block device actually mounted at /rom.
+	root_candidates="$(c2000max_block_info |
+		sed -n 's#^\(/dev/mmcblk[0-9][0-9]*p[0-9][0-9]*\):.*MOUNT="/rom".*#\1#p')"
+	set -- $root_candidates
+	[ "$#" -eq 1 ] || {
+		echo 'C2000MAX upgrade: cannot uniquely resolve the active TF rootfs.' >&2
+		return 1
+	}
+	root_dev="$1"
+	root_node="${root_dev##*/}"
+	printf '%s\n' "$root_node" | grep -Eq '^mmcblk[0-9]+p[0-9]+$' || return 1
+	disk_node="$(printf '%s\n' "$root_node" | sed 's/p[0-9][0-9]*$//')"
+	c2000max_is_block_device "$root_dev" || return 1
+	[ -r "$sys_class/$root_node/uevent" ] &&
+		grep -qx 'PARTNAME=rootfs' "$sys_class/$root_node/uevent" || return 1
+
+	type="$(cat "$sys_class/$disk_node/device/type" 2>/dev/null)"
+	[ "$type" = SD ] || {
+		echo 'C2000MAX upgrade: the active rootfs is not on an SD/TF card.' >&2
+		return 1
+	}
+	cid="$(cat "$sys_class/$disk_node/device/cid" 2>/dev/null)"
+	[ "${#cid}" -eq 32 ] || return 1
+	case "$cid" in *[!0-9a-fA-F]*) return 1 ;; esac
+
+	for candidate in "$sys_class"/"${disk_node}"p*; do
+		[ -r "$candidate/uevent" ] || continue
+		grep -qx 'PARTNAME=kernel' "$candidate/uevent" || continue
+		node="${candidate##*/}"
+		printf '%s\n' "$node" |
+			grep -Eq "^${disk_node}p[0-9]+$" || continue
+		kernel_dev="/dev/$node"
+		kernel_count=$((kernel_count + 1))
+	done
+	[ "$kernel_count" -eq 1 ] &&
+		c2000max_is_block_device "$kernel_dev" || {
+		echo 'C2000MAX upgrade: cannot uniquely resolve the TF kernel partition.' >&2
+		return 1
 	}
 
-	# CI_ROOTDEV is not guaranteed to survive every sysupgrade ramfs handoff.
-	# Fall back to the GPT PARTNAME exposed by the kernel, never to a guessed
-	# partition number.
-	for candidate in /sys/class/block/mmcblk*p*; do
-		[ -r "$candidate/uevent" ] || continue
-		partname="$(sed -n 's/^PARTNAME=//p' "$candidate/uevent")"
-		[ "$partname" = "$label" ] || continue
-		printf '/dev/%s\n' "${candidate##*/}"
-		return 0
-	done
+	disk_dev="$(cat "$sys_class/$disk_node/dev" 2>/dev/null)"
+	kernel_devno="$(cat "$sys_class/${kernel_dev##*/}/dev" 2>/dev/null)"
+	root_devno="$(cat "$sys_class/$root_node/dev" 2>/dev/null)"
+	printf '%s\n%s\n%s\n' "$disk_dev" "$kernel_devno" "$root_devno" |
+		grep -Eqv '^[0-9]+:[0-9]+$' && return 1
 
-	return 1
+	export C2000MAX_TF_BOUND=1
+	export C2000MAX_TF_DISK="/dev/$disk_node"
+	export C2000MAX_TF_KERNEL="$kernel_dev"
+	export C2000MAX_TF_ROOTFS="$root_dev"
+	export C2000MAX_TF_DISK_DEVNO="$disk_dev"
+	export C2000MAX_TF_KERNEL_DEVNO="$kernel_devno"
+	export C2000MAX_TF_ROOTFS_DEVNO="$root_devno"
+	export C2000MAX_TF_CID="$cid"
 }
 
-c2000max_validate_emmc_part()
+c2000max_validate_tf_targets()
 {
-	local dev="$1" label="$2" node
+	local sys_class="${C2000MAX_SYS_CLASS_BLOCK:-/sys/class/block}"
+	local disk_node kernel_node root_node type cid
 
-	case "$dev" in
-	/dev/mmcblk*p*) ;;
-	*) return 1 ;;
-	esac
-	[ -b "$dev" ] || return 1
-	node="${dev##*/}"
-	[ -r "/sys/class/block/$node/uevent" ] || return 1
-	grep -qx "PARTNAME=$label" "/sys/class/block/$node/uevent"
+	[ "$C2000MAX_TF_BOUND" = 1 ] || return 1
+	disk_node="${C2000MAX_TF_DISK##*/}"
+	kernel_node="${C2000MAX_TF_KERNEL##*/}"
+	root_node="${C2000MAX_TF_ROOTFS##*/}"
+	printf '%s\n' "$disk_node" | grep -Eq '^mmcblk[0-9]+$' || return 1
+	printf '%s\n' "$kernel_node" | grep -Eq "^${disk_node}p[0-9]+$" || return 1
+	printf '%s\n' "$root_node" | grep -Eq "^${disk_node}p[0-9]+$" || return 1
+	[ "$kernel_node" != "$root_node" ] || return 1
+	c2000max_is_block_device "$C2000MAX_TF_DISK" &&
+		c2000max_is_block_device "$C2000MAX_TF_KERNEL" &&
+		c2000max_is_block_device "$C2000MAX_TF_ROOTFS" || return 1
+
+	type="$(cat "$sys_class/$disk_node/device/type" 2>/dev/null)"
+	cid="$(cat "$sys_class/$disk_node/device/cid" 2>/dev/null)"
+	[ "$type" = SD ] && [ "$cid" = "$C2000MAX_TF_CID" ] || return 1
+	[ "$(cat "$sys_class/$disk_node/dev" 2>/dev/null)" = "$C2000MAX_TF_DISK_DEVNO" ] &&
+		[ "$(cat "$sys_class/$kernel_node/dev" 2>/dev/null)" = "$C2000MAX_TF_KERNEL_DEVNO" ] &&
+		[ "$(cat "$sys_class/$root_node/dev" 2>/dev/null)" = "$C2000MAX_TF_ROOTFS_DEVNO" ] || return 1
+	grep -qx 'PARTNAME=kernel' "$sys_class/$kernel_node/uevent" &&
+		grep -qx 'PARTNAME=rootfs' "$sys_class/$root_node/uevent"
 }
 
-c2000max_emmc_sectors()
+c2000max_tf_sectors()
 {
 	local node="${1##*/}"
-	cat "/sys/class/block/$node/size" 2>/dev/null
+	cat "${C2000MAX_SYS_CLASS_BLOCK:-/sys/class/block}/$node/size" 2>/dev/null
 }
 
 c2000max_tar_member_bytes()
@@ -111,7 +172,7 @@ c2000max_tar_member_padded_hash()
 	) | sha256sum | awk '{print $1}'
 }
 
-c2000max_emmc_padded_hash()
+c2000max_tf_padded_hash()
 {
 	local dev="$1" blocks="$2" large tail
 	large=$((blocks / 128))
@@ -125,7 +186,7 @@ c2000max_emmc_padded_hash()
 		sha256sum | awk '{print $1}'
 }
 
-c2000max_emmc_write_member()
+c2000max_tf_write_member()
 {
 	local tar_file="$1" member="$2" dev="$3" bytes="$4" blocks="$5"
 	local expected actual
@@ -138,11 +199,11 @@ c2000max_emmc_write_member()
 		dd of="$dev" bs=65536 conv=notrunc || return 1
 	sync
 
-	actual="$(c2000max_emmc_padded_hash "$dev" "$blocks")"
+	actual="$(c2000max_tf_padded_hash "$dev" "$blocks")"
 	[ "$actual" = "$expected" ]
 }
 
-c2000max_emmc_upgrade_tar()
+c2000max_tf_upgrade_tar()
 {
 	local tar_file="$1" board_dir kernel_member root_member
 	local kernel_bytes root_bytes kernel_blocks root_blocks root_aligned
@@ -166,15 +227,13 @@ c2000max_emmc_upgrade_tar()
 		return 1
 	}
 
-	EMMC_KERN_DEV="$(c2000max_find_emmc_part kernel)" || return 1
-	EMMC_ROOT_DEV="$(c2000max_find_emmc_part rootfs)" || return 1
-	export EMMC_KERN_DEV EMMC_ROOT_DEV
-	c2000max_validate_emmc_part "$EMMC_KERN_DEV" kernel &&
-		c2000max_validate_emmc_part "$EMMC_ROOT_DEV" rootfs &&
-		[ "$EMMC_KERN_DEV" != "$EMMC_ROOT_DEV" ] || {
-		echo 'C2000MAX upgrade: GPT kernel/rootfs targets are invalid.' >&2
+	c2000max_validate_tf_targets || {
+		echo 'C2000MAX upgrade: active TF identity changed; refusing all writes.' >&2
 		return 1
 	}
+	EMMC_KERN_DEV="$C2000MAX_TF_KERNEL"
+	EMMC_ROOT_DEV="$C2000MAX_TF_ROOTFS"
+	export EMMC_KERN_DEV EMMC_ROOT_DEV
 
 	kernel_bytes="$(c2000max_tar_member_bytes "$tar_file" "$kernel_member")"
 	root_bytes="$(c2000max_tar_member_bytes "$tar_file" "$root_member")"
@@ -187,8 +246,8 @@ c2000max_emmc_upgrade_tar()
 	kernel_blocks=$(((kernel_bytes + 511) / 512))
 	root_blocks=$(((root_bytes + 511) / 512))
 	root_aligned=$(((root_blocks + 127) & ~127))
-	kernel_sectors="$(c2000max_emmc_sectors "$EMMC_KERN_DEV")"
-	root_sectors="$(c2000max_emmc_sectors "$EMMC_ROOT_DEV")"
+	kernel_sectors="$(c2000max_tf_sectors "$EMMC_KERN_DEV")"
+	root_sectors="$(c2000max_tf_sectors "$EMMC_ROOT_DEV")"
 	case "$kernel_sectors:$root_sectors" in
 	*[!0-9:]*|0:*|*:0|'') return 1 ;;
 	esac
@@ -199,7 +258,7 @@ c2000max_emmc_upgrade_tar()
 	}
 
 	echo "Writing C2000MAX rootfs to $EMMC_ROOT_DEV ..."
-	c2000max_emmc_write_member "$tar_file" "$root_member" \
+	c2000max_tf_write_member "$tar_file" "$root_member" \
 		"$EMMC_ROOT_DEV" "$root_bytes" "$root_blocks" || {
 		echo 'C2000MAX upgrade: rootfs readback verification failed.' >&2
 		return 1
@@ -210,7 +269,7 @@ c2000max_emmc_upgrade_tar()
 	dd if=/dev/zero of="$EMMC_KERN_DEV" bs=512 count=8 conv=notrunc || return 1
 	sync
 	echo "Writing C2000MAX kernel to $EMMC_KERN_DEV ..."
-	c2000max_emmc_write_member "$tar_file" "$kernel_member" \
+	c2000max_tf_write_member "$tar_file" "$kernel_member" \
 		"$EMMC_KERN_DEV" "$kernel_bytes" "$kernel_blocks" || {
 		echo 'C2000MAX upgrade: kernel readback verification failed.' >&2
 		return 1
@@ -229,10 +288,11 @@ c2000max_emmc_upgrade_tar()
 		sync
 	fi
 
+	export C2000MAX_TF_UPGRADE_OK=1
 	return 0
 }
 
-c2000max_emmc_do_upgrade()
+c2000max_tf_do_upgrade()
 {
 	local file_type
 	file_type="$(identify_magic_long "$(get_magic_long "$1")")"
@@ -240,7 +300,8 @@ c2000max_emmc_do_upgrade()
 		echo 'C2000MAX upgrade: a sysupgrade tar image is required.' >&2
 		return 1
 	}
-	c2000max_emmc_upgrade_tar "$1"
+	C2000MAX_TF_UPGRADE_OK=
+	c2000max_tf_upgrade_tar "$1" && [ "$C2000MAX_TF_UPGRADE_OK" = 1 ]
 }
 
 xiaomi_initial_setup()
@@ -388,7 +449,7 @@ platform_do_upgrade() {
 	nradio,c2000-max)
 		CI_KERNPART="kernel"
 		CI_ROOTPART="rootfs"
-		c2000max_emmc_do_upgrade "$1" || {
+		c2000max_tf_do_upgrade "$1" || {
 			echo 'C2000MAX system upgrade stopped; the device will not reboot.' >&2
 			exit 1
 		}
@@ -659,6 +720,15 @@ platform_pre_upgrade() {
 
 	case "$board" in
 	nradio,c2000-max)
+		# Resolve /rom while the full userspace is still available, and export
+		# an immutable SD CID + dev-number guard into the stage2 ramfs shell.
+		# If this cannot prove the running system is on one TF card, stop before
+		# touching any block device.  SPI-NOR (/dev/mtd*) is never accepted.
+		c2000max_prepare_tf_targets || {
+			echo "Unable to bind the active C2000MAX TF card; upgrade aborted." >&2
+			exit 1
+		}
+		echo "C2000MAX upgrade target locked to $C2000MAX_TF_DISK (TF CID $C2000MAX_TF_CID)."
 		# sysupgrade -n discards the overlay, so persist the verified physical
 		# selection in the dedicated GPT U-Boot environment before stage2.
 		# Abort rather than silently boot the new image's external2 default.
