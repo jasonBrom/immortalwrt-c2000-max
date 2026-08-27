@@ -294,14 +294,20 @@ c2000max_tf_upgrade_tar()
 
 c2000max_tf_do_upgrade()
 {
-	local file_type
-	file_type="$(identify_magic_long "$(get_magic_long "$1")")"
-	[ "$file_type" != fit ] || {
-		echo 'C2000MAX upgrade: a sysupgrade tar image is required.' >&2
+	# Keep the proven v36.01 sysupgrade data path.  The only board-specific
+	# change is that the native eMMC helper receives the exact kernel/rootfs
+	# devices of the SD card backing /rom, so the native helper performs no
+	# device discovery and the factory SPI-NOR is never an upgrade target.
+	c2000max_validate_tf_targets || {
+		echo 'C2000MAX upgrade: active TF identity changed; refusing all writes.' >&2
 		return 1
 	}
-	C2000MAX_TF_UPGRADE_OK=
-	c2000max_tf_upgrade_tar "$1" && [ "$C2000MAX_TF_UPGRADE_OK" = 1 ]
+	CI_KERNPART='kernel'
+	CI_ROOTPART='rootfs'
+	EMMC_KERN_DEV="$C2000MAX_TF_KERNEL"
+	EMMC_ROOT_DEV="$C2000MAX_TF_ROOTFS"
+	export CI_KERNPART CI_ROOTPART EMMC_KERN_DEV EMMC_ROOT_DEV
+	emmc_do_upgrade "$1"
 }
 
 xiaomi_initial_setup()

@@ -35,7 +35,11 @@ import (
 	"time"
 )
 
-const version = "1.2.1"
+const (
+	version               = "1.2.2"
+	websocketPingInterval = 20 * time.Second
+	websocketWriteTimeout = 10 * time.Second
+)
 
 //go:embed web
 var embeddedWeb embed.FS
@@ -665,6 +669,10 @@ type wsClient struct {
 func (c *wsClient) writeFrame(opcode byte, payload []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.conn.SetWriteDeadline(time.Now().Add(websocketWriteTimeout)); err != nil {
+		return err
+	}
+	defer c.conn.SetWriteDeadline(time.Time{})
 	header := []byte{0x80 | opcode}
 	switch {
 	case len(payload) < 126:
@@ -978,6 +986,23 @@ func (a *webApp) handleATCommand(client *wsClient, command string) {
 
 func (a *webApp) serveWebSocket(client *wsClient) {
 	defer a.hub.remove(client)
+	keepaliveDone := make(chan struct{})
+	defer close(keepaliveDone)
+	go func() {
+		ticker := time.NewTicker(websocketPingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := client.writeFrame(0x9, []byte("c2000max")); err != nil {
+					_ = client.conn.Close()
+					return
+				}
+			case <-keepaliveDone:
+				return
+			}
+		}
+	}()
 	var fragmented []byte
 	var fragmentOpcode byte
 	for {
@@ -1298,6 +1323,13 @@ func rewriteWebAsset(name string, data []byte, basePath string) []byte {
 		return data
 	}
 	content := string(data)
+	if name == "umi.ec9b4b52.js" {
+		content = strings.ReplaceAll(content,
+			`I()(this,"maxReconnectAttempts",3)`,
+			`I()(this,"maxReconnectAttempts",30)`)
+	} else if name == "index.html" {
+		content = strings.ReplaceAll(content, "/umi.ec9b4b52.js", "/umi.ec9b4b52.js?v=c2000max-mt5700-r7")
+	}
 	content = strings.ReplaceAll(content, "/scripts/loading.js", basePath+"/scripts/loading.js?v=c2000max-mt5700-r6")
 	if basePath != "" {
 		content = strings.ReplaceAll(content, "/5700/", basePath+"/5700/")

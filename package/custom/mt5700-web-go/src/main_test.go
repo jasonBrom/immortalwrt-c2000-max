@@ -101,6 +101,31 @@ func TestInstanceAssetRewrite(t *testing.T) {
 	}
 }
 
+func TestWebSocketStabilityPatch(t *testing.T) {
+	asset, err := embeddedWeb.ReadFile("web/umi.ec9b4b52.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(rewriteWebAsset("umi.ec9b4b52.js", asset, "/modem/internal"))
+	if !strings.Contains(content, `I()(this,"maxReconnectAttempts",30)`) {
+		t.Fatal("vendor WebSocket reconnect budget was not increased")
+	}
+	if strings.Contains(content, `I()(this,"maxReconnectAttempts",3)`) {
+		t.Fatal("three-attempt WebSocket reconnect limit is still active")
+	}
+	html, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewrittenHTML := string(rewriteWebAsset("index.html", html, "/modem/internal"))
+	if !strings.Contains(rewrittenHTML, "umi.ec9b4b52.js?v=c2000max-mt5700-r7") {
+		t.Fatal("updated main bundle is not cache busted")
+	}
+	if websocketPingInterval > 20*time.Second || websocketWriteTimeout > 10*time.Second {
+		t.Fatal("WebSocket keepalive or write timeout is too relaxed")
+	}
+}
+
 func TestNetworkSpeedAssetUsesDSFlowFallback(t *testing.T) {
 	asset, err := embeddedWeb.ReadFile("web/p__CPE__Network__Info__index.30901ff8.async.js")
 	if err != nil {

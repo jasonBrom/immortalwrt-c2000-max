@@ -74,52 +74,45 @@ if c2000max_prepare_tf_targets >/dev/null 2>&1; then
 	fail 'ambiguous /rom TF devices were accepted'
 fi
 
-mkdir -p "$TMPDIR/tree/sysupgrade-test"
-dd if=/dev/urandom of="$TMPDIR/tree/sysupgrade-test/kernel" bs=1 count=70011 status=none
-dd if=/dev/urandom of="$TMPDIR/tree/sysupgrade-test/root" bs=1 count=131089 status=none
-tar -C "$TMPDIR/tree" -cf "$TMPDIR/image.bin" sysupgrade-test
-truncate -s 4194304 "$TMPDIR/kernel.dev"
-truncate -s 4194304 "$TMPDIR/root.dev"
-
-C2000MAX_TF_KERNEL="$TMPDIR/kernel.dev"
-C2000MAX_TF_ROOTFS="$TMPDIR/root.dev"
+native_called=0
+native_image=
+emmc_do_upgrade()
+{
+	native_called=1
+	native_image="$1"
+	[[ "$EMMC_KERN_DEV" == /dev/mmcblk7p5 ]] || return 1
+	[[ "$EMMC_ROOT_DEV" == /dev/mmcblk7p6 ]] || return 1
+}
 c2000max_validate_tf_targets() { return 0; }
-c2000max_tf_sectors() { printf '8192\n'; }
-
-UPGRADE_BACKUP=
-C2000MAX_TF_UPGRADE_OK=
-c2000max_tf_upgrade_tar "$TMPDIR/image.bin" || fail 'valid image was rejected'
-[[ "$C2000MAX_TF_UPGRADE_OK" == 1 ]] || fail 'successful write did not set its completion guard'
-cmp "$TMPDIR/tree/sysupgrade-test/kernel" \
-	<(dd if="$TMPDIR/kernel.dev" bs=1 count=70011 status=none) ||
-	fail 'kernel contents differ after write'
-cmp "$TMPDIR/tree/sysupgrade-test/root" \
-	<(dd if="$TMPDIR/root.dev" bs=1 count=131089 status=none) ||
-	fail 'root contents differ after write'
-
-root_blocks=$(((131089 + 511) / 512))
-root_aligned=$(((root_blocks + 127) & ~127))
-overlay_sum="$(dd if="$TMPDIR/root.dev" bs=512 skip="$root_aligned" count=2048 status=none |
-	od -An -tu1 | awk '{ for (i = 1; i <= NF; i++) sum += $i } END { print sum + 0 }')"
-[[ "$overlay_sum" == 0 ]] || fail 'sysupgrade -n did not invalidate the old overlay'
-[[ "$EMMC_ROOTFS_BLOCKS" == "$root_aligned" ]] || fail 'aligned root block count was not exported'
+C2000MAX_TF_KERNEL=/dev/mmcblk7p5
+C2000MAX_TF_ROOTFS=/dev/mmcblk7p6
+c2000max_tf_do_upgrade "$TMPDIR/image.bin" || fail 'native v36.01 upgrade wrapper failed'
+[[ "$native_called" == 1 ]] || fail 'native emmc_do_upgrade was not called'
+[[ "$native_image" == "$TMPDIR/image.bin" ]] || fail 'native upgrade received the wrong image'
 
 c2000max_validate_tf_targets() { return 1; }
-if c2000max_tf_upgrade_tar "$TMPDIR/image.bin" >/dev/null 2>&1; then
+native_called=0
+if c2000max_tf_do_upgrade "$TMPDIR/image.bin" >/dev/null 2>&1; then
 	fail 'an unbound TF target was silently accepted'
 fi
+[[ "$native_called" == 0 ]] || fail 'native upgrade ran after TF validation failed'
 
 grep -Fq 'c2000max_tf_do_upgrade "$1" ||' "$PLATFORM" ||
 	fail 'C2000MAX upgrade failures do not stop stage2'
 grep -Fq 'c2000max_prepare_tf_targets ||' "$PLATFORM" ||
 	fail 'the live TF is not pinned before entering ramfs'
-grep -Fq 'C2000MAX_TF_UPGRADE_OK=1' "$PLATFORM" ||
-	fail 'the successful-write completion guard is missing'
-grep -Fq "RAMFS_COPY_BIN='fitblk fit_check_sign sha256sum'" "$PLATFORM" ||
-	fail 'readback hashing is not present in upgrade ramfs'
+grep -Fq 'emmc_do_upgrade "$1"' "$PLATFORM" ||
+	fail 'the v36.01 native emmc_do_upgrade data path was not restored'
+wrapper="$(sed -n '/^c2000max_tf_do_upgrade()/,/^}/p' "$PLATFORM")"
+grep -Fq 'EMMC_KERN_DEV="$C2000MAX_TF_KERNEL"' <<<"$wrapper" ||
+	fail 'native upgrade kernel target is not bound to the active TF'
+grep -Fq 'EMMC_ROOT_DEV="$C2000MAX_TF_ROOTFS"' <<<"$wrapper" ||
+	fail 'native upgrade root target is not bound to the active TF'
+! grep -Fq 'c2000max_tf_upgrade_tar' <<<"$wrapper" ||
+	fail 'the custom tar writer is still used by the BIN upgrade path'
 
 c2000max_code="$(sed -n '/^# C2000MAX boots this image/,/^xiaomi_initial_setup()/p' "$PLATFORM")"
 ! grep -Eq 'find_mmc_part|/dev/mtd|mtd(write| erase)' <<<"$c2000max_code" ||
 	fail 'C2000MAX TF upgrade code can reach an unbound MMC or MTD target'
 
-echo 'C2000-MAX TF-only verified sysupgrade tests passed'
+echo 'C2000-MAX TF-bound v36.01 native sysupgrade tests passed'

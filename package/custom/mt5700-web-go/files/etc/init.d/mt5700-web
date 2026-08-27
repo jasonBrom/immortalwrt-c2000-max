@@ -5,7 +5,10 @@ STOP=10
 USE_PROCD=1
 
 service_triggers() {
-	procd_add_reload_trigger "mt5700-web" "qmodem"
+	# The serial backend rediscovers QModem for every command.  Reloading this
+	# service on QModem runtime commits only tears down healthy WebSockets and
+	# is unnecessary; restart solely for panel configuration changes.
+	procd_add_reload_trigger "mt5700-web"
 }
 
 migrate_legacy_instance() {

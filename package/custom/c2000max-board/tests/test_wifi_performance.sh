@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$ROOT/files/usr/sbin/c2000max-wifi-performance"
 INIT="$ROOT/files/etc/init.d/c2000max-wifi-performance"
+DEFAULT_CONFIG="$ROOT/files/etc/config/c2000max"
 WIRELESS_VIEW="$ROOT/../../mtk/applications/luci-app-mtwifi-cfg/root/usr/share/luci-app-mtwifi-cfg/wireless-mtk.js"
 RPC="$ROOT/../../mtk/applications/luci-app-mtwifi-cfg/root/usr/share/rpcd/ucode/luci.mtwifi"
 SYSTEM_VIEW="$ROOT/../../../feeds/luci/modules/luci-mod-system/htdocs/luci-static/resources/view/system/system.js"
@@ -116,6 +117,8 @@ grep -qx 'PciL1ss=0' "$PROFILE" || fail 'failed switch did not roll the profile 
 grep -qx 'LpOption=2:0' "$PROFILE" || fail 'failed switch did not roll LP profile back'
 
 grep -Fq 'START=17' "$INIT" || fail 'profile is not applied before network startup'
+grep -A2 "config wifi_performance 'wifi_performance'" "$DEFAULT_CONFIG" |
+	grep -Fq "option enabled '1'" || fail 'clean installs do not default to high-performance Wi-Fi'
 grep -Fq 'getWifiPerformanceState' "$RPC" || fail 'status RPC is missing'
 grep -Fq 'setWifiPerformanceState' "$RPC" || fail 'toggle RPC is missing'
 grep -Fq 'setWifiPerformanceState' "$SYSTEM_ACL" || fail 'system page toggle RPC permission is missing'

@@ -31,18 +31,25 @@ fi
 grep -Fq 'rm -rf /etc/netbird /var/lib/netbird' "$DEFAULTS" ||
 	fail 'preserved-upgrade NetBird state cleanup is missing'
 
-if grep -Eq '^CONFIG_(DEFAULT_)?(PACKAGE_)?(haproxy|smartd|collectd|collectd-mod-[^=]+|luci-app-statistics|luci-i18n-statistics-zh-cn)=y$' "$CONFIG" "$DEFCONFIG"; then
-	fail 'unused resident monitoring/proxy services are still selected'
+if grep -Eq '^CONFIG_(DEFAULT_)?(PACKAGE_)?(haproxy|smartd)=y$' "$CONFIG" "$DEFCONFIG"; then
+	fail 'unused resident proxy/disk-monitoring services are still selected'
 fi
 if grep -Eq '^CONFIG_PACKAGE_luci-app-passwall2?_INCLUDE_Haproxy=y$' "$CONFIG" "$DEFCONFIG"; then
 	fail 'PassWall still pulls HAProxy back into the image'
 fi
-if sed -n '/define Device\/nradio_c2000-max/,/endef/p' "$PROFILE" |
-	grep -Eq 'luci-app-statistics|luci-i18n-statistics|collectd-mod-'; then
-	fail 'C2000MAX profile still pulls in collectd/LuCI statistics'
-fi
-grep -Fq 'retired_memory_service in haproxy collectd luci_statistics smartd' "$DEFAULTS" ||
+for required_statistics in \
+	CONFIG_PACKAGE_luci-app-statistics=y \
+	CONFIG_PACKAGE_luci-i18n-statistics-zh-cn=y \
+	CONFIG_PACKAGE_collectd=y \
+	CONFIG_PACKAGE_collectd-mod-rrdtool=y; do
+	grep -Fqx "$required_statistics" "$CONFIG" ||
+		fail "Statistics support is incomplete: $required_statistics"
+done
+grep -Fq 'retired_memory_service in haproxy smartd' "$DEFAULTS" ||
 	fail 'preserved-upgrade memory-service cleanup is missing'
+if grep -Eq 'retired_memory_service in .*collectd|/etc/rc.d/\*collectd|/etc/rc.d/\*luci_statistics' "$DEFAULTS"; then
+	fail 'Statistics services are still disabled during first boot'
+fi
 [ -s "$TRACE_PATCH" ] || fail 'final kernel trace_printk removal patch is missing'
 grep -Eq '^\+.*pr_debug\(' "$TRACE_PATCH" ||
 	fail 'final kernel patch does not replace debug tracing with pr_debug'
