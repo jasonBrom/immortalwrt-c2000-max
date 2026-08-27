@@ -294,6 +294,8 @@ c2000max_tf_upgrade_tar()
 
 c2000max_tf_do_upgrade()
 {
+	local root_sectors root_blocks wipe_blocks
+
 	# Keep the proven v36.01 sysupgrade data path.  The only board-specific
 	# change is that the native eMMC helper receives the exact kernel/rootfs
 	# devices of the SD card backing /rom, so the native helper performs no
@@ -307,7 +309,34 @@ c2000max_tf_do_upgrade()
 	EMMC_KERN_DEV="$C2000MAX_TF_KERNEL"
 	EMMC_ROOT_DEV="$C2000MAX_TF_ROOTFS"
 	export CI_KERNPART CI_ROOTPART EMMC_KERN_DEV EMMC_ROOT_DEV
-	emmc_do_upgrade "$1"
+	emmc_do_upgrade "$1" || return 1
+
+	# The native helper historically erased only 4 KiB at the new overlay
+	# boundary for sysupgrade -n. F2FS keeps a second superblock beyond that
+	# range, allowing the old overlay to be discovered again. Validate the
+	# native helper's aligned boundary and clear up to 1 MiB so both copies and
+	# stale metadata are gone, while never crossing the GPT rootfs partition.
+	case "${EMMC_ROOTFS_BLOCKS:-}" in
+		''|*[!0-9]*|0) return 1 ;;
+	esac
+	root_blocks="$EMMC_ROOTFS_BLOCKS"
+	root_sectors="$(c2000max_tf_sectors "$EMMC_ROOT_DEV")"
+	case "$root_sectors" in
+		''|*[!0-9]*|0) return 1 ;;
+	esac
+	[ "$root_blocks" -lt "$root_sectors" ] || return 1
+
+	if [ -z "${UPGRADE_BACKUP:-}" ]; then
+		wipe_blocks=$((root_sectors - root_blocks))
+		[ "$wipe_blocks" -gt 2048 ] && wipe_blocks=2048
+		[ "$wipe_blocks" -ge 8 ] || return 1
+		dd if=/dev/zero of="$EMMC_ROOT_DEV" bs=512 \
+			seek="$root_blocks" count="$wipe_blocks" conv=notrunc || return 1
+		sync
+	fi
+
+	export C2000MAX_TF_UPGRADE_OK=1
+	return 0
 }
 
 xiaomi_initial_setup()
@@ -735,13 +764,11 @@ platform_pre_upgrade() {
 			exit 1
 		}
 		echo "C2000MAX upgrade target locked to $C2000MAX_TF_DISK (TF CID $C2000MAX_TF_CID)."
-		# sysupgrade -n discards the overlay, so persist the verified physical
-		# selection in the dedicated GPT U-Boot environment before stage2.
-		# Abort rather than silently boot the new image's external2 default.
-		/usr/sbin/c2000max-sim persist || {
-			echo "Unable to preserve the C2000MAX SIM slot; upgrade aborted." >&2
-			exit 1
-		}
+		# Preserve the physical SIM selection when its dedicated TF environment
+		# is available. This auxiliary record must never veto a firmware upgrade:
+		# the validated TF kernel/rootfs targets above are independent of it.
+		/usr/sbin/c2000max-sim persist ||
+			echo "Warning: unable to preserve the C2000MAX SIM slot; firmware upgrade will continue." >&2
 		;;
 	asus,rt-ax52|\
 	asus,rt-ax57m|\

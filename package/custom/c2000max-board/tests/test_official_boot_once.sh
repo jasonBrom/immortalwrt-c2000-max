@@ -27,15 +27,26 @@ grep -Fq 'fw_setenv -c "$ENV_CONFIG" -s "$ENV_BATCH"' "$HELPER" ||
 if grep -Fq '/etc/fw_env.config' "$HELPER"; then
 	fail 'helper can overwrite the SD-card SIM environment'
 fi
-if grep -Eq 'env_get bootcmd|setenv bootcmd|c2000max_bootcmd_saved' "$HELPER"; then
-	fail 'helper still relies on bootcmd, which the vendor mtkautoboot path ignores'
+grep -Fq "BOOTCMD_VAR='bootcmd'" "$HELPER" &&
+grep -Fq "BOOTMENU_DEFAULT_VAR='bootmenu_default'" "$HELPER" &&
+grep -Fq "BOOTMENU_DELAY_VAR='bootmenu_delay'" "$HELPER" &&
+grep -Fq "MENU_EXIT_INDEX='8'" "$HELPER" &&
+grep -Fq "SOURCE_VAR='boot_from_sd'" "$HELPER" ||
+	fail 'helper does not select the verified MediaTek menu exit and bootcmd path'
+grep -Fq "ONE_SHOT_BOOTCMD='setenv bootcmd; setenv bootmenu_default; setenv bootmenu_delay; setenv boot_from_sd 1; if saveenv; then setenv boot_from_sd 0; else setenv boot_from_sd 1; fi; mtkboardboot'" "$HELPER" ||
+	fail 'one-shot bootcmd does not persist TF before its RAM-only factory boot'
+grep -Fq "OBSOLETE_PREBOOT_VALUE='setenv preboot; setenv boot_from_sd 1; saveenv; setenv boot_from_sd 0'" "$HELPER" ||
+	fail 'helper cannot safely remove the unsupported preboot scheme'
+if grep -Fq 'ONE_SHOT_VALUE=' "$HELPER"; then
+	fail 'obsolete environment bootmenu injection is still active'
 fi
-grep -Fq "MENU_VAR='bootmenu_0'" "$HELPER" &&
-grep -Fq "SOURCE_VAR='boot_from_sd'" "$HELPER" &&
-grep -Fq 'setenv boot_from_sd 1; setenv bootmenu_0; saveenv; setenv boot_from_sd 0; mtkboardboot' "$HELPER" ||
-	fail 'one-shot menu does not persist TF boot before its RAM-only factory boot'
-grep -Fq '检测到自定义 bootmenu_0' "$HELPER" ||
-	fail 'helper can overwrite a user-defined vendor boot menu'
+grep -Fq "LEGACY_MENU_VAR='bootmenu_0'" "$HELPER" &&
+grep -Fq "LEGACY_MENU_VALUE='Startup system (one-time factory)=" "$HELPER" ||
+	fail 'helper cannot identify the exact stale bootmenu marker from older builds'
+grep -Fq '检测到自定义 bootcmd、启动菜单或 preboot' "$HELPER" ||
+	fail 'helper can overwrite a user-defined bootcmd, preboot, or vendor boot menu'
+grep -Fq '[ "$source" = 1 ] || return 1' "$HELPER" ||
+	fail 'helper can arm while persistent TF boot is not selected'
 
 grep -Fq 'official_boot_status' "$RPC" && grep -Fq 'official_boot_once' "$RPC" ||
 	fail 'official boot RPC methods are missing'
@@ -54,4 +65,4 @@ if command -v node >/dev/null 2>&1 && [ -f "$VIEW" ]; then
 	node --check "$VIEW" >/dev/null
 fi
 
-echo 'C2000MAX verified one-shot factory boot tests passed'
+echo 'C2000MAX guarded MediaTek-menu-exit one-shot factory boot tests passed'

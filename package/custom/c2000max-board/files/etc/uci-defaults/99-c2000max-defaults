@@ -17,20 +17,10 @@ uci -q set system.@system[0].zonename='Asia/Shanghai'
 # Preserve the last successfully selected physical SIM slot. Older images may
 # have an incomplete section; normalize it before the early boot restore runs.
 [ -n "$(uci -q get c2000max.sim)" ] || uci -q set c2000max.sim='sim'
-if ! grep -Eq '^/dev/mmcblk[0-9]+p[0-9]+[[:space:]]+0x0[[:space:]]+0x80000([[:space:]]|$)' \
-	/etc/fw_env.config 2>/dev/null; then
-	env_dev="$(find_mmc_part u-boot-env 2>/dev/null)"
-	case "$env_dev" in
-		/dev/mmcblk[0-9]p[0-9]*|/dev/mmcblk[0-9][0-9]p[0-9]*)
-			env_block="${env_dev##*/}"
-			if [ "$(cat "/sys/class/block/$env_block/size" 2>/dev/null)" = 1024 ]; then
-				umask 077
-				printf '%s 0x0 0x80000\n' "$env_dev" > /etc/fw_env.config
-				chmod 0600 /etc/fw_env.config
-			fi
-			;;
-	esac
-fi
+# The SPI-NOR environment exposed for diagnostics has the same GPT label as
+# the TF SIM-state partition. Resolve only the TF card which backs /rom;
+# never use the global find_mmc_part helper here.
+/usr/sbin/c2000max-sim ensure-env-config >/dev/null 2>&1 || true
 persisted_sim_slot="$(fw_printenv -n c2000max_sim_slot 2>/dev/null)"
 case "$persisted_sim_slot" in
 	internal|external1|external2)

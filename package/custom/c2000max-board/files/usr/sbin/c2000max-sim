@@ -185,24 +185,66 @@ normalize_slot() {
 }
 
 ensure_fw_env_config() {
-	local dev block size tmp
-	[ "${C2000MAX_SIM_LIBRARY_ONLY:-0}" != 1 ] || return 0
-	if [ -s "$FW_ENV_CONFIG" ] &&
-	   grep -Eq '^/dev/mmcblk[0-9]+p[0-9]+[[:space:]]+0x0[[:space:]]+0x80000([[:space:]]|$)' \
-		"$FW_ENV_CONFIG"; then
+	local dev configured tmp
+	if [ "${C2000MAX_SIM_LIBRARY_ONLY:-0}" = 1 ] &&
+	   [ "${C2000MAX_SIM_TEST_ENV_DISCOVERY:-0}" != 1 ]; then
 		return 0
 	fi
-	command -v find_mmc_part >/dev/null 2>&1 || return 1
-	dev="$(find_mmc_part u-boot-env 2>/dev/null)"
-	case "$dev" in /dev/mmcblk[0-9]p[0-9]*|/dev/mmcblk[0-9][0-9]p[0-9]*) ;; *) return 1 ;; esac
-	block="${dev##*/}"
-	size="$(cat "/sys/class/block/$block/size" 2>/dev/null)"
-	[ "$size" = 1024 ] || return 1
+	dev="$(find_tf_env_partition)" || return 1
+	configured="$(awk '$2 == "0x0" && $3 == "0x80000" { print $1; exit }' \
+		"$FW_ENV_CONFIG" 2>/dev/null)"
+	[ "$configured" != "$dev" ] || return 0
 	tmp="$FW_ENV_CONFIG.new.$$"
 	umask 077
-	printf '%s 0x0 0x80000\n' "$dev" > "$tmp" || return 1
-	chmod 0600 "$tmp" || return 1
-	mv -f "$tmp" "$FW_ENV_CONFIG"
+	printf '%s 0x0 0x80000\n' "$dev" > "$tmp" || {
+		rm -f "$tmp"
+		return 1
+	}
+	chmod 0600 "$tmp" && mv -f "$tmp" "$FW_ENV_CONFIG" || {
+		rm -f "$tmp"
+		return 1
+	}
+}
+
+c2000max_sim_block_info() {
+	block info 2>/dev/null
+}
+
+resolve_tf_disk() {
+	local sys_class="${C2000MAX_SYS_CLASS_BLOCK:-/sys/class/block}"
+	local root_candidates disk_node type
+	if [ -n "${C2000MAX_TF_DISK:-}" ]; then
+		disk_node="${C2000MAX_TF_DISK##*/}"
+	else
+		root_candidates="$(c2000max_sim_block_info |
+			sed -n 's#^/dev/\(mmcblk[0-9][0-9]*\)p[0-9][0-9]*:.*MOUNT="/rom".*#\1#p')"
+		set -- $root_candidates
+		[ "$#" -eq 1 ] || return 1
+		disk_node="$1"
+	fi
+	printf '%s\n' "$disk_node" | grep -Eq '^mmcblk[0-9]+$' || return 1
+	type="$(cat "$sys_class/$disk_node/device/type" 2>/dev/null)"
+	[ "$type" = SD ] || return 1
+	printf '/dev/%s\n' "$disk_node"
+}
+
+find_tf_env_partition() {
+	local sys_class="${C2000MAX_SYS_CLASS_BLOCK:-/sys/class/block}"
+	local disk disk_node candidate node found= count=0 size
+	disk="$(resolve_tf_disk)" || return 1
+	disk_node="${disk##*/}"
+	for candidate in "$sys_class"/"${disk_node}"p*; do
+		[ -r "$candidate/uevent" ] || continue
+		grep -qx 'PARTNAME=u-boot-env' "$candidate/uevent" || continue
+		node="${candidate##*/}"
+		printf '%s\n' "$node" | grep -Eq "^${disk_node}p[0-9]+$" || continue
+		size="$(cat "$candidate/size" 2>/dev/null)"
+		[ "$size" = 1024 ] || continue
+		found="/dev/$node"
+		count=$((count + 1))
+	done
+	[ "$count" -eq 1 ] || return 1
+	printf '%s\n' "$found"
 }
 
 read_persisted_slot() {
@@ -885,6 +927,9 @@ case "$command" in
 		}
 		persist_physical_slot "$slot" || exit 1
 		;;
+	ensure-env-config)
+		ensure_fw_env_config || exit 1
+		;;
 	apply|switch)
 		slot="${2:-$(uci -q get c2000max.sim.slot)}"
 		# BusyBox lock(1) takes no timeout argument. Its -w option merely waits
@@ -950,7 +995,7 @@ case "$command" in
 		fi
 		;;
 	*)
-		echo "Usage: $0 {boot-prepare|boot-restore|persist [internal|external1|external2]|status|switch [internal|external1|external2]|force [external1|external2]|reset|power-off}" >&2
+		echo "Usage: $0 {boot-prepare|boot-restore|persist [internal|external1|external2]|ensure-env-config|status|switch [internal|external1|external2]|force [external1|external2]|reset|power-off}" >&2
 		exit 2
 		;;
 esac

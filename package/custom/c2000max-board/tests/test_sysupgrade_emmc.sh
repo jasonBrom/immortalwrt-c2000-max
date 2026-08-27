@@ -76,19 +76,49 @@ fi
 
 native_called=0
 native_image=
+native_should_fail=0
+dd_log="$TMPDIR/dd.log"
+: > "$dd_log"
 emmc_do_upgrade()
 {
 	native_called=1
 	native_image="$1"
 	[[ "$EMMC_KERN_DEV" == /dev/mmcblk7p5 ]] || return 1
 	[[ "$EMMC_ROOT_DEV" == /dev/mmcblk7p6 ]] || return 1
+	[[ "$native_should_fail" == 0 ]] || return 1
+	EMMC_ROOTFS_BLOCKS=128
+	EMMC_KERNEL_BLOCKS=64
+	export EMMC_ROOTFS_BLOCKS EMMC_KERNEL_BLOCKS
+}
+dd()
+{
+	printf '%s\n' "$*" >> "$dd_log"
 }
 c2000max_validate_tf_targets() { return 0; }
 C2000MAX_TF_KERNEL=/dev/mmcblk7p5
 C2000MAX_TF_ROOTFS=/dev/mmcblk7p6
+UPGRADE_BACKUP=
 c2000max_tf_do_upgrade "$TMPDIR/image.bin" || fail 'native v36.01 upgrade wrapper failed'
 [[ "$native_called" == 1 ]] || fail 'native emmc_do_upgrade was not called'
 [[ "$native_image" == "$TMPDIR/image.bin" ]] || fail 'native upgrade received the wrong image'
+grep -Fq 'if=/dev/zero of=/dev/mmcblk7p6 bs=512 seek=128 count=2048 conv=notrunc' "$dd_log" ||
+	fail 'sysupgrade -n did not clear a full MiB at the aligned overlay boundary'
+
+# Preserving configuration must leave the backup area for emmc_copy_config.
+: > "$dd_log"
+UPGRADE_BACKUP="$TMPDIR/backup.tgz"
+c2000max_tf_do_upgrade "$TMPDIR/image.bin" || fail 'preserved native upgrade wrapper failed'
+[[ ! -s "$dd_log" ]] || fail 'preserved upgrade erased the overlay backup area'
+
+# A native writer failure must stop stage2 before the extra overlay reset.
+: > "$dd_log"
+UPGRADE_BACKUP=
+native_should_fail=1
+if c2000max_tf_do_upgrade "$TMPDIR/image.bin" >/dev/null 2>&1; then
+	fail 'native writer failure was reported as success'
+fi
+[[ ! -s "$dd_log" ]] || fail 'overlay reset ran after native writer failure'
+native_should_fail=0
 
 c2000max_validate_tf_targets() { return 1; }
 native_called=0
@@ -110,6 +140,16 @@ grep -Fq 'EMMC_ROOT_DEV="$C2000MAX_TF_ROOTFS"' <<<"$wrapper" ||
 	fail 'native upgrade root target is not bound to the active TF'
 ! grep -Fq 'c2000max_tf_upgrade_tar' <<<"$wrapper" ||
 	fail 'the custom tar writer is still used by the BIN upgrade path'
+grep -Fq 'count="$wipe_blocks"' <<<"$wrapper" ||
+	fail 'the native wrapper does not clear both F2FS superblocks for -n'
+
+pre_upgrade="$(sed -n '/^platform_pre_upgrade()/,$p' "$PLATFORM")"
+grep -Fq '/usr/sbin/c2000max-sim persist ||' <<<"$pre_upgrade" ||
+	fail 'the SIM slot is no longer persisted on a best-effort basis'
+if grep -A3 -F '/usr/sbin/c2000max-sim persist ||' <<<"$pre_upgrade" |
+	grep -Fq 'exit 1'; then
+	fail 'an auxiliary SIM persistence failure still aborts firmware upgrade'
+fi
 
 c2000max_code="$(sed -n '/^# C2000MAX boots this image/,/^xiaomi_initial_setup()/p' "$PLATFORM")"
 ! grep -Eq 'find_mmc_part|/dev/mtd|mtd(write| erase)' <<<"$c2000max_code" ||

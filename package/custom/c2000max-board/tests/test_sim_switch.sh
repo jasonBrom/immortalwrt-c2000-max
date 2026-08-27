@@ -55,6 +55,34 @@ export C2000MAX_SIM_LIBRARY_ONLY=1
 # shellcheck source=/dev/null
 source "$SCRIPT"
 
+# The factory SPI environment and the TF SIM-state partition deliberately use
+# the same label. The resolver must remain on the SD card backing /rom even if
+# a legacy global helper would select SPI first.
+ENV_SYS="$STATE_DIR/env-sys"
+mkdir -p \
+	"$ENV_SYS/mmcblk7/device" "$ENV_SYS/mmcblk7p2" \
+	"$ENV_SYS/mmcblk8/device" "$ENV_SYS/mmcblk8p2"
+printf 'SD\n' > "$ENV_SYS/mmcblk7/device/type"
+printf 'PARTNAME=u-boot-env\n' > "$ENV_SYS/mmcblk7p2/uevent"
+printf '1024\n' > "$ENV_SYS/mmcblk7p2/size"
+printf 'SD\n' > "$ENV_SYS/mmcblk8/device/type"
+printf 'PARTNAME=u-boot-env\n' > "$ENV_SYS/mmcblk8p2/uevent"
+printf '1024\n' > "$ENV_SYS/mmcblk8p2/size"
+C2000MAX_SYS_CLASS_BLOCK="$ENV_SYS"
+C2000MAX_SIM_TEST_ENV_DISCOVERY=1
+FW_ENV_CONFIG="$STATE_DIR/fw_env.config"
+c2000max_sim_block_info() {
+	printf '/dev/mmcblk8p6: TYPE="squashfs"\n'
+	printf '/dev/mmcblk7p6: TYPE="squashfs" MOUNT="/rom"\n'
+}
+find_mmc_part() {
+	printf '/dev/mtd0\n'
+}
+ensure_fw_env_config || fail_test 'TF U-Boot environment discovery failed'
+assert_eq '/dev/mmcblk7p2 0x0 0x80000' "$(cat "$FW_ENV_CONFIG")" \
+	'TF environment must not collide with same-named SPI partition'
+unset C2000MAX_SIM_TEST_ENV_DISCOVERY C2000MAX_SYS_CLASS_BLOCK
+
 log() {
 	printf '%s\n' "$*" >> "$STATE_DIR/log"
 }
@@ -362,8 +390,11 @@ grep -Fq 'nradio,c2000-max' "$QMODEM_REBOOT" ||
 DEFAULTS="$ROOT/files/etc/uci-defaults/99-c2000max-defaults"
 grep -Fq 'fw_printenv -n c2000max_sim_slot' "$DEFAULTS" ||
 	fail_test "first boot defaults do not import the persistent slot"
-grep -Fq 'find_mmc_part u-boot-env' "$DEFAULTS" ||
-	fail_test "first boot does not repair an empty fw_env.config"
+grep -Fq '/usr/sbin/c2000max-sim ensure-env-config' "$DEFAULTS" ||
+	fail_test "first boot does not repair an empty fw_env.config through the TF-bound resolver"
+if grep -Fq 'find_mmc_part u-boot-env' "$DEFAULTS"; then
+	fail_test "first boot can still confuse the SPI and TF u-boot-env labels"
+fi
 grep -Fq '[ "$size" = 1024 ]' "$SCRIPT" ||
 	fail_test "runtime fw_env repair does not verify the 512 KiB partition"
 PLATFORM="$ROOT/../../../target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh"
