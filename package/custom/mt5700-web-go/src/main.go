@@ -36,12 +36,15 @@ import (
 )
 
 const (
-	version               = "1.2.2"
+	version               = "1.3.0"
 	websocketPingInterval = 20 * time.Second
 	websocketWriteTimeout = 10 * time.Second
 )
 
-//go:embed web
+// Keep the proven vendor interface and the new upstream Semi Design build in
+// the same binary. UCI selects which tree is served for each modem instance.
+//
+//go:embed web web-modern
 var embeddedWeb embed.FS
 
 type modemInfo struct {
@@ -151,6 +154,15 @@ func optionDuration(options map[string]string, name string, fallback time.Durati
 		return fallback
 	}
 	return parsed
+}
+
+func normalizeUIVariant(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "legacy", "old", "classic":
+		return "legacy"
+	default:
+		return "modern"
+	}
 }
 
 func validInstancePath(value string) bool {
@@ -795,6 +807,7 @@ type serverConfig struct {
 	ID            string
 	Name          string
 	BasePath      string
+	UIVariant     string
 	Listen        string
 	Transport     string
 	Section       string
@@ -1099,11 +1112,17 @@ func (a *webApp) wsInfo(w http.ResponseWriter, r *http.Request) {
 
 func (a *webApp) configJSON(w http.ResponseWriter, r *http.Request) {
 	host := hostWithoutPort(r.Host)
+	displayHost := host
+	if strings.Contains(host, ":") {
+		displayHost = "[" + host + "]"
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"at":     map[string]any{"host": host, "port": listenPort(a.config.Listen)},
 		"status": "true", "require_auth": false, "instance": a.config.ID,
+		"ui_variant": a.config.UIVariant,
+		"ws_url":     fmt.Sprintf("ws://%s:%d%s/ws", displayHost, listenPort(a.config.Listen), a.config.BasePath),
 	})
 }
 
@@ -1113,7 +1132,8 @@ func (a *webApp) health(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok": true, "service": "mt5700-web-go", "version": version,
 		"id": a.config.ID, "name": a.config.Name, "path": a.config.BasePath,
-		"transport": a.config.Transport, "target": a.backend.Target(),
+		"ui_variant": a.config.UIVariant,
+		"transport":  a.config.Transport, "target": a.backend.Target(),
 		"model": a.config.Model, "manufacturer": a.config.Manufacturer,
 		"supported":         mt5700Model(a.config.Model, a.config.Manufacturer),
 		"websocket_clients": a.hub.count(),
@@ -1367,22 +1387,54 @@ func (a *webApp) serveWebAsset(w http.ResponseWriter, r *http.Request, name stri
 			name += "/index.html"
 		}
 	}
-	data, err := fs.ReadFile(embeddedWeb, "web/"+name)
+	variant := normalizeUIVariant(a.config.UIVariant)
+	assetRoot := "web-modern"
+	if variant == "legacy" {
+		assetRoot = "web"
+	}
+	data, err := fs.ReadFile(embeddedWeb, assetRoot+"/"+name)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	data = rewriteWebAsset(name, data, a.config.BasePath)
+	if variant == "legacy" {
+		data = rewriteWebAsset(name, data, a.config.BasePath)
+	}
 	if contentType := contentTypeFor(name); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
-	if strings.HasSuffix(name, ".html") || name == networkInfoAsset || name == "scripts/loading.js" {
+	if strings.HasSuffix(name, ".html") || (variant == "legacy" && (name == networkInfoAsset || name == "scripts/loading.js")) {
 		w.Header().Set("Cache-Control", "no-store")
 	} else {
 		w.Header().Set("Cache-Control", "public, max-age=604800")
 	}
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	_, _ = w.Write(data)
+}
+
+func modernLegacyRedirect(requestPath, basePath string) (string, bool) {
+	route := strings.Trim(strings.TrimPrefix(requestPath, "/5700"), "/")
+	switch route {
+	case "network", "network/info":
+		route = "/network/info"
+	case "network/setting":
+		route = "/network/setting"
+	case "network/dial":
+		route = "/network/dial"
+	case "system", "system/info":
+		route = "/system/info"
+	case "system/upgrade":
+		route = "/system/upgrade"
+	case "sms", "sms/center":
+		route = "/sms/center"
+	case "sms/settings":
+		route = "/sms/settings"
+	case "at":
+		route = "/at"
+	default:
+		return "", false
+	}
+	return basePath + "/5700/#" + route, true
 }
 
 func (a *webApp) clearLog(w http.ResponseWriter, r *http.Request) {
@@ -1408,6 +1460,12 @@ func (a *webApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 		}
 		return
+	}
+	if normalizeUIVariant(a.config.UIVariant) == "modern" {
+		if target, ok := modernLegacyRedirect(r.URL.Path, a.config.BasePath); ok {
+			http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+			return
+		}
 	}
 	switch r.URL.Path {
 	case "/":
@@ -1441,7 +1499,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype
 <title>MT5700 模组管理地址</title><style>
 :root{color-scheme:light dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{margin:0;background:#f3f5f7;color:#1f2937}.wrap{max-width:980px;margin:0 auto;padding:32px 18px}.head{margin-bottom:22px}.head h1{margin:0 0 8px;font-size:28px}.head p{margin:0;color:#64748b}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}.card{padding:20px;border:1px solid #dbe3ea;border-radius:14px;background:#fff;box-shadow:0 8px 28px rgba(15,23,42,.06)}.card h2{margin:0 0 8px;font-size:18px}.meta{margin:6px 0;color:#64748b;font-size:14px;overflow-wrap:anywhere}.open{display:inline-block;margin-top:12px;padding:9px 14px;border-radius:8px;background:#168ab0;color:#fff;text-decoration:none;font-weight:700}.empty{padding:24px;border:1px dashed #94a3b8;border-radius:12px}.foot{margin-top:20px;color:#64748b;font-size:13px}@media(prefers-color-scheme:dark){body{background:#0f172a;color:#e5e7eb}.card{background:#111827;border-color:#334155}.head p,.meta,.foot{color:#94a3b8}}
 </style></head><body><main class="wrap"><div class="head"><h1>MT5700 模组控制面板</h1><p>请选择要管理的模组；每个路径对应独立的串口或网络 AT 后端。</p></div>
-{{if .Instances}}<div class="grid">{{range .Instances}}<section class="card"><h2>{{.Name}}</h2><div class="meta">实例：{{.ID}}</div><div class="meta">连接：{{.Transport}} · {{.Target}}</div><div class="meta">地址：{{.URL}}</div><a class="open" href="{{.Path}}/5700/">打开控制面板</a></section>{{end}}</div>{{else}}<div class="empty">当前没有启用的模组实例，请在 LuCI 的“MT5700 控制面板”中添加并启用。</div>{{end}}
+{{if .Instances}}<div class="grid">{{range .Instances}}<section class="card"><h2>{{.Name}}</h2><div class="meta">实例：{{.ID}}</div><div class="meta">界面：{{if eq .UIVariant "legacy"}}旧版兼容界面{{else}}新版 Semi Design 界面{{end}}</div><div class="meta">连接：{{.Transport}} · {{.Target}}</div><div class="meta">地址：{{.URL}}</div><a class="open" href="{{.Path}}/5700/">打开控制面板</a></section>{{end}}</div>{{else}}<div class="empty">当前没有启用的模组实例，请在 LuCI 的“MT5700 控制面板”中添加并启用。</div>{{end}}
 <div class="foot">MT5700 Web {{.Version}}</div></main></body></html>`))
 
 type dashboardInstance struct {
@@ -1451,6 +1509,7 @@ type dashboardInstance struct {
 	Target    string
 	Path      string
 	URL       string
+	UIVariant string
 }
 
 func requestBaseURL(r *http.Request) string {
@@ -1469,6 +1528,7 @@ func (m *multiWebApp) dashboard(w http.ResponseWriter, r *http.Request) {
 			ID: app.config.ID, Name: app.config.Name,
 			Transport: app.config.Transport, Target: app.backend.Target(),
 			Path: app.config.BasePath, URL: baseURL + app.config.BasePath + "/5700/",
+			UIVariant: app.config.UIVariant,
 		})
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1482,6 +1542,7 @@ func (m *multiWebApp) health(w http.ResponseWriter) {
 		instances = append(instances, map[string]any{
 			"id": app.config.ID, "name": app.config.Name, "path": app.config.BasePath,
 			"transport": app.config.Transport, "target": app.backend.Target(),
+			"ui_variant": app.config.UIVariant,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -1644,6 +1705,7 @@ func loadInstanceConfigs(packageName string, defaults serverConfig) ([]serverCon
 			config.Name = section.Name
 		}
 		config.BasePath = "/modem/" + instancePath
+		config.UIVariant = normalizeUIVariant(section.Options["ui_variant"])
 		config.Transport = strings.ToLower(strings.TrimSpace(section.Options["transport"]))
 		if config.Transport == "" {
 			config.Transport = "serial"
@@ -1777,7 +1839,8 @@ func main() {
 
 	defaults := serverConfig{
 		ID: "internal", Name: "内置 MT5700", BasePath: "/modem/internal",
-		Listen: *listen, Transport: *transport, Section: *section,
+		UIVariant: "modern",
+		Listen:    *listen, Transport: *transport, Section: *section,
 		SerialPort: *serialPort, Baud: *baud,
 		NetworkHost: *networkHost, NetworkPort: *networkPort,
 		Timeout: *timeout, LongTimeout: *longTimeout, QueueTimeout: *queueTimeout,

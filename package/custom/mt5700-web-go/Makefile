@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mt5700-web-go
-PKG_VERSION:=1.2.2
+PKG_VERSION:=1.3.0
 PKG_RELEASE:=1
 PKG_LICENSE:=Proprietary
 PKG_MAINTAINER:=C2000MAX firmware project

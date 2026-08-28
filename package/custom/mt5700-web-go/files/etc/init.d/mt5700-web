@@ -22,6 +22,7 @@ migrate_legacy_instance() {
 	uci -q set mt5700-web.internal.enabled='1'
 	uci -q set mt5700-web.internal.name='内置 MT5700'
 	uci -q set mt5700-web.internal.path='internal'
+	uci -q set mt5700-web.internal.ui_variant='modern'
 	for option in transport modem_section at_port baudrate network_host network_port \
 		command_timeout long_command_timeout queue_timeout websocket_idle_timeout max_clients; do
 		value="$(uci -q get "mt5700-web.main.$option")"

@@ -221,6 +221,14 @@ return view.extend({
 		path.validate = pathValidator;
 		path.description = _('访问地址格式：/modem/<路径>/5700/');
 
+		var uiVariant = modemGrid.option(form.ListValue, 'ui_variant', _('界面版本'));
+		uiVariant.value('modern', _('新版界面（Semi Design）'));
+		uiVariant.value('legacy', _('旧版界面（兼容模式）'));
+		uiVariant.default = 'modern';
+		uiVariant.rmempty = false;
+		uiVariant.modalonly = true;
+		uiVariant.description = _('默认使用新版界面；切换后保存并应用即可，旧版资源会继续保留。');
+
 		var transport = modemGrid.option(form.ListValue, 'transport', _('AT 连接方式'));
 		transport.value('serial', _('QModem / 串口'));
 		transport.value('network', _('网络 AT'));

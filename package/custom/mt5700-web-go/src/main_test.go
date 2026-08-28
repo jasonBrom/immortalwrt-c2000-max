@@ -30,9 +30,66 @@ func (testBackend) Target() string { return "test-at" }
 func testApp(t *testing.T) *webApp {
 	t.Helper()
 	return &webApp{
-		config:  serverConfig{ID: "test", Name: "Test modem", Listen: "127.0.0.1:9010", Transport: "serial", Timeout: 4e9},
+		config:  serverConfig{ID: "test", Name: "Test modem", UIVariant: "legacy", Listen: "127.0.0.1:9010", Transport: "serial", Timeout: 4e9},
 		hub:     newHub(4),
 		backend: testBackend{},
+	}
+}
+
+func TestModernUIIsDefaultAndEmbedded(t *testing.T) {
+	if got := normalizeUIVariant(""); got != "modern" {
+		t.Fatalf("empty UI selection = %q, want modern", got)
+	}
+	if got := normalizeUIVariant("legacy"); got != "legacy" {
+		t.Fatalf("legacy UI selection = %q", got)
+	}
+
+	app := testApp(t)
+	app.config.UIVariant = "modern"
+	app.config.BasePath = "/modem/internal"
+	server := httptest.NewServer(app)
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/5700/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), `./assets/index-`) {
+		t.Fatalf("modern UI response = %d, %s", response.StatusCode, body)
+	}
+
+	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	response, err = client.Get(server.URL + "/5700/network/info/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusTemporaryRedirect || response.Header.Get("Location") != "/modem/internal/5700/#/network/info" {
+		t.Fatalf("legacy bookmark redirect = %d, %q", response.StatusCode, response.Header.Get("Location"))
+	}
+
+	entries, err := embeddedWeb.ReadDir("web-modern/assets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle []byte
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".js") {
+			bundle, err = embeddedWeb.ReadFile("web-modern/assets/" + entry.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	for _, marker := range []string{"AT^DSFLOWQRY", "at-ws-info", "ws_url"} {
+		if !strings.Contains(string(bundle), marker) {
+			t.Fatalf("modern UI bundle is missing %q", marker)
+		}
 	}
 }
 
