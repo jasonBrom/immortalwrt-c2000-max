@@ -3,13 +3,13 @@
 		"description": "Grant access to C2000-MAX hardware controls",
 		"read": {
 			"ubus": {
-				"c2000max": [ "sim_status", "hardware_status", "factory_status", "fan_status", "swap_status", "access_status", "official_boot_status", "port_status", "port_job_status" ]
+				"c2000max": [ "sim_status", "hardware_status", "factory_status", "fan_status", "swap_status", "access_status", "official_boot_status", "port_status", "port_job_status", "ip_family_status", "stun_test" ]
 			},
 			"uci": [ "c2000max", "qmodem" ]
 		},
 		"write": {
 			"ubus": {
-				"c2000max": [ "sim_switch", "sim_force", "swap_apply", "access_apply", "official_boot_once", "port_switch", "port_repair" ]
+				"c2000max": [ "sim_switch", "sim_force", "swap_apply", "access_apply", "official_boot_once", "port_switch", "port_repair", "ip_family_apply" ]
 			},
 			"uci": [ "c2000max" ]
 		}

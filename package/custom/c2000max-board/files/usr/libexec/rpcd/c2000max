@@ -32,6 +32,16 @@ case "$1" in
 	},
 	"port_repair": {},
 	"port_job_status": { "job_id": "string" }
+	,"ip_family_status": {}
+	,"ip_family_apply": {
+		"preference": "string",
+		"dns_service": "bool",
+		"ipv4_dns": "string",
+		"ipv6_dns": "string",
+		"stun_ipv4": "string",
+		"stun_ipv6": "string"
+	}
+	,"stun_test": { "family": "string", "server": "string" }
 }
 EOF
 		;;
@@ -124,6 +134,25 @@ EOF
 			port_job_status)
 				job_id="$(jsonfilter -s "$input" -e '@.job_id')"
 				exec /usr/sbin/c2000max-port-role job-status "$job_id"
+				;;
+			ip_family_status)
+				exec /usr/sbin/c2000max-ip-family status
+				;;
+			ip_family_apply)
+				preference="$(jsonfilter -s "$input" -e '@.preference')"
+				dns_service="$(jsonfilter -s "$input" -e '@.dns_service')"
+				ipv4_dns="$(jsonfilter -s "$input" -e '@.ipv4_dns')"
+				ipv6_dns="$(jsonfilter -s "$input" -e '@.ipv6_dns')"
+				stun_ipv4="$(jsonfilter -s "$input" -e '@.stun_ipv4')"
+				stun_ipv6="$(jsonfilter -s "$input" -e '@.stun_ipv6')"
+				exec /usr/sbin/c2000max-ip-family apply \
+					"$preference" "$dns_service" "$ipv4_dns" "$ipv6_dns" \
+					"$stun_ipv4" "$stun_ipv6"
+				;;
+			stun_test)
+				family="$(jsonfilter -s "$input" -e '@.family')"
+				server="$(jsonfilter -s "$input" -e '@.server')"
+				exec /usr/sbin/c2000max-ip-family stun "$family" "$server"
 				;;
 		esac
 		;;

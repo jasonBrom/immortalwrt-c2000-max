@@ -32,6 +32,17 @@
 			"acl": [ "c2000max" ]
 		}
 	},
+	"admin/network/c2000max-ip-family": {
+		"title": "IPv4 / IPv6 配置",
+		"order": 88,
+		"action": {
+			"type": "view",
+			"path": "c2000max/ip_family"
+		},
+		"depends": {
+			"acl": [ "c2000max" ]
+		}
+	},
 	"admin/network/c2000max-port-role": {
 		"title": "网口 LAN / WAN",
 		"order": 90,

@@ -47,3 +47,9 @@ config access_control 'access_control'
 
 config wifi_performance 'wifi_performance'
 	option enabled '1'
+
+config ip_family 'ip_family'
+	option preference 'auto'
+	option dns_service '1'
+	option stun_ipv4 'stun.miwifi.com:3478'
+	option stun_ipv6 'stun.hot-chilli.net:3478'

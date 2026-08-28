@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=c2000max-board
 PKG_VERSION:=2.36.10
-PKG_RELEASE:=7
+PKG_RELEASE:=8
 PKG_LICENSE:=GPL-2.0-or-later
 
 include $(INCLUDE_DIR)/package.mk
@@ -11,7 +11,6 @@ define Package/c2000max-board
   SECTION:=utils
   CATEGORY:=Utilities
   TITLE:=NRadio C2000-MAX board integration
-  PKGARCH:=all
 	DEPENDS:=+qmodem +luci-base +jq +jsonfilter +ip-full +firewall4 \
 	+kmod-dummy +kmod-mediatek_hnat +mtkhnat_util +hnat-detect \
 	+luci-app-turboacc-mtk +luci-app-eqos-mtk +luci-app-c2000max-traffic \
@@ -28,7 +27,17 @@ define Package/c2000max-board/conffiles
 /etc/config/c2000max
 endef
 
+define Build/Prepare
+	mkdir -p $(PKG_BUILD_DIR)
+	$(CP) ./src/Makefile ./src/*.c $(PKG_BUILD_DIR)/
+endef
+
 define Build/Compile
+	$(MAKE) $(PKG_JOBS) -C $(PKG_BUILD_DIR) \
+		CC="$(TARGET_CC)" \
+		CFLAGS="$(TARGET_CFLAGS)" \
+		CPPFLAGS="$(TARGET_CPPFLAGS)" \
+		LDFLAGS="$(TARGET_LDFLAGS)"
 endef
 
 define Package/c2000max-board/install
@@ -75,6 +84,9 @@ define Package/c2000max-board/install
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-mlo-interlock $(1)/usr/sbin/c2000max-mlo-interlock
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-owe-transition $(1)/usr/sbin/c2000max-owe-transition
 	$(INSTALL_BIN) ./files/usr/sbin/c2000max-wifi-performance $(1)/usr/sbin/c2000max-wifi-performance
+	$(INSTALL_BIN) ./files/usr/sbin/c2000max-ip-family $(1)/usr/sbin/c2000max-ip-family
+	$(INSTALL_DIR) $(1)/usr/bin
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/c2000max-stun $(1)/usr/bin/c2000max-stun
 	$(INSTALL_DIR) $(1)/usr/lib/c2000max
 	$(INSTALL_DATA) ./files/usr/lib/c2000max/port-role.sh $(1)/usr/lib/c2000max/port-role.sh
 	$(INSTALL_DATA) ./files/usr/lib/c2000max/uplink-mode.sh $(1)/usr/lib/c2000max/uplink-mode.sh
@@ -87,6 +99,7 @@ define Package/c2000max-board/install
 	$(INSTALL_DATA) ./files/www/luci-static/resources/view/c2000max/port_role_v31.js $(1)/www/luci-static/resources/view/c2000max/port_role_v31.js
 	$(INSTALL_DATA) ./files/www/luci-static/resources/view/c2000max/access_v352.js $(1)/www/luci-static/resources/view/c2000max/access_v352.js
 	$(INSTALL_DATA) ./files/www/luci-static/resources/view/c2000max/swap_v352.js $(1)/www/luci-static/resources/view/c2000max/swap_v352.js
+	$(INSTALL_DATA) ./files/www/luci-static/resources/view/c2000max/ip_family.js $(1)/www/luci-static/resources/view/c2000max/ip_family.js
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/status/include
 	$(INSTALL_DATA) ./files/www/luci-static/resources/view/status/include/15_c2000max_v16.js $(1)/www/luci-static/resources/view/status/include/15_c2000max_v16.js
 	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d $(1)/usr/share/rpcd/acl.d

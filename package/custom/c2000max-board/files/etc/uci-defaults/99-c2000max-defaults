@@ -203,6 +203,34 @@ case "$access_lan" in
 	''|*[!A-Za-z0-9_.:-]*) uci -q set c2000max.access_control.lan_device='auto' ;;
 esac
 
+# V36.10-r8 adds explicit dual-stack diagnostics. An upstream DHCPv6 server
+# is not required to advertise an IPv6-form DNS server: dnsmasq can resolve
+# AAAA records through an IPv4 upstream. Keep that transport detail separate
+# from IPv6 DNS capability, and advertise the router DNS proxy in LAN RAs.
+if [ -z "$(uci -q get c2000max.ip_family)" ]; then
+	uci -q set c2000max.ip_family='ip_family'
+fi
+family_preference="$(uci -q get c2000max.ip_family.preference)"
+case "$family_preference" in auto|ipv4|ipv6) ;; *) family_preference=auto ;; esac
+uci -q set "c2000max.ip_family.preference=$family_preference"
+dns_service="$(uci -q get c2000max.ip_family.dns_service)"
+[ -n "$dns_service" ] || dns_service="$(uci -q get c2000max.ip_family.ra_dns)"
+case "$dns_service" in 0|1) ;; *) dns_service=1 ;; esac
+uci -q set "c2000max.ip_family.dns_service=$dns_service"
+uci -q delete c2000max.ip_family.ra_dns
+uci -q set "dhcp.lan.dns_service=$dns_service"
+uci -q delete dhcp.lan.ra_dns
+stun_ipv4="$(uci -q get c2000max.ip_family.stun_ipv4)"
+case "$stun_ipv4" in
+	''|*[!A-Za-z0-9_.:\[\]-]*) stun_ipv4='stun.miwifi.com:3478' ;;
+esac
+stun_ipv6="$(uci -q get c2000max.ip_family.stun_ipv6)"
+case "$stun_ipv6" in
+	''|*[!A-Za-z0-9_.:\[\]-]*) stun_ipv6='stun.hot-chilli.net:3478' ;;
+esac
+uci -q set "c2000max.ip_family.stun_ipv4=$stun_ipv4"
+uci -q set "c2000max.ip_family.stun_ipv6=$stun_ipv6"
+
 # V24 retires V23's persisted process-state quarantine.  QModem and mwan3
 # startup timing is not a network-transaction invariant; stale state here must
 # never disable the router again after an upgrade or interrupted switch.
@@ -662,6 +690,7 @@ uci -q commit qmodem
 uci -q commit network
 uci -q commit system
 uci -q commit firewall
+uci -q commit dhcp
 uci -q commit luci
 uci -q commit argon
 uci -q commit turboacc

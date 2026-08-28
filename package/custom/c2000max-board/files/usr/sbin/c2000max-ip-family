@@ -1,0 +1,292 @@
+#!/bin/sh
+
+. /usr/share/libubox/jshn.sh
+
+CONFIG_SECTION='c2000max.ip_family'
+RESOLV_AUTO='/tmp/resolv.conf.d/resolv.conf.auto'
+DNS_TEST_NAME='one.one.one.one'
+
+json_error() {
+	json_init
+	json_add_boolean success 0
+	json_add_string message "$1"
+	json_dump
+}
+
+bool_value() {
+	case "$1" in
+		1|true|yes|on) printf '1\n' ;;
+		*) printf '0\n' ;;
+	esac
+}
+
+valid_preference() {
+	case "$1" in auto|ipv4|ipv6) return 0 ;; *) return 1 ;; esac
+}
+
+valid_stun_server() {
+	[ -n "$1" ] && [ "${#1}" -le 300 ] || return 1
+	case "$1" in *[!A-Za-z0-9_.:\[\]-]*) return 1 ;; esac
+	case "$1" in *:*) ;; *) return 0 ;; esac
+	return 0
+}
+
+normalize_dns_list() {
+	printf '%s' "$1" | tr ',;\r\n\t' '     ' | tr -s ' '
+}
+
+valid_dns_address() {
+	case "$1" in
+		*:* )
+			/usr/bin/c2000max-stun --validate-address ipv6 "$1"
+			;;
+		*.* )
+			/usr/bin/c2000max-stun --validate-address ipv4 "$1"
+			;;
+		*) return 1 ;;
+	esac
+}
+
+validate_dns_list() {
+	list="$(normalize_dns_list "$1")"
+	count=0
+	for address in $list; do
+		count=$((count + 1))
+		[ "$count" -le 6 ] || return 1
+		valid_dns_address "$address" || return 1
+	done
+	return 0
+}
+
+config_list() {
+	uci -q get "$CONFIG_SECTION.$1" 2>/dev/null
+}
+
+json_add_words() {
+	name="$1"
+	shift
+	json_add_array "$name"
+	for word in "$@"; do
+		[ -n "$word" ] && json_add_string '' "$word"
+	done
+	json_close_array
+}
+
+upstream_dns() {
+	family="$1"
+	[ -r "$RESOLV_AUTO" ] || return 0
+	awk -v family="$family" '
+		$1 == "nameserver" {
+			if (family == "ipv6" && index($2, ":")) print $2
+			if (family == "ipv4" && !index($2, ":")) print $2
+		}' "$RESOLV_AUTO" | sort -u
+}
+
+route_value() {
+	family="$1"
+	if [ "$family" = ipv6 ]; then
+		ip -6 route show default 2>/dev/null | head -n 1
+	else
+		ip -4 route show default 2>/dev/null | head -n 1
+	fi
+}
+
+route_probe() {
+	family="$1"
+	if [ "$family" = ipv6 ]; then
+		# Prefix-scoped DHCPv6 defaults require an explicit source for route-get.
+		# Derive it from the default route's device instead of declaring IPv6
+		# unavailable while ping and actual traffic are working.
+		default_route="$(route_value ipv6)"
+		device="$(printf '%s\n' "$default_route" | awk '
+			{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')"
+		source_address=""
+		[ -z "$device" ] || source_address="$(
+			ip -6 -o address show dev "$device" scope global 2>/dev/null |
+			awk 'NR == 1 { sub("/.*", "", $4); print $4 }')"
+		[ -n "$source_address" ] || return 0
+		ip -6 route get '2606:4700:4700::1111' from "$source_address" 2>/dev/null |
+			head -n 1
+	else
+		ip -4 route get '1.1.1.1' 2>/dev/null | head -n 1
+	fi
+}
+
+probe_field() {
+	probe="$1"
+	field="$2"
+	printf '%s\n' "$probe" | awk -v wanted="$field" '
+		{ for (i = 1; i < NF; i++) if ($i == wanted) { print $(i + 1); exit } }'
+}
+
+dns_works() {
+	family="$1"
+	type=A
+	[ "$family" = ipv6 ] && type=AAAA
+	timeout 4 nslookup -query="$type" "$DNS_TEST_NAME" 127.0.0.1 >/dev/null 2>&1
+}
+
+internet_works() {
+	family="$1"
+	if [ "$family" = ipv6 ]; then
+		timeout 4 ping -6 -c 1 -W 2 '2606:4700:4700::1111' >/dev/null 2>&1
+	else
+		timeout 4 ping -4 -c 1 -W 2 '1.1.1.1' >/dev/null 2>&1
+	fi
+}
+
+add_family_status() {
+	family="$1"
+	probe="$(route_probe "$family")"
+	route="$(route_value "$family")"
+	address="$(probe_field "$probe" src)"
+	device="$(probe_field "$probe" dev)"
+	dns_values="$(upstream_dns "$family")"
+
+	json_add_object "$family"
+	[ -n "$probe" ] && json_add_boolean route_available 1 || json_add_boolean route_available 0
+	json_add_string address "$address"
+	json_add_string device "$device"
+	json_add_string default_route "$route"
+	if dns_works "$family"; then
+		json_add_boolean dns_available 1
+	else
+		json_add_boolean dns_available 0
+	fi
+	if internet_works "$family"; then
+		json_add_boolean internet_available 1
+	else
+		json_add_boolean internet_available 0
+	fi
+	json_add_array upstream_dns
+	for dns in $dns_values; do json_add_string '' "$dns"; done
+	json_close_array
+	json_close_object
+}
+
+status_json() {
+	preference="$(uci -q get "$CONFIG_SECTION.preference")"
+	valid_preference "$preference" || preference=auto
+	dns_service="$(uci -q get "$CONFIG_SECTION.dns_service")"
+	[ -n "$dns_service" ] || dns_service="$(uci -q get dhcp.lan.dns_service)"
+	[ -n "$dns_service" ] || dns_service=1
+	stun_ipv4="$(uci -q get "$CONFIG_SECTION.stun_ipv4")"
+	stun_ipv6="$(uci -q get "$CONFIG_SECTION.stun_ipv6")"
+	[ -n "$stun_ipv4" ] || stun_ipv4='stun.miwifi.com:3478'
+	[ -n "$stun_ipv6" ] || stun_ipv6='stun.hot-chilli.net:3478'
+
+	json_init
+	json_add_boolean success 1
+	json_add_string preference "$preference"
+	json_add_boolean dns_service "$(bool_value "$dns_service")"
+	json_add_string stun_ipv4 "$stun_ipv4"
+	json_add_string stun_ipv6 "$stun_ipv6"
+	json_add_array ipv4_dns
+	for dns in $(config_list ipv4_dns); do json_add_string '' "$dns"; done
+	json_close_array
+	json_add_array ipv6_dns
+	for dns in $(config_list ipv6_dns); do json_add_string '' "$dns"; done
+	json_close_array
+	add_family_status ipv4
+	add_family_status ipv6
+	json_dump
+}
+
+remove_old_dns() {
+	option="$1"
+	for address in $(config_list "$option"); do
+		uci -q del_list "dhcp.@dnsmasq[0].server=$address"
+	done
+	uci -q delete "$CONFIG_SECTION.$option"
+}
+
+store_dns() {
+	option="$1"
+	list="$(normalize_dns_list "$2")"
+	for address in $list; do
+		uci -q add_list "$CONFIG_SECTION.$option=$address" || return 1
+		uci -q add_list "dhcp.@dnsmasq[0].server=$address" || return 1
+	done
+}
+
+apply_config() {
+	preference="$1"
+	dns_service="$(bool_value "$2")"
+	ipv4_dns="$3"
+	ipv6_dns="$4"
+	stun_ipv4="$5"
+	stun_ipv6="$6"
+
+	valid_preference "$preference" || {
+		json_error '地址族优先策略无效。'
+		return 1
+	}
+	valid_stun_server "$stun_ipv4" && valid_stun_server "$stun_ipv6" || {
+		json_error 'STUN 服务器地址无效。'
+		return 1
+	}
+	validate_dns_list "$ipv4_dns" || {
+		json_error 'IPv4 DNS 地址无效，最多允许 6 个纯 IP 地址。'
+		return 1
+	}
+	validate_dns_list "$ipv6_dns" || {
+		json_error 'IPv6 DNS 地址无效，最多允许 6 个纯 IP 地址。'
+		return 1
+	}
+
+	[ -n "$(uci -q get "$CONFIG_SECTION")" ] ||
+		uci -q set c2000max.ip_family='ip_family'
+	remove_old_dns ipv4_dns
+	remove_old_dns ipv6_dns
+	uci -q set "$CONFIG_SECTION.preference=$preference"
+	uci -q set "$CONFIG_SECTION.dns_service=$dns_service"
+	uci -q delete "$CONFIG_SECTION.ra_dns"
+	uci -q set "$CONFIG_SECTION.stun_ipv4=$stun_ipv4"
+	uci -q set "$CONFIG_SECTION.stun_ipv6=$stun_ipv6"
+	uci -q set "dhcp.lan.dns_service=$dns_service"
+	store_dns ipv4_dns "$ipv4_dns" || {
+		json_error '保存 IPv4 DNS 失败。'
+		return 1
+	}
+	store_dns ipv6_dns "$ipv6_dns" || {
+		json_error '保存 IPv6 DNS 失败。'
+		return 1
+	}
+	uci -q commit c2000max
+	uci -q commit dhcp
+	/etc/init.d/dnsmasq reload >/dev/null 2>&1 ||
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+	/etc/init.d/odhcpd reload >/dev/null 2>&1 || true
+
+	json_init
+	json_add_boolean success 1
+	json_add_string message 'IPv4 / IPv6 设置已保存并应用。'
+	json_dump
+}
+
+stun_test() {
+	family="$1"
+	server="$2"
+	case "$family" in
+		ipv4) flag='-4' ;;
+		ipv6) flag='-6' ;;
+		*) json_error '地址族无效。'; return 1 ;;
+	esac
+	valid_stun_server "$server" || {
+		json_error 'STUN 服务器地址无效。'
+		return 1
+	}
+	result="$(timeout 18 /usr/bin/c2000max-stun "$flag" "$server" 2>/dev/null)"
+	if [ -n "$result" ]; then
+		printf '%s\n' "$result"
+	else
+		json_error 'STUN 检测超时或程序未返回结果。'
+	fi
+}
+
+case "$1" in
+	status) status_json ;;
+	apply) shift; apply_config "$@" ;;
+	stun) shift; stun_test "$@" ;;
+	*) json_error '未知操作。'; exit 1 ;;
+esac
