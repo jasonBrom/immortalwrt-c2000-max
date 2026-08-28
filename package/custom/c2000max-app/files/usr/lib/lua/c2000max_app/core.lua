@@ -8,13 +8,16 @@ local identity = require "c2000max_app.identity"
 
 local M = {}
 
--- This value is deliberately detached from the underlying OpenWrt build.
--- It is the only software version exposed to the NRadio APP, so the APP must
--- never offer or request a firmware update for this privacy-oriented image.
-local APP_SOFTWARE_VERSION = "9.9.13.n0.c1"
+-- Keep the APP-facing version in the dotted-numeric format used by the
+-- factory C2000-MAX firmware.  APP 2.3.1 rejects alphanumeric versions as
+-- older/unsupported even when their leading number is high.  Firmware update
+-- commands remain independently and permanently disabled below.
+local APP_SOFTWARE_VERSION = "2.9.9.9"
 local DEFAULT_MODEM_CACHE_INTERVAL = 10
 local DEFAULT_SELECTOR_CACHE_INTERVAL = 15
 local DEFAULT_CACHE_WARM_INTERVAL = 2
+local DEFAULT_CACHE_IDLE_INTERVAL = 30
+local DEFAULT_CACHE_ACTIVE_WINDOW = 180
 local DEFAULT_SIGNAL_NORMAL_INTERVAL = 3
 local DEFAULT_SIGNAL_TEST_INTERVAL = 1
 local DEFAULT_SIGNAL_CARRIER_INTERVAL = 10
@@ -22,6 +25,7 @@ local FAST_SIGNAL_FAILURE_BACKOFF = 5
 local MAX_APP_CARRIERS = 8
 local STATE_DIR = "/var/run/c2000max-app"
 local CACHE_DIR = STATE_DIR .. "/cache"
+local ACTIVITY_FILE = STATE_DIR .. "/activity"
 local MAX_SHARED_CACHE = 1024 * 1024
 
 local function bool_option(name)
@@ -149,8 +153,38 @@ function M.cache_refresh_policy()
 		selector = number_option("selector_cache_interval",
 			DEFAULT_SELECTOR_CACHE_INTERVAL, 1, 60),
 		warm = number_option("cache_warm_interval",
-			DEFAULT_CACHE_WARM_INTERVAL, 1, 60)
+			DEFAULT_CACHE_WARM_INTERVAL, 1, 60),
+		idle = number_option("cache_idle_interval",
+			DEFAULT_CACHE_IDLE_INTERVAL, 5, 300),
+		active_window = number_option("cache_active_window",
+			DEFAULT_CACHE_ACTIVE_WINDOW, 30, 900)
 	}
+end
+
+function M.note_activity()
+	if type(fs.mkdirr) ~= "function" or type(fs.writefile) ~= "function" then
+		return false
+	end
+	fs.mkdirr(STATE_DIR)
+	local written = fs.writefile(ACTIVITY_FILE,
+		tostring(math.floor(precise_time())))
+	if written and type(fs.chmod) == "function" then
+		fs.chmod(STATE_DIR, "0755")
+		fs.chmod(ACTIVITY_FILE, "0600")
+	end
+	return written and true or false
+end
+
+function M.cache_active()
+	if type(fs.readfile) ~= "function" then
+		return false
+	end
+	local updated = tonumber(fs.readfile(ACTIVITY_FILE) or "")
+	if not updated then
+		return false
+	end
+	local age = precise_time() - updated
+	return age >= 0 and age <= M.cache_refresh_policy().active_window
 end
 
 function M.signal_refresh_policy()
@@ -1706,6 +1740,104 @@ local function query_serialized_at(modem, command)
 	return tostring(at_cfg.res or "")
 end
 
+local function sms_switch_state(modem)
+	local response = query_serialized_at(modem, "AT^IMSSWITCH?")
+	local enabled = tostring(response or ""):match("%^IMSSWITCH:%s*(%d+)")
+	if enabled ~= "0" and enabled ~= "1" then
+		return nil, "failed to query SMS function"
+	end
+	return enabled
+end
+
+local function sms_at_ok(response)
+	local upper = tostring(response or ""):upper()
+	return upper ~= "" and not upper:find("ERROR", 1, true) and
+		not upper:find("+CME ERROR", 1, true) and
+		upper:find("OK", 1, true) ~= nil
+end
+
+local function pause_seconds(seconds)
+	if type(nixio.nanosleep) == "function" then
+		nixio.nanosleep(seconds)
+	end
+end
+
+local function set_sms_switch(modem, requested)
+	local desired = requested and "1" or "0"
+	local current, message = sms_switch_state(modem)
+	if not current then
+		return nil, message
+	end
+	if current == desired then
+		return current
+	end
+
+	local commands
+	if requested then
+		commands = {
+			'AT+CGDCONT=5,"IPV4V6","ims","",0,0,0,0,1,1,1,,,,,,0,,0,0,0,0',
+			"AT+CEUS=0",
+			"AT^IMSSWITCH=1,0,0"
+		}
+	else
+		commands = {
+			'AT+CGDCONT=5,"IPV4V6","","",0,0,0,0,1,1,1,,,,,,0,,0,0,0,0',
+			"AT+CEUS=1",
+			"AT^IMSSWITCH=0,0,0"
+		}
+	end
+
+	if not sms_at_ok(query_serialized_at(modem, "AT+CFUN=0")) then
+		return nil, "failed to enter airplane mode"
+	end
+	pause_seconds(2)
+	for _, command in ipairs(commands) do
+		if not sms_at_ok(query_serialized_at(modem, command)) then
+			query_serialized_at(modem, "AT+CFUN=1")
+			return nil, "modem rejected SMS function setting"
+		end
+	end
+	pause_seconds(1)
+	if not sms_at_ok(query_serialized_at(modem, "AT+CFUN=1")) then
+		return nil, "SMS setting applied but modem stayed offline"
+	end
+	pause_seconds(2)
+	current, message = sms_switch_state(modem)
+	if current ~= desired then
+		return nil, message or "SMS function state did not change"
+	end
+	return current
+end
+
+local function app_sms_switch(data)
+	local modem = list_modems(true)[1]
+	if not modem or not fast_signal_supported(modem) then
+		return nil, "MT5700 modem not found"
+	end
+	local enabled, message
+	if data.action == "modify" then
+		if tostring(data.enabled or "") ~= "0" and
+		   tostring(data.enabled or "") ~= "1" then
+			return nil, "invalid SMS function state"
+		end
+		enabled, message = set_sms_switch(modem,
+			tostring(data.enabled) == "1")
+	else
+		enabled, message = sms_switch_state(modem)
+	end
+	if not enabled then
+		return nil, message
+	end
+	return {
+		code = 0,
+		result = {
+			index = tostring(data.index or "1"),
+			sim = tonumber(data.sim) or sim_selection().cur,
+			enabled = enabled
+		}
+	}
+end
+
 local function inferred_cell_band(mode, channel)
 	local value = tonumber(channel)
 	local upper = tostring(mode or ""):upper()
@@ -2936,6 +3068,7 @@ end
 function M.handle(action, data, context)
 	data = type(data) == "table" and data or {}
 	context = type(context) == "table" and context or {}
+	M.note_activity()
 	local rv = response(data)
 
 	if action == "heartbeat" then
@@ -3004,7 +3137,7 @@ function M.handle(action, data, context)
 			apn = {},
 			bat = { percent = "-1", charging = false },
 			diagnosis = allow_signal and app_diagnosis(modems) or {},
-			auth_on = 0
+			auth_on = M.management_password_configured() and 1 or 0
 		}
 		return rv
 	elseif action == "wifi" then
@@ -3092,17 +3225,16 @@ function M.handle(action, data, context)
 		rv.result = app_neighbour()
 		return rv
 	elseif action == "sms" then
-		if data.action == nil then
-			rv.code = 0
-			rv.result = {
-				index = tostring(data.index or "1"),
-				sim = tonumber(data.sim) or sim_selection().cur,
-				enabled = "0"
-			}
-			return rv
-		elseif data.action == "modify" then
-			rv.code = "3"
-			rv.message = "IMS switch is not supported by QModem"
+		if data.action == nil or data.action == "modify" then
+			local switch, message = app_sms_switch(data)
+			if not switch then
+				rv.code = -4
+				rv.message = message or "SMS function failed"
+				return rv
+			end
+			for key, value in pairs(switch) do
+				rv[key] = value
+			end
 			return rv
 		end
 		local result, _, message = do_sms(data)
@@ -3243,8 +3375,21 @@ function M.handle(action, data, context)
 	return unsupported(data)
 end
 
+function M.management_password_configured()
+	if not sys.user or type(sys.user.getpasswd) ~= "function" then
+		return false
+	end
+	local hash = sys.user.getpasswd("root")
+	return type(hash) == "string" and hash ~= ""
+end
+
 function M.local_enabled()
 	return bool_option("local_enable")
+end
+
+function M.local_protocol_mode()
+	local mode = uci:get("c2000max_app", "main", "local_protocol_mode")
+	return mode == "legacy" and "legacy" or "modern"
 end
 
 function M.remote_enabled()

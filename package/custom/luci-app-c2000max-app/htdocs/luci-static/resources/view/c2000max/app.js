@@ -70,8 +70,14 @@ const INTERVALS = [
 		desc: '当前 SIM 槽与选择器状态的缓存时间。',
 		min: 1, max: 60, fallback: 15 },
 	{ name: 'cache_warm_interval', title: '后台预热间隔', unit: '秒',
-		desc: '后台刷新 APP 快照的周期；过低会增加设备查询负载。',
+		desc: 'APP 活跃期间后台刷新快照的周期；过低会增加设备查询负载。',
 		min: 1, max: 60, fallback: 2 },
+	{ name: 'cache_idle_interval', title: '闲置检查间隔', unit: '秒',
+		desc: 'APP 闲置时后台仅检查是否恢复活跃，不再持续查询模组。',
+		min: 5, max: 300, fallback: 30 },
+	{ name: 'cache_active_window', title: '活跃保持时长', unit: '秒',
+		desc: '收到 APP 请求后维持快速预热的时长；到期后自动进入低负载状态。',
+		min: 30, max: 900, fallback: 180 },
 	{ name: 'signal_normal_interval', title: '普通信号刷新', unit: '秒',
 		desc: 'APP 信号页面常规刷新时的最短采样间隔。',
 		min: 1, max: 30, fallback: 3 },
@@ -81,6 +87,11 @@ const INTERVALS = [
 	{ name: 'signal_carrier_interval', title: '载波聚合刷新', unit: '秒',
 		desc: '载波拓扑与聚合频段的缓存时间。',
 		min: 2, max: 120, fallback: 10 }
+];
+
+const PROTOCOL_MODES = [
+	{ value: 'modern', title: '鲲鹏无限 3.1+（AES，推荐）' },
+	{ value: 'legacy', title: '旧版 2.x（DES 兼容）' }
 ];
 
 const callStatus = rpc.declare({
@@ -93,6 +104,7 @@ const callSet = rpc.declare({
 	object: 'c2000max_app',
 	method: 'set',
 	params: OPTIONS.map(function(option) { return option.name; }).concat(
+		['local_protocol_mode']).concat(
 		INTERVALS.map(function(option) { return option.name; })),
 	expect: { '': {} }
 });
@@ -154,6 +166,28 @@ function optionRow(option, status) {
 		E('div', { 'class': 'cbi-value-field' }, [
 			checkbox(option, flag(status[option.name])),
 			E('div', { 'class': 'cbi-value-description' }, option.desc)
+		])
+	]);
+}
+
+function protocolRow(status) {
+	const select = E('select', {
+		'id': 'c2000max-app-local_protocol_mode',
+		'class': 'cbi-input-select'
+	}, PROTOCOL_MODES.map(function(mode) {
+		return E('option', { 'value': mode.value }, mode.title);
+	}));
+	select.value = status.local_protocol_mode === 'legacy' ?
+		'legacy' : 'modern';
+	return E('div', { 'class': 'cbi-value' }, [
+		E('label', {
+			'class': 'cbi-value-title',
+			'for': 'c2000max-app-local_protocol_mode'
+		}, '本地 APP 协议'),
+		E('div', { 'class': 'cbi-value-field' }, [
+			select,
+			E('div', { 'class': 'cbi-value-description' },
+				'3.1+ 使用 AES 本地协议；只有旧版 APP 无法连接时才切换到 2.x 兼容。')
 		])
 	]);
 }
@@ -232,6 +266,8 @@ return view.extend({
 			return Number(document.getElementById(
 				'c2000max-app-' + option.name).value);
 		});
+		const protocolMode = document.getElementById(
+			'c2000max-app-local_protocol_mode').value;
 		for (let i = 0; i < INTERVALS.length; i++) {
 			const option = INTERVALS[i];
 			const value = intervals[i];
@@ -255,7 +291,7 @@ return view.extend({
 		const button = document.getElementById('c2000max-app-save');
 		button.disabled = true;
 		const result = await L.resolveDefault(callSet.apply(null,
-			flags.concat(intervals)), {});
+			flags.concat([protocolMode], intervals)), {});
 		if (!result.success) {
 			ui.addNotification(null,
 				E('p', {}, text(result.message, '无法保存 APP 管理设置')),
@@ -280,13 +316,14 @@ return view.extend({
 
 	render: function(status) {
 		this.currentStatus = status;
-		const masterOptions = OPTIONS.slice(0, 2).map(function(option) {
+		const masterOptions = OPTIONS.slice(0, 3).map(function(option) {
 			return optionRow(option, status);
 		});
-		const localOptions = OPTIONS.slice(2, 13).map(function(option) {
+		masterOptions.push(protocolRow(status));
+		const localOptions = OPTIONS.slice(3, 14).map(function(option) {
 			return optionRow(option, status);
 		});
-		const cloudOptions = OPTIONS.slice(13).map(function(option) {
+		const cloudOptions = OPTIONS.slice(14).map(function(option) {
 			return optionRow(option, status);
 		});
 		const refreshOptions = INTERVALS.map(function(option) {
@@ -299,7 +336,7 @@ return view.extend({
 				E('div', { 'class': 'cbi-value-description' },
 					'不提供用户开关，本地和云端升级请求都会被拒绝；' +
 					'APP 固定版本号 ' +
-					text(status.app_software_version, '9.9.13.n0.c1') + '。')
+					text(status.app_software_version, '2.9.9.9') + '。')
 			])
 		]);
 

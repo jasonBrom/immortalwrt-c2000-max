@@ -408,11 +408,12 @@ eqos_start_service_locked() {
 	[ "$CONFIG_ERROR" -eq 0 ] || return 1
 
 	# Take a final snapshot before either accelerator cache is invalidated.
-	# Sampling failures do not block rate limiting and are retried by procd.
+	# mib-sync is lock-aware and cheap. Do not invoke a full traffic sample while
+	# the acceleration lock is held: the sampler owns collector.lock and may in
+	# turn request this same HNAT lock, creating an AB/BA deadlock with the
+	# periodic collector. The daemon performs the full sample after this reload.
 	[ ! -x /usr/sbin/c2000max-traffic ] ||
 		/usr/sbin/c2000max-traffic mib-sync >/dev/null 2>&1 || true
-	[ ! -x /usr/sbin/c2000max-traffic ] ||
-		/usr/sbin/c2000max-traffic sample >/dev/null 2>&1 || true
 
 	if ! eqos start "$EQOS_BACKEND" "$effective_download" "$effective_upload"; then
 		echo "eqos: failed to initialize the $EQOS_BACKEND limiter backend" >&2

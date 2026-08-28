@@ -43,6 +43,10 @@ module("luci.sys", {
 	uniqueid = function(bytes)
 		return string.rep("a", bytes * 2)
 	end,
+	user = {
+		getpasswd = function() return nil end,
+		checkpasswd = function() return false end
+	},
 	call = function() return 0 end
 })
 
@@ -99,6 +103,7 @@ local carrier_signal_calls = 0
 local serialized_at_calls = 0
 local neighbor_signal_calls = 0
 local lock_commands = {}
+local ims_enabled = false
 local last_exec = ""
 local client_neighbor = false
 local wireless_mlo_fixture = false
@@ -212,6 +217,18 @@ local function ubus(object, method, args)
 		elseif command == "AT^C5GOPTION?" then
 			return { at_cfg = { status = "1", res =
 				"^C5GOPTION: " .. network_option .. "\r\nOK" } }
+		elseif command == "AT^IMSSWITCH?" then
+			return { at_cfg = { status = "1", res =
+				"^IMSSWITCH: " .. (ims_enabled and "1" or "0") .. ",0,0\r\nOK" } }
+		elseif command == "AT^IMSSWITCH=1,0,0" or
+		       command == "AT^IMSSWITCH=0,0,0" then
+			ims_enabled = command:find("=1", 1, true) ~= nil
+			lock_commands[#lock_commands + 1] = command
+			return { at_cfg = { status = "1", res = "OK" } }
+		elseif command:match("^AT%+CGDCONT=5,") or
+		       command == "AT+CEUS=0" or command == "AT+CEUS=1" then
+			lock_commands[#lock_commands + 1] = command
+			return { at_cfg = { status = "1", res = "OK" } }
 		elseif command == "AT+CFUN=0" or command == "AT+CFUN=1" then
 			lock_commands[#lock_commands + 1] = command
 			return { at_cfg = { status = "1", res = "OK" } }
@@ -656,7 +673,7 @@ equal(serialized_at_calls, fast_signal_calls + carrier_signal_calls,
 
 local info = core.handle("info", { trans_id = "info", type = "all" })
 equal(info.result.basic.mac, "021122334455", "APP factory identity")
-equal(info.result.basic.version, "9.9.13.n0.c1", "fixed APP software version")
+equal(info.result.basic.version, "2.9.9.9", "numeric APP software version")
 equal(info.result.basic.modem_cnt, 1, "APP modem count")
 equal(info.result.basic.active_modem[1], 1, "APP active modem")
 equal(info.result.cpesel[1].cur, 2, "APP active SIM number")
@@ -730,6 +747,16 @@ local sms = core.handle("sms", {
 equal(sms.code, 0, "IMS query result code")
 equal(sms.result.enabled, "0", "IMS query state")
 equal(sms.result.sim, 2, "IMS query SIM")
+lock_commands = {}
+local sms_enable = core.handle("sms", {
+	trans_id = "sms-enable", action = "modify", enabled = "1",
+	index = "1", sim = "2"
+})
+equal(sms_enable.code, 0, "IMS enable result code")
+equal(sms_enable.result.enabled, "1", "IMS enable state")
+equal(lock_commands[1], "AT+CFUN=0", "IMS enable enters airplane mode")
+equal(lock_commands[4], "AT^IMSSWITCH=1,0,0", "IMS enable applies switch")
+equal(lock_commands[5], "AT+CFUN=1", "IMS enable leaves airplane mode")
 
 local sms_read = core.handle("sms", {
 	trans_id = "sms-read", action = "read", type = "ME"

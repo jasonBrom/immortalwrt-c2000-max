@@ -5,12 +5,49 @@ local identity = require "c2000max_app.identity"
 local protocol = require "c2000max_app.protocol"
 local sys = require "luci.sys"
 
+local function plaintext_password_authenticated(data)
+	if type(data) ~= "table" or type(data.password) ~= "string" then
+		return false
+	end
+	-- 鲲鹏无限 3.1.0 hard-codes a one-time password page for every new AES
+	-- device and does not consume the server-side auth_on flag.  With no root
+	-- password, accept any non-empty text entered in that page.  Otherwise
+	-- validate the actual root password.
+	if not core.management_password_configured() then
+		return true
+	end
+	return sys.user.checkpasswd("root", data.password)
+end
+
+local function plaintext_signal_probe(context)
+	if core.local_protocol_mode() == "legacy" then
+		return { code = "1" },
+			protocol.current_des_response_context(context)
+	end
+
+	-- 鲲鹏无限 3.1.0 selects its AES local protocol only when the plaintext
+	-- /signal probe contains a non-empty signal[0].mac or signal[0].id.  This
+	-- capability response intentionally avoids querying the modem.
+	local device_id = core.device_id()
+	if not device_id or device_id == "" then
+		return { code = "1" }, context
+	end
+	return {
+		code = "0",
+		signal = {{
+			mac = device_id,
+			id = device_id
+		}}
+	}, context
+end
+
 function action_health()
 	protocol.reply({
 		code = core.local_enabled() and "0" or "3",
 		service = "c2000max-app",
 		build = "V36.10",
 		local_enabled = core.local_enabled(),
+		local_protocol_mode = core.local_protocol_mode(),
 		cache_refresh = core.cache_refresh_policy(),
 		signal_refresh = core.signal_refresh_policy()
 	}, { encrypted = false })
@@ -34,18 +71,25 @@ function action_auth()
 	end
 
 	local authenticated
+	local auth_kind
 	if context.encrypted then
-		authenticated = protocol.verify_auth(data, context)
+		-- Encrypted device authentication is the password-free APP 3.1 fast
+		-- path.  Reject it only when a real system password exists and the user
+		-- kept APP password verification enabled; APP then opens its plaintext
+		-- management-password dialog.
+		auth_kind = "device"
+		authenticated = not core.management_password_configured() and
+			protocol.verify_auth(data, context)
 	else
-		authenticated = type(data.password) == "string" and
-			sys.user.checkpasswd("root", data.password)
+		authenticated = plaintext_password_authenticated(data)
+		auth_kind = "password"
 	end
 	if not authenticated then
 		protocol.error(1, "authentication failed", context, data.trans_id)
 		return
 	end
 
-	local token, timeout = protocol.new_session()
+	local token, timeout = protocol.new_session(auth_kind)
 	if not token then
 		protocol.error(2, "session creation failed", context, data.trans_id)
 		return
@@ -69,16 +113,24 @@ function action_dispatch(action)
 			data.trans_id)
 		return
 	end
-	-- APP 2.3.1 sends one plaintext /signal request solely to distinguish the
-	-- AES and legacy DES protocols.  Returning a normal plaintext signal array
-	-- makes it match neither protocol and the UI stays at "disconnected".  A
-	-- DES envelope is the legacy capability marker; no modem query is needed.
+	-- The plaintext /signal request is a protocol capability probe, not a
+	-- normal authenticated modem query.
+	local session_valid
 	if action == "signal" and context.plaintext then
-		protocol.reply({ code = "1" },
-			protocol.current_des_response_context(context))
-		return
+		-- 3.1.0 uses the same plaintext endpoint twice: first without a
+		-- sysauth cookie to detect AES capability, then with the password-auth
+		-- session cookie to fetch real signal data.  Only the first request is
+		-- a capability probe.
+		session_valid = protocol.valid_session(data, context,
+			core.management_password_configured())
+		if not session_valid then
+			local result, response_context = plaintext_signal_probe(context)
+			protocol.reply(result, response_context)
+			return
+		end
 	end
-	if not protocol.valid_session(data, context) then
+	if not session_valid and not protocol.valid_session(data, context,
+	   core.management_password_configured()) then
 		-- Match the official firmware byte-level business payload.  APP clients
 		-- use this minimal response as the session-expired marker.
 		protocol.reply({ code = "1" }, context)
@@ -127,6 +179,7 @@ function process(action, body, request_context)
 			service = "c2000max-app",
 			build = "V36.10",
 			local_enabled = core.local_enabled(),
+			local_protocol_mode = core.local_protocol_mode(),
 			cache_refresh = core.cache_refresh_policy(),
 			signal_refresh = core.signal_refresh_policy()
 		}
@@ -148,17 +201,20 @@ function process(action, body, request_context)
 				data.trans_id)
 		end
 		local authenticated
+		local auth_kind
 		if context.encrypted then
-			authenticated = protocol.verify_auth(data, context)
+			auth_kind = "device"
+			authenticated = not core.management_password_configured() and
+				protocol.verify_auth(data, context)
 		else
-			authenticated = type(data.password) == "string" and
-				sys.user.checkpasswd("root", data.password)
+			auth_kind = "password"
+			authenticated = plaintext_password_authenticated(data)
 		end
 		if not authenticated then
 			return encoded_error(1, "authentication failed", context,
 				data.trans_id)
 		end
-		local token, timeout = protocol.new_session()
+		local token, timeout = protocol.new_session(auth_kind)
 		if not token then
 			return encoded_error(2, "session creation failed", context,
 				data.trans_id)
@@ -171,11 +227,17 @@ function process(action, body, request_context)
 		}, context)
 	end
 
+	local session_valid
 	if action == "signal" and context.plaintext then
-		return protocol.encode({ code = "1" },
-			protocol.current_des_response_context(context))
+		session_valid = protocol.valid_session(data, context,
+			core.management_password_configured())
+		if not session_valid then
+			local result, response_context = plaintext_signal_probe(context)
+			return protocol.encode(result, response_context)
+		end
 	end
-	if not protocol.valid_session(data, context) then
+	if not session_valid and not protocol.valid_session(data, context,
+	   core.management_password_configured()) then
 		return protocol.encode({ code = "1" }, context)
 	end
 	local allowed, denied_message = core.local_action_allowed(action, data)

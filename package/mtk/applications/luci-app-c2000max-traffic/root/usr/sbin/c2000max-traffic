@@ -52,6 +52,7 @@ POLICY_COUNT_FILE="$RUNTIME_DIR/policy.count"
 POLICY_DNS_COUNT_FILE="$RUNTIME_DIR/policy.dns-count"
 POLICY_BYPASS_COUNT_FILE="$RUNTIME_DIR/policy.bypass-count"
 POLICY_ERROR_FILE="$RUNTIME_DIR/policy.error"
+POLICY_MODE_FILE="$RUNTIME_DIR/policy.control-mode"
 POLICY_REFRESH_FILE="$RUNTIME_DIR/policy.refreshed"
 AUDIT_DIAG_FILE="$RUNTIME_DIR/audit-diagnostics"
 OAF_CONFIG_DEVICE="${C2000_OAF_CONFIG_DEVICE:-/dev/appfilter}"
@@ -623,6 +624,41 @@ audit_enabled()
 	[ "$(uci -q get c2000max_traffic.audit.enabled)" = 1 ]
 }
 
+control_rule_configured_section()
+{
+	local section="$1" enabled match_mode apps categories
+
+	config_get_bool enabled "$section" enabled 1
+	[ "$enabled" -eq 1 ] || return 0
+	config_get match_mode "$section" match_mode ""
+	config_get apps "$section" apps ""
+	config_get categories "$section" categories ""
+	case "$match_mode" in
+		app) [ -n "$apps" ] || return 0 ;;
+		category) [ -n "$categories" ] || return 0 ;;
+		*) [ -n "$apps$categories" ] || return 0 ;;
+	esac
+	CONTROL_RULE_FOUND=1
+}
+
+control_rule_configured()
+{
+	local CONTROL_RULE_FOUND=0
+
+	. /lib/functions.sh
+	config_load c2000max_traffic
+	config_foreach control_rule_configured_section schedule
+	[ "$CONTROL_RULE_FOUND" -eq 1 ]
+}
+
+application_engine_needed()
+{
+	# Traffic history is optional, but an enabled application-control rule still
+	# needs OAF to classify flows. Previously disabling audit silently removed
+	# every category rule even though LuCI kept the rule enabled.
+	audit_enabled || control_rule_configured
+}
+
 statistics_enabled()
 {
 	[ "$(uci -q get c2000max_traffic.config.enabled)" = 1 ]
@@ -632,7 +668,7 @@ ensure_audit_engine()
 {
 	local waited=0
 
-	audit_enabled || return 0
+	application_engine_needed || return 0
 	[ -r "$OAF_SYSCTL_DIR/version" ] && return 0
 	[ -x /etc/init.d/c2000max-appfilter ] || return 1
 	# A full-image boot normally starts this service while audit is disabled,
@@ -837,7 +873,14 @@ sync_hardware_mib()
 
 	if [ "${C2000MAX_ACCEL_LOCKS_HELD:-0}" != 1 ]; then
 		exec 8> /var/lock/c2000max-hnat.lock || return 1
-		flock -x 8 || return 1
+		# A traffic sample already owns collector.lock. Never wait here for an
+		# accelerator transition which may itself be waiting for a final sample.
+		# Skipping one read-clear walk is safe: the hardware counters remain for
+		# the next cycle, whereas blocking forms a permanent EQOS/traffic deadlock.
+		if ! flock -n 8; then
+			exec 8>&-
+			return 0
+		fi
 		lock_held=1
 	fi
 
@@ -1871,6 +1914,7 @@ clear_audit_policy_locked()
 	printf '0\n' > "$POLICY_DNS_COUNT_FILE"
 	printf '0\n' > "$POLICY_BYPASS_COUNT_FILE"
 	: > "$POLICY_ERROR_FILE"
+	printf '%s\n' none > "$POLICY_MODE_FILE"
 	: > "$RUNTIME_DIR/policy.priority-apps"
 	sync_oaf_priority_apps "$RUNTIME_DIR/policy.priority-apps" || true
 }
@@ -1899,7 +1943,7 @@ apply_audit_policy_locked()
 	local domain_index apply_file scope_file hash old_hash error control_mode current_profile_sha
 	local generation epoch priority_app_file priority_app_build_file
 
-	audit_enabled || { clear_audit_policy_locked; return 0; }
+	application_engine_needed || { clear_audit_policy_locked; return 0; }
 	[ -r /proc/sys/oaf/version ] || {
 		printf '%s\n' '应用审计引擎尚未就绪' > "$POLICY_ERROR_FILE"
 		return 1
@@ -1943,6 +1987,13 @@ apply_audit_policy_locked()
 	valid_network_device "$POLICY_LAN_DEVICE" || POLICY_LAN_DEVICE=br-lan
 	control_mode="$(uci -q get c2000max_traffic.audit.control_mode)"
 	case "$control_mode" in seamless|force|strict|deep) ;; *) control_mode=seamless ;; esac
+	# Seamless classification cannot reliably catch a whole category after PPE
+	# offload. Promote only active application-control configurations to the
+	# selective strict path; unrelated clients remain fully hardware accelerated.
+	if [ "$control_mode" = seamless ] && control_rule_configured; then
+		control_mode=strict
+	fi
+	printf '%s\n' "$control_mode" > "$POLICY_MODE_FILE"
 	POLICY_CONTROL_MODE="$control_mode"
 	[ "$control_mode" = seamless ] && POLICY_VERDICT=drop || POLICY_VERDICT=reject
 	for apply_file in "$block_file" "$set_file" "$mark_file" "$dns_redirect_file" \
@@ -2100,7 +2151,7 @@ apply_audit_policy()
 {
 	local profile_owned=0 collector_owned=0 rc
 
-	if audit_enabled && ! ensure_audit_engine; then
+	if application_engine_needed && ! ensure_audit_engine; then
 		ensure_runtime >/dev/null 2>&1 || true
 		printf '%s\n' '应用审计引擎启动失败，请查看 c2000max-appfilter 日志' > \
 			"$POLICY_ERROR_FILE"
@@ -2936,7 +2987,7 @@ status_json()
 	local feature_profile feature_version feature_format feature_apps policy_rules policy_dns_domains
 	local policy_bypass_clients policy_hnat_scope policy_error history_samples
 	local storage_limit storage_used
-	local audit_mode audit_control_mode audit_packets audit_hold=0
+	local audit_mode audit_control_mode effective_control_mode audit_packets audit_hold=0
 	local audit_features=0 audit_record=0 audit_daemon=0 audit_runtime_error=""
 	local audit_total=0 audit_identified=0 audit_unknown=0 audit_secmarks=0 audit_kernel_hits=0
 
@@ -2996,6 +3047,9 @@ status_json()
 	case "$audit_mode" in seamless|balanced|precise) ;; *) audit_mode=balanced ;; esac
 	audit_control_mode="$(uci -q get c2000max_traffic.audit.control_mode)"
 	case "$audit_control_mode" in seamless|force|strict|deep) ;; *) audit_control_mode=seamless ;; esac
+	effective_control_mode="$(cat "$POLICY_MODE_FILE" 2>/dev/null)"
+	case "$effective_control_mode" in seamless|force|strict|deep) ;;
+		*) effective_control_mode="$audit_control_mode" ;; esac
 	audit_packets="$(cat "$OAF_SYSCTL_DIR/max_dpi_packets" 2>/dev/null)"
 	case "$audit_packets" in
 		''|*[!0-9]*)
@@ -3020,7 +3074,7 @@ status_json()
 	case "$policy_rules" in ''|*[!0-9]*) policy_rules=0 ;; esac
 	case "$policy_dns_domains" in ''|*[!0-9]*) policy_dns_domains=0 ;; esac
 	case "$policy_bypass_clients" in -1) ;; ''|*[!0-9]*) policy_bypass_clients=0 ;; esac
-	case "$audit_control_mode" in
+	case "$effective_control_mode" in
 		strict) policy_hnat_scope=selected ;;
 		deep) policy_hnat_scope=global ;;
 		*) policy_hnat_scope=none ;;
@@ -3041,6 +3095,7 @@ status_json()
 	json_add_boolean audit_active "$audit_active"
 	json_add_string audit_mode "$audit_mode"
 	json_add_string control_mode "$audit_control_mode"
+	json_add_string effective_control_mode "$effective_control_mode"
 	json_add_int audit_packets "$audit_packets"
 	json_add_boolean audit_holds_acceleration "$audit_hold"
 	json_add_string feature_profile "$feature_profile"

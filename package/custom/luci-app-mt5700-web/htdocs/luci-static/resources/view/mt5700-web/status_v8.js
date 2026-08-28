@@ -165,6 +165,7 @@ return view.extend({
 
 		var authEnabled = global.option(form.Flag, 'auth_enabled', _('启用密码保护'));
 		authEnabled.rmempty = false;
+		authEnabled.default = '0';
 		authEnabled.description = _('默认关闭。开启后，首页、所有模组页面、健康检查和 WebSocket 均需认证。HTTP Basic 只限制访问，不加密链路；不要把 9010 端口直接暴露到公网。');
 
 		var authUsername = global.option(form.Value, 'auth_username', _('用户名'));
@@ -193,11 +194,24 @@ return view.extend({
 			});
 		};
 		password.remove = function() {};
-		authEnabled.validate = function(sectionId, value) {
-			if (value === '1' && !/^[0-9a-f]{64}$/i.test(configuredHash) && !password.formvalue(sectionId))
-				return _('首次启用密码保护时必须设置新密码。');
-			return true;
+		authEnabled.write = function(sectionId, value) {
+			var requested = value === '1';
+			var suppliedPassword = String(password.formvalue(sectionId) || '');
+			var storedHash = String(uci.get('mt5700-web', 'main', 'auth_password_hash') || configuredHash || '');
+
+			// Cross-field validation on a Flag is invoked by some LuCI themes with
+			// the enabled sentinel while the switch is visually off. That blocked
+			// every unrelated modem setting when no password had ever been set.
+			// Fail closed instead: keep protection disabled, save the rest of the
+			// form, and only enable it once a stored or newly supplied secret exists.
+			if (requested && !/^[0-9a-f]{64}$/i.test(storedHash) && !suppliedPassword) {
+				uci.set('mt5700-web', 'main', 'auth_enabled', '0');
+				ui.addNotification(null, E('p', {}, _('未设置新密码，密码保护保持关闭；其他设置已正常保存。')), 'warning');
+				return;
+			}
+			uci.set('mt5700-web', 'main', 'auth_enabled', requested ? '1' : '0');
 		};
+		authEnabled.remove = function() { uci.set('mt5700-web', 'main', 'auth_enabled', '0'); };
 
 		var modemGrid = map.section(form.GridSection, 'modem', _('模组实例'));
 		modemGrid.addremove = true;

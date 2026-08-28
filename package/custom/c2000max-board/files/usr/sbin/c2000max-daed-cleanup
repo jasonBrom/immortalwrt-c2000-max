@@ -2,10 +2,23 @@
 
 # daed 1.27 may exit without detaching clsact BPF filters.  The veth and
 # namespace then keep all referenced maps alive.  Refuse to touch anything
-# while the daemon is running unless its init script explicitly passes --force
-# after procd has stopped it.
+# while the actual daemon executable is still running; script names and shell
+# command lines must not count as a daemon process.
 
-if pidof daed >/dev/null 2>&1; then
+DAED_PROG="${C2000MAX_DAED_PROG:-/usr/bin/daed}"
+
+daed_running()
+{
+	local proc exe
+	for proc in /proc/[0-9]*; do
+		[ "$proc" != "/proc/$$" ] || continue
+		exe="$(readlink -f "$proc/exe" 2>/dev/null)" || continue
+		[ "$exe" = "$DAED_PROG" ] && return 0
+	done
+	return 1
+}
+
+if daed_running; then
 	logger -t c2000max-daed-cleanup "daed 仍在运行，跳过残留资源清理"
 	exit 1
 fi

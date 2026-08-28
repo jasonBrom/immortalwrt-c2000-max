@@ -10,6 +10,34 @@ audit_enabled()
 	[ "$(uci -q get c2000max_traffic.audit.enabled)" = 1 ]
 }
 
+control_rule_configured_section()
+{
+	local section="$1" enabled match_mode apps categories
+
+	config_get_bool enabled "$section" enabled 1
+	[ "$enabled" -eq 1 ] || return 0
+	config_get match_mode "$section" match_mode ""
+	config_get apps "$section" apps ""
+	config_get categories "$section" categories ""
+	case "$match_mode" in
+		app) [ -n "$apps" ] || return 0 ;;
+		category) [ -n "$categories" ] || return 0 ;;
+		*) [ -n "$apps$categories" ] || return 0 ;;
+	esac
+	CONTROL_RULE_FOUND=1
+}
+
+application_engine_needed()
+{
+	local CONTROL_RULE_FOUND=0
+
+	audit_enabled && return 0
+	. /lib/functions.sh
+	config_load c2000max_traffic
+	config_foreach control_rule_configured_section schedule
+	[ "$CONTROL_RULE_FOUND" -eq 1 ]
+}
+
 apply_lan_device_profile()
 {
 	[ -w "$OAF_SYSCTL_DIR/lan_ifname" ] || return 1
@@ -61,7 +89,7 @@ start_service()
 			return 1
 		}
 	fi
-	audit_enabled || return 0
+	application_engine_needed || return 0
 
 	# OAF uses conntrack packet counters to bound first-packet inspection.
 	# Enable accounting before new audited connections are created.
@@ -110,7 +138,7 @@ stop_service()
 
 reload_service()
 {
-	if ! audit_enabled; then
+	if ! application_engine_needed; then
 		stop
 		return 0
 	fi

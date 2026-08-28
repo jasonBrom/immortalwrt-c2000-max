@@ -1452,7 +1452,7 @@ function renderOverview(status) {
         'class': 'td left'
     }, '管控方式'), E('div', {
         'class': 'td left'
-    }, controlModeName(status.control_mode))]), E('div', {
+    }, controlModeName(status.effective_control_mode || status.control_mode))]), E('div', {
         'class': 'tr'
     }, [E('div', {
         'class': 'td left'

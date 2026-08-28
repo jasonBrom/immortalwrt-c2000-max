@@ -11,6 +11,7 @@ LEDS="$ROOT/files/usr/sbin/c2000max-leds"
 MT5700="$TOP/package/custom/mt5700-web-go/src/main.go"
 AT_DAEMON_INIT="$TOP/package/custom/qmodem/application/ubus_at_daemon/files/etc/init.d/ubus-at-daemon"
 DTS="$TOP/target/linux/mediatek/dts/mt7987a-nradio-c2000-max.dts"
+DEFAULTS="$ROOT/files/etc/uci-defaults/99-c2000max-defaults"
 
 fail()
 {
@@ -36,6 +37,9 @@ sed -n '/ramoops@5ff80000/,/};/p' "$DTS" | grep -Fq 'no-map;' ||
 	fail 'ramoops memory can still be allocated as ordinary DDR'
 grep -Fq "interval=15" "$LEDS" ||
 	fail 'RGB status poll is not reduced to 15 seconds'
+grep -Fq "*) tcpcca='bbr' ;;" "$DEFAULTS" &&
+	grep -Fq 'turboacc.config.tcpcca="$tcpcca"' "$DEFAULTS" ||
+	fail 'fresh installations do not default TCP congestion control to BBR'
 
 grep -Fq 'C2000MAX_SIM_AT_BACKEND:-ubus' "$SIM" ||
 	fail 'SIM switching bypasses the QModem AT queue'

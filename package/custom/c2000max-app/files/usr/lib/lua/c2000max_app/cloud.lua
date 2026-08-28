@@ -1061,6 +1061,47 @@ function M.publish_cpe_status()
 	return M.publish("cpestatus", { uniq = presence_timestamp() }, false)
 end
 
+function M.open_cpe_status_publisher()
+	if not core.feature_enabled("signal_report_enable") then
+		return nil
+	end
+	local device_id = core.device_id()
+	local nonce = sys.uniqueid(8)
+	if not device_id or not nonce then
+		return nil
+	end
+	local topic = "kp/mosca/" .. device_id .. "/cpestatus"
+	local command = table.concat({
+		"exec /usr/bin/mosquitto_pub",
+		"-h 127.0.0.1",
+		"-p 1884",
+		"-V mqttv311",
+		"-i", util.shellquote("c2000max-presence-" .. nonce:sub(1, 8)),
+		"-q 1",
+		"-k 30",
+		"-t", util.shellquote(topic),
+		"-l",
+		"2>/dev/null"
+	}, " ")
+	return io.popen(command, "w")
+end
+
+function M.publish_cpe_status_stream(stream)
+	if not core.feature_enabled("signal_report_enable") then
+		return nil
+	end
+	if not stream then
+		return false
+	end
+	local encoded = json.stringify({ uniq = presence_timestamp() })
+	local ok, written = pcall(stream.write, stream, encoded .. "\n")
+	if not ok or not written then
+		return false
+	end
+	local flushed_ok, flushed = pcall(stream.flush, stream)
+	return flushed_ok and flushed and true or false
+end
+
 function M.publish_online_status()
 	local device_id = core.device_id()
 	if not device_id then

@@ -1,5 +1,7 @@
 config app 'main'
 	option local_enable '0'
+	# modern: 鲲鹏无限 3.1+ AES；legacy: 旧版 2.x DES 探测响应。
+	option local_protocol_mode 'modern'
 	option remote_enable '0'
 	option local_device_enable '1'
 	option local_signal_enable '1'
@@ -39,6 +41,10 @@ config app 'main'
 	option modem_cache_interval '10'
 	option selector_cache_interval '15'
 	option cache_warm_interval '2'
+	# When nobody is using the APP, do not continuously wake QModem.  The next
+	# foreground request still refreshes expired data synchronously.
+	option cache_idle_interval '30'
+	option cache_active_window '180'
 	# APP foreground refresh policy.  The fast path sends only AT^MONSC through
 	# QModem's serialized queue; static modem fields retain their own caches.
 	option signal_normal_interval '3'

@@ -1681,6 +1681,31 @@ traffic_reload_block="$(sed -n '/^reload_service()/,/^}/p' "$TRAFFIC_INIT")"
 printf '%s\n' "$traffic_reload_block" | grep -Fq 'kill -0 "$pid"' &&
 	printf '%s\n' "$traffic_reload_block" | grep -Fq 'c2000max-traffic audit-policy' ||
 	fail "saving traffic settings still restarts the healthy collector"
+# Application-control rules must keep OAF alive even when history/audit is off.
+grep -Fq 'application_engine_needed()' "$APPFILTER_INIT" &&
+	grep -Fq 'application_engine_needed || return 0' "$APPFILTER_INIT" &&
+	grep -Fq 'application_engine_needed()' "$ROOT/root/usr/sbin/c2000max-traffic" ||
+	fail "enabled app/category control rules do not independently start OAF"
+grep -Fq 'if [ "$control_mode" = seamless ] && control_rule_configured; then' \
+	"$ROOT/root/usr/sbin/c2000max-traffic" &&
+	grep -Fq 'control_mode=strict' "$ROOT/root/usr/sbin/c2000max-traffic" ||
+	fail "category control is not promoted out of the offload-only seamless path"
+grep -Fq 'json_add_string effective_control_mode "$effective_control_mode"' \
+	"$ROOT/root/usr/sbin/c2000max-traffic" ||
+	fail "runtime status does not expose the effective application-control mode"
+
+# EQoS holds the shared HNAT lock. A full collector sample takes collector.lock
+# first and can request HNAT later, so invoking it here creates an AB/BA cycle.
+EQOS_INIT="$ROOT/../luci-app-eqos-mtk/root/etc/init.d/eqos"
+eqos_start_block="$(sed -n '/^eqos_start_service_locked()/,/^}/p' "$EQOS_INIT")"
+printf '%s\n' "$eqos_start_block" | grep -Fq 'c2000max-traffic mib-sync' ||
+	fail "EQoS does not take its lightweight pre-flush hardware MIB snapshot"
+if printf '%s\n' "$eqos_start_block" | grep -Fq 'c2000max-traffic sample'; then
+	fail "EQoS still invokes the blocking full traffic sampler while HNAT is locked"
+fi
+grep -Fq 'flock -n 8' "$ROOT/root/usr/sbin/c2000max-traffic" ||
+	fail "hardware MIB sync still blocks behind a concurrent acceleration reload"
+
 if printf '%s\n' "$traffic_reload_block" | sed -n '/kill -0/,/return 0/p' |
 	grep -Fq 'stop'; then
 	fail "traffic collector hot reload still flushes the full persisted log"
@@ -1993,5 +2018,11 @@ EQOS_VIEW="$EQOS_ROOT/htdocs/luci-static/resources/view/eqos.js"
 	[ "$(grep -Fc 'o.validate = totalRateValidate' "$EQOS_VIEW")" -eq 2 ] &&
 	grep -Fq -- '-1 表示不限速' "$EQOS_VIEW" ||
 	fail "EQoS LuCI does not accept or explain -1 as unlimited total bandwidth"
+
+EQOS_BIN="$EQOS_ROOT/root/usr/sbin/eqos"
+grep -Fq 'tc filter show dev "$dev" ingress' "$EQOS_BIN" &&
+	grep -Fq 'tc filter show dev "$dev" egress' "$EQOS_BIN" &&
+	grep -Fq 'tc qdisc del dev "$dev" clsact' "$EQOS_BIN" ||
+	fail "EQOS does not safely reclaim an empty clsact before adding ingress police"
 
 echo "PASS: acceleration-aware traffic accounting fixtures"

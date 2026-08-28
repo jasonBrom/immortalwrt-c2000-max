@@ -5,6 +5,16 @@
 
 [ "$(board_name)" = "nradio,c2000-max" ] || exit 0
 
+# Keep the LuCI footer in the requested compact form.  Newer Lua runtime
+# releases append DISTRIB_REVISION to DISTRIB_DESCRIPTION, which makes the
+# visible firmware label differ from the C2000MAX release format.  Preserve
+# DISTRIB_REVISION for diagnostics and only suppress its display in LuCI.
+luci_version=/usr/lib/lua/luci/version.lua
+if [ -f "$luci_version" ] &&
+   grep -Fq 'distversion = distversion .. " " .. distrevision' "$luci_version"; then
+	sed -i 's/distversion = distversion \.\. " " \.\. distrevision/distversion = distversion/' "$luci_version"
+fi
+
 ROLE_LIB=/usr/lib/c2000max/port-role.sh
 [ ! -r "$ROLE_LIB" ] || . "$ROLE_LIB"
 
@@ -294,7 +304,12 @@ else
 	uci -q set turboacc.config.fastpath_mh_update_nfct='0'
 fi
 uci -q delete turboacc.config.fullcone
-uci -q set turboacc.config.tcpcca='cubic'
+tcpcca="$(uci -q get turboacc.config.tcpcca)"
+case "$tcpcca" in
+	reno|cubic|bbr) ;;
+	*) tcpcca='bbr' ;;
+esac
+uci -q set turboacc.config.tcpcca="$tcpcca"
 
 # Keep hardware flow offload disabled. The generic nft software flowtable is
 # enabled only when it is the effective mode for the current port role.

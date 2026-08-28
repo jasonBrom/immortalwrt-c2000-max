@@ -64,7 +64,7 @@ local reboot_requests = 0
 local internet_requests = {}
 local core = {
 	device_id = function() return "021122334455" end,
-	software_version = function() return "9.9.13.n0.c1" end,
+	software_version = function() return "2.9.9.9" end,
 	feature_enabled = function(name)
 		return name == "terminal_tracking_enable"
 	end,

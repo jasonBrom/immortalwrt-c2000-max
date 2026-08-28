@@ -36,6 +36,28 @@ end
 nixio.nanosleep(10)
 local next_status = 0
 local next_reports = 0
+local presence_stream
+
+local function close_presence_stream()
+	if presence_stream then
+		pcall(presence_stream.close, presence_stream)
+		presence_stream = nil
+	end
+end
+
+local function publish_presence()
+	if not presence_stream then
+		presence_stream = cloud.open_cpe_status_publisher()
+	end
+	if presence_stream and
+	   cloud.publish_cpe_status_stream(presence_stream) then
+		return true
+	end
+	close_presence_stream()
+	-- Preserve compatibility if the long-lived publisher cannot start.
+	return cloud.publish_cpe_status()
+end
+
 while core.remote_enabled() do
 	local now = os.time()
 	if now >= next_status then
@@ -48,6 +70,8 @@ while core.remote_enabled() do
 	end
 	-- Factory report_proactively emits cpestatus about every two seconds.
 	-- Keep this behind the user's signal-report permission.
-	cloud.publish_cpe_status()
+	publish_presence()
 	nixio.nanosleep(presence_interval)
 end
+
+close_presence_stream()

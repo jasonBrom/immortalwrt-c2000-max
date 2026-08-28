@@ -32,6 +32,8 @@ NUMBER_OPTIONS="
 modem_cache_interval
 selector_cache_interval
 cache_warm_interval
+cache_idle_interval
+cache_active_window
 signal_normal_interval
 signal_test_interval
 signal_carrier_interval
@@ -80,6 +82,8 @@ status()
 	local local_enabled local_probe local_probe_code local_probe_service
 	local local_probe_build local_probe_valid local_probe_message
 	local local_route_installed
+	local password_status root_password_configured
+	local effective_password_required
 
 	identity="$(/usr/sbin/c2000max-app-remote identity 2>/dev/null)"
 	device_id="$(printf '%s' "$identity" | jsonfilter -e '@.device_id')"
@@ -189,10 +193,18 @@ status()
 			modem_cache_interval) value="${value:-10}" ;;
 			selector_cache_interval) value="${value:-15}" ;;
 			cache_warm_interval) value="${value:-2}" ;;
+			cache_idle_interval) value="${value:-30}" ;;
+			cache_active_window) value="${value:-180}" ;;
 			*) value="${value:-1}" ;;
 		esac
 		json_add_int "$option" "$value"
 	done
+	value="$(uci -q get c2000max_app.main.local_protocol_mode)"
+	case "$value" in
+		legacy) ;;
+		*) value=modern ;;
+	esac
+	json_add_string local_protocol_mode "$value"
 	json_add_string device_id "$device_id"
 	json_add_string factory_id "$factory_id"
 	json_add_string identity_source "$identity_source"
@@ -257,7 +269,15 @@ status()
 	json_add_boolean remote_wget_ready \
 		"$([ "$remote_wget_ready" = true ] && echo 1 || echo 0)"
 	json_add_string app_build "V36.10"
-	json_add_string app_software_version "9.9.13.n0.c1"
+	json_add_string app_software_version "2.9.9.9"
+	root_password_configured=0
+	password_status="$(passwd -S root 2>/dev/null | awk '{ print $2; exit }')"
+	case "$password_status" in
+		P|PS) root_password_configured=1 ;;
+	esac
+	json_add_boolean root_password_configured "$root_password_configured"
+	json_add_boolean effective_password_required "$root_password_configured"
+
 	json_add_boolean upgrade_permanently_disabled 1
 	local_enabled="$(uci -q get c2000max_app.main.local_enable)"
 	local_route_installed=0
@@ -407,9 +427,12 @@ case "$1" in
 		"file_enable": "bool",
 		"appstore_enable": "bool",
 		"developer_enable": "bool",
+		"local_protocol_mode": "string",
 		"modem_cache_interval": "int",
 		"selector_cache_interval": "int",
 		"cache_warm_interval": "int",
+		"cache_idle_interval": "int",
+		"cache_active_window": "int",
 		"signal_normal_interval": "int",
 		"signal_test_interval": "int",
 		"signal_carrier_interval": "int"
@@ -454,11 +477,29 @@ EOF
 						exit 0
 					}
 				done
+				json_get_var value local_protocol_mode
+				case "$value" in
+					modern|legacy) ;;
+					*)
+						uci -q revert c2000max_app
+						echo '{"success":false,"message":"本地 APP 协议模式无效"}'
+						exit 0
+						;;
+				esac
+				uci -q set "c2000max_app.main.local_protocol_mode=$value" || {
+					uci -q revert c2000max_app
+					echo '{"success":false,"message":"无法保存本地 APP 协议模式"}'
+					exit 0
+				}
 				for option in $NUMBER_OPTIONS; do
 					json_get_var raw "$option"
 					case "$option" in
 						modem_cache_interval|selector_cache_interval|cache_warm_interval)
 							minimum=1; maximum=60 ;;
+						cache_idle_interval)
+							minimum=5; maximum=300 ;;
+						cache_active_window)
+							minimum=30; maximum=900 ;;
 						signal_normal_interval)
 							minimum=1; maximum=30 ;;
 						signal_test_interval)

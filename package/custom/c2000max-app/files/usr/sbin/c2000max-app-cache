@@ -31,18 +31,29 @@ local function write_state(state, message, result, elapsed)
 	fs.chmod(STATE_FILE, "0600")
 end
 
+local first = true
+local last_result
 while core.local_enabled() or core.remote_enabled() do
-	local started = clock()
-	local ok, result = pcall(core.prewarm)
-	local elapsed = clock() - started
-	if ok then
-		write_state("ready", "APP snapshot cache is warm", result, elapsed)
-	else
-		write_state("error", tostring(result), nil, elapsed)
-	end
 	local policy = core.cache_refresh_policy()
-	nixio.nanosleep(policy.warm)
+	local active = core.cache_active()
+	if first or active then
+		local started = clock()
+		local ok, result = pcall(core.prewarm)
+		local elapsed = clock() - started
+		if ok then
+			last_result = result
+			write_state("ready", active and
+				"APP snapshot cache is active" or
+				"APP snapshot cache initialized", result, elapsed)
+		else
+			write_state("error", tostring(result), nil, elapsed)
+		end
+	else
+		write_state("ready", "APP snapshot cache is idle",
+			last_result, 0)
+	end
+	first = false
+	nixio.nanosleep(active and policy.warm or policy.idle)
 end
 
 write_state("stopped", "APP management disabled", nil, 0)
-

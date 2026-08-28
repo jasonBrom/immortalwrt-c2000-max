@@ -12,7 +12,8 @@ STATE_FILE="${C2000MAX_DAED_HYBRID_STATE:-/var/run/c2000max-daed-hybrid}"
 EFFECTIVE_STATE="${C2000MAX_HNAT_EFFECTIVE:-/var/run/c2000max-hnat-effective}"
 SYS_CLASS_NET="${C2000MAX_DAED_SYS_CLASS_NET:-/sys/class/net}"
 TC_BIN="${C2000MAX_DAED_TC:-/sbin/tc}"
-PIDOF_BIN="${C2000MAX_DAED_PIDOF:-pidof}"
+DAED_PROG="${C2000MAX_DAED_PROG:-/usr/bin/daed}"
+PIDOF_BIN="${C2000MAX_DAED_PIDOF:-}"
 WATCH_LOOPS="${C2000MAX_DAED_WATCH_LOOPS:-100}"
 WATCH_INTERVAL="${C2000MAX_DAED_WATCH_INTERVAL:-0.2}"
 
@@ -24,7 +25,17 @@ set_state()
 
 daed_running()
 {
-	"$PIDOF_BIN" daed >/dev/null 2>&1
+	local proc exe
+	if [ -n "$PIDOF_BIN" ]; then
+		"$PIDOF_BIN" daed >/dev/null 2>&1
+		return $?
+	fi
+	for proc in /proc/[0-9]*; do
+		[ "$proc" != "/proc/$$" ] || continue
+		exe="$(readlink -f "$proc/exe" 2>/dev/null)" || continue
+		[ "$exe" = "$DAED_PROG" ] && return 0
+	done
+	return 1
 }
 
 bpf_filter_count()

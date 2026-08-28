@@ -32,6 +32,7 @@ cc -Wall -Wextra -Werror -O2 -o "$CRYPTO" "$ROOT/src/crypto.c" -lcrypto
 
 PLAIN='{"token":"0123456789abcdef0123456789abcdef","trans_id":"test"}'
 FIXED_KEY='383a537d1f2df8c5a76e2f95ddae6a92'
+APP310_KEY='59ad910d5902374f90224e063538b100'
 DEVICE_KEY='abcdef0123456789abcdef0123456789'
 RANDOM_KEY='0123456789abcdef0123456789abcdef'
 IV_HEX='000102030405060708090a0b0c0d0e0f'
@@ -72,6 +73,12 @@ fixed_expected="$(
 [[ "$(printf '%s' "$fixed_cipher" |
 	"$CRYPTO" decrypt "$FIXED_KEY")" == "$PLAIN" ]] ||
 	fail "fixed-key round trip failed"
+
+app310_cipher="$(printf '%s' "$PLAIN" |
+	"$CRYPTO" encrypt "$APP310_KEY")"
+[[ "$(printf '%s' "$app310_cipher" |
+	"$CRYPTO" decrypt "$APP310_KEY")" == "$PLAIN" ]] ||
+	fail "APP 3.1 AES fallback round trip failed"
 
 device_cipher="$(printf '%s' "$PLAIN" | "$CRYPTO" encrypt "$DEVICE_KEY")"
 [[ "$(printf '%s' "$device_cipher" |
@@ -146,6 +153,8 @@ for option in local remote
 do
 	assert_contains "$CONFIG" "option ${option}_enable '0'"
 done
+assert_not_contains "$CONFIG" "option local_password_required"
+assert_contains "$CONFIG" "option local_protocol_mode 'modern'"
 for option in local_device local_signal local_client local_wifi \
 	local_traffic local_sms local_network_write local_sim_switch \
 	local_cellular_record password reboot remote_web device_report signal_report \
@@ -160,6 +169,8 @@ assert_not_contains "$CONFIG" "option allow_sensitive"
 assert_contains "$CONFIG" "option modem_cache_interval '10'"
 assert_contains "$CONFIG" "option selector_cache_interval '15'"
 assert_contains "$CONFIG" "option cache_warm_interval '2'"
+assert_contains "$CONFIG" "option cache_idle_interval '30'"
+assert_contains "$CONFIG" "option cache_active_window '180'"
 assert_contains "$CONFIG" "option signal_normal_interval '3'"
 assert_contains "$CONFIG" "option signal_test_interval '1'"
 assert_contains "$CONFIG" "option signal_carrier_interval '10'"
@@ -173,11 +184,15 @@ assert_contains "$IDENTITY" 'local BDINFO_KEYS = {'
 assert_contains "$IDENTITY" 'local position = lower:find(wanted, start, true)'
 assert_contains "$IDENTITY" 'bdinfo_identity_valid = bdinfo_identity_valid'
 assert_contains "$IDENTITY" 'remote_identity_available = remote_identity_available'
-assert_contains "$IDENTITY" 'crypto_key = clean_secret(values.crypto_secret)'
-assert_contains "$IDENTITY" 'crypto_key = clean_secret(values.fac_key)'
-assert_contains "$IDENTITY" 'local app_secret = clean_secret(values.app_secret)'
+assert_contains "$IDENTITY" 'crypto_key = clean_aes_key(values.crypto_secret)'
+assert_contains "$IDENTITY" 'crypto_key = clean_aes_key(values.fac_key)'
+assert_contains "$IDENTITY" 'local app_secret = clean_aes_key(values.app_secret)'
+assert_contains "$IDENTITY" 'return value:sub(1, 32)'
 assert_contains "$IDENTITY" 'current_app_secret = RANDOM_AUTH_KEY'
+assert_contains "$IDENTITY" 'app310_fallback_key = APP310_AES_FALLBACK_KEY'
 assert_contains "$IDENTITY" 'CURRENT_APP_SOURCE = "official APP v5 DES protocol"'
+assert_contains "$IDENTITY" 'APP310_AES_FALLBACK_KEY = "59ad910d5902374f90224e063538b100"'
+assert_contains "$IDENTITY" 'crypto_source = "APP 3.1 AES fallback"'
 assert_not_contains "$IDENTITY" "/sys/class/net/"
 
 CORE="$ROOT/files/usr/lib/lua/c2000max_app/core.lua"
@@ -190,8 +205,13 @@ assert_contains "$CORE" 'local function app_remote_sim_slot(value)'
 assert_contains "$CORE" 'return "0", "1"'
 assert_contains "$CORE" 'return "0", "2"'
 assert_contains "$CORE" 'return "4", "1"'
-assert_contains "$CORE" 'local APP_SOFTWARE_VERSION = "9.9.13.n0.c1"'
+assert_contains "$CORE" 'function M.management_password_configured()'
+assert_not_contains "$CORE" 'function M.local_password_required()'
+assert_contains "$CORE" 'auth_on = M.management_password_configured() and 1 or 0'
+assert_contains "$CORE" 'local APP_SOFTWARE_VERSION = "2.9.9.9"'
+assert_not_contains "$CORE" '9.9.13.n0.c1'
 assert_contains "$CORE" 'function M.software_version()'
+assert_contains "$CORE" 'function M.local_protocol_mode()'
 assert_contains "$CORE" 'local DEFAULT_MODEM_CACHE_INTERVAL = 10'
 assert_contains "$CORE" 'local DEFAULT_SELECTOR_CACHE_INTERVAL = 15'
 assert_contains "$CORE" 'local DEFAULT_CACHE_WARM_INTERVAL = 2'
@@ -220,7 +240,9 @@ assert_contains "$CORE" 'type(data.cur) == "table"'
 assert_contains "$CORE" 'safe_ubus("c2000max", "sim_switch"'
 assert_contains "$CORE" 'uci:get("c2000max_app", "main", "sim_mode")'
 assert_contains "$CORE" 'persist_sim_mode(requested_mode)'
-assert_contains "$CORE" 'IMS switch is not supported by QModem'
+assert_contains "$CORE" 'query_serialized_at(modem, "AT^IMSSWITCH?")'
+assert_contains "$CORE" '"AT^IMSSWITCH=1,0,0"'
+assert_contains "$CORE" 'local function app_sms_switch(data)'
 assert_contains "$CORE" 'query_serialized_at(modem, "AT^MONNC")'
 assert_contains "$CORE" 'AT^NRFREQLOCK='
 assert_contains "$CORE" 'AT^LTEFREQLOCK='
@@ -243,6 +265,8 @@ assert_contains "$CORE" 'local function shared_cache_read(name, maximum_age, all
 assert_contains "$CORE" 'local function shared_cache_write(name, value)'
 assert_contains "$CORE" 'function M.prewarm()'
 assert_contains "$CORE" 'function M.cache_refresh_policy()'
+assert_contains "$CORE" 'function M.note_activity()'
+assert_contains "$CORE" 'function M.cache_active()'
 assert_contains "$CORE" 'M.set_device_internet(mac, allowed)'
 assert_contains "$CORE" 'rv.result = { client = list_clients() }'
 assert_contains "$CORE" 'uci:set("c2000max", "access_control", "enabled", "1")'
@@ -275,6 +299,7 @@ assert_not_contains "$CORE" 'uci:get("c2000max_app", "main", "device_id")'
 
 PROTOCOL="$ROOT/files/usr/lib/lua/c2000max_app/protocol.lua"
 assert_contains "$PROTOCOL" 'current_identity.crypto_key'
+assert_contains "$PROTOCOL" 'context.crypto_key or current_identity.crypto_key'
 assert_contains "$PROTOCOL" 'current_identity.fixed_wrapper_key'
 assert_contains "$PROTOCOL" 'current_identity.random_auth_key'
 assert_contains "$PROTOCOL" 'wire_mode = "des-current"'
@@ -283,10 +308,15 @@ assert_contains "$PROTOCOL" 'des-%s'
 assert_contains "$PROTOCOL" '"device_code" .. device_code'
 assert_contains "$PROTOCOL" '"timestamp" .. timestamp .. "trans_id" .. trans_id'
 assert_contains "$PROTOCOL" 'auth_token(material, secret)'
+assert_contains "$PROTOCOL" 'secret = context.crypto_key or current_identity.app_secret'
 assert_contains "$PROTOCOL" 'fs.chmod(SESSION_DIR, "0700")'
 assert_contains "$PROTOCOL" 'function M.decode(body)'
 assert_contains "$PROTOCOL" 'function M.encode(value, context)'
-assert_contains "$PROTOCOL" 'function M.valid_session(data, context)'
+assert_contains "$PROTOCOL" 'current_identity.app310_fallback_key'
+assert_contains "$PROTOCOL" 'function M.new_session(auth_kind)'
+assert_contains "$PROTOCOL" 'function M.valid_session(data, context, require_password)'
+assert_contains "$PROTOCOL" 'auth_kind ~= "password"'
+assert_contains "$PROTOCOL" '" " .. auth_kind .. "\n"'
 assert_contains "$PROTOCOL" 'function M.current_des_response_context(context)'
 assert_contains "$PROTOCOL" 'context.wire_mode = "des-current"'
 assert_contains "$PROTOCOL" 'cookie:match("sysauth=([0-9A-Fa-f]+)")'
@@ -297,8 +327,17 @@ fi
 HTTP="$ROOT/files/usr/lib/lua/c2000max_app/http.lua"
 assert_contains "$HTTP" 'protocol.verify_auth(data, context)'
 assert_contains "$HTTP" 'sys.user.checkpasswd("root", data.password)'
+assert_contains "$HTTP" 'local function plaintext_password_authenticated(data)'
+assert_contains "$HTTP" 'if not core.management_password_configured() then'
+assert_not_contains "$HTTP" 'local password_hash = sys.user.getpasswd("root")'
 assert_contains "$HTTP" 'action == "signal" and context.plaintext'
+assert_contains "$HTTP" 'not core.management_password_configured() and'
+assert_contains "$HTTP" 'protocol.new_session(auth_kind)'
+assert_contains "$HTTP" 'core.management_password_configured())'
 assert_contains "$HTTP" 'protocol.current_des_response_context(context)'
+assert_contains "$HTTP" 'local function plaintext_signal_probe(context)'
+assert_contains "$HTTP" 'core.local_protocol_mode() == "legacy"'
+assert_contains "$HTTP" 'mac = device_id'
 assert_contains "$HTTP" 'protocol.reply({ code = "1" }, context)'
 assert_contains "$HTTP" 'function action_health()'
 assert_contains "$HTTP" 'build = "V36.10"'
@@ -307,6 +346,7 @@ assert_contains "$HTTP" 'function process(action, body, request_context)'
 assert_contains "$HTTP" 'core.local_action_allowed(action, data)'
 
 node "$ROOT/tests/test_app_231_probe.js"
+node "$ROOT/tests/test_app_310_probe.js"
 
 API_MENU="$ROOT/files/usr/share/luci/menu.d/c2000max_app_api.json"
 python3 -m json.tool "$API_MENU" >/dev/null
@@ -323,6 +363,7 @@ fi
 
 RPC="$LUCI_ROOT/root/usr/libexec/rpcd/c2000max_app"
 assert_contains "$RPC" '"developer_enable": "bool"'
+assert_contains "$RPC" '"local_protocol_mode": "string"'
 assert_contains "$RPC" '"local_device_enable": "bool"'
 assert_contains "$RPC" '"local_network_write_enable": "bool"'
 assert_contains "$RPC" '"remote_web_enable": "bool"'
@@ -333,7 +374,8 @@ assert_contains "$RPC" "pgrep -f '/usr/sbin/c2000max-app-local'"
 assert_contains "$RPC" 'http://127.0.0.1/cgi-bin/luci/nradio/app/health'
 assert_contains "$RPC" 'http://127.0.0.1:82/cgi-bin/luci/nradio/app/health'
 assert_contains "$RPC" 'json_add_string app_build "V36.10"'
-assert_contains "$RPC" 'json_add_string app_software_version "9.9.13.n0.c1"'
+assert_contains "$RPC" 'json_add_string app_software_version "2.9.9.9"'
+assert_contains "$RPC" 'json_add_string local_protocol_mode "$value"'
 assert_contains "$RPC" 'json_add_boolean upgrade_permanently_disabled 1'
 assert_not_contains "$RPC" '"upgrade_enable": "bool"'
 assert_contains "$RPC" 'json_add_string agent_log "$agent_log"'
@@ -352,6 +394,8 @@ assert_contains "$RPC" 'json_add_string remote_command_message "$remote_command_
 
 VIEW="$LUCI_ROOT/htdocs/luci-static/resources/view/c2000max/app.js"
 assert_contains "$VIEW" 'node.checked = !!checked'
+assert_contains "$VIEW" '鲲鹏无限 3.1+（AES，推荐）'
+assert_contains "$VIEW" "['local_protocol_mode']"
 assert_contains "$VIEW" '设备编号（只读）'
 assert_contains "$VIEW" "name: 'local_device_enable'"
 assert_contains "$VIEW" "name: 'local_network_write_enable'"
@@ -425,6 +469,7 @@ assert_contains "$REMOTE" 'nixio.nanosleep(5)'
 assert_contains "$REMOTE" 'COMMAND_STATE = STATE_DIR .. "/remote-command.state"'
 assert_contains "$REMOTE" 'BRIDGE_SESSION_STATE = STATE_DIR .. "/bridge-session.state"'
 assert_contains "$REMOTE" 'bridge_reconnect_count'
+assert_not_contains "$RPC" '"local_password_required": "bool"'
 assert_contains "$REMOTE" 'reply_expected == false'
 assert_not_contains "$REMOTE" 'state = "online"'
 
@@ -463,6 +508,11 @@ assert_contains "$CLOUD" 'id = device_id'
 assert_contains "$CLOUD" '"-p 1884"'
 assert_contains "$CLOUD" 'local function response_timestamp()'
 assert_contains "$CLOUD" 'local function presence_timestamp()'
+assert_not_contains "$VIEW" "name: 'local_password_required'"
+assert_not_contains "$VIEW" '系统未设置管理密码：APP 将自动认证，不显示密码验证弹窗。'
+assert_not_contains "$VIEW" 'const passwordPolicy ='
+assert_contains "$ROOT/files/etc/uci-defaults/99-c2000max-app-autostart" \
+	'uci -q delete c2000max_app.main.local_password_required'
 assert_contains "$CLOUD" 'nixio.gettimeofday'
 assert_contains "$CLOUD" 'payload.uniq = response_timestamp()'
 assert_contains "$CLOUD" 'elseif event == "time" then'
@@ -480,6 +530,8 @@ assert_contains "$CLOUD" 'device_code = current_identity.device_code'
 assert_contains "$CLOUD" 'traffic = {'
 assert_contains "$CLOUD" 'wired_client = {'
 assert_contains "$CLOUD" 'M.publish("cpestatus", { uniq = presence_timestamp() }, false)'
+assert_contains "$CLOUD" 'function M.open_cpe_status_publisher()'
+assert_contains "$CLOUD" 'function M.publish_cpe_status_stream(stream)'
 assert_contains "$CLOUD" 'return M.publish("status", {'
 assert_contains "$CLOUD" 'uniq = presence_timestamp()'
 assert_not_contains "$CLOUD" 'sys.uniqueid(4) or "00000000"'
@@ -502,13 +554,16 @@ REPORTER="$ROOT/files/usr/sbin/c2000max-app-reporter"
 assert_contains "$REPORTER" '"presence_interval"'
 assert_contains "$REPORTER" 'cloud.publish_online_status()'
 assert_contains "$REPORTER" 'cloud.publish_cpe_status()'
+assert_contains "$REPORTER" 'cloud.open_cpe_status_publisher()'
+assert_contains "$REPORTER" 'cloud.publish_cpe_status_stream(presence_stream)'
 assert_contains "$REPORTER" 'cloud.publish_reports()'
 assert_contains "$REPORTER" '"report_interval"'
+assert_contains "$REMOTE" 'core.note_activity()'
 
 MAKEFILE="$ROOT/Makefile"
 assert_contains "$MAKEFILE" '+mosquitto-nossl'
 assert_contains "$MAKEFILE" 'PKG_VERSION:=1.10.0'
-assert_contains "$MAKEFILE" 'PKG_RELEASE:=8'
+assert_contains "$MAKEFILE" 'PKG_RELEASE:=16'
 for dependency in '+flock' '+blkid' '+ip-full' '+iw' '+uclient-fetch'; do
 	assert_contains "$MAKEFILE" "$dependency"
 done
@@ -524,7 +579,7 @@ assert_not_contains "$MAKEFILE" 'app_v30.js $(1)'
 LUCI_MAKEFILE="$LUCI_ROOT/Makefile"
 assert_contains "$LUCI_MAKEFILE" 'LUCI_TITLE:=LuCI configuration for C2000-MAX APP support'
 assert_contains "$LUCI_MAKEFILE" 'LUCI_DEPENDS:=+c2000max-app'
-assert_contains "$LUCI_MAKEFILE" 'PKG_RELEASE:=3'
+assert_contains "$LUCI_MAKEFILE" 'PKG_RELEASE:=9'
 assert_contains "$LUCI_MAKEFILE" '# call BuildPackage - OpenWrt buildroot signature'
 assert_contains "$ACL" '"c2000max_app": [ "set", "restart" ]'
 
@@ -543,10 +598,11 @@ assert_contains "$QMODEM_HUAWEI" 'cache_c2000max_huawei_detail_'
 assert_contains "$QMODEM_HUAWEI" '[ "$age" -ge 0 ] && [ "$age" -le 60 ]'
 
 echo "PASS: V36.10 local cellular and official remote-control compatibility"
-for interval in modem_cache selector_cache cache_warm signal_normal \
-	signal_test signal_carrier
+for interval in modem_cache selector_cache cache_warm cache_idle \
+	signal_normal signal_test signal_carrier
 do
 	assert_contains "$VIEW" "${interval}_interval"
 done
+assert_contains "$VIEW" 'cache_active_window'
 assert_contains "$VIEW" '数据刷新与缓存'
 assert_contains "$RPC" '"modem_cache_interval": "int"'

@@ -70,5 +70,19 @@ grep -Fq 'c2000max-daed-hybrid run "$PROG" run' "$DAED_PATCH" ||
 	fail 'daed is not launched through the hybrid barrier'
 grep -Fq 'c2000max-daed-hybrid restore' "$DAED_PATCH" ||
 	fail 'daed shutdown does not restore acceleration'
+grep -Fq 'wait_daed_stopped || return 1' "$DAED_PATCH" ||
+	fail 'daed reload does not wait for the previous process'
+grep -Fq 'mkdir -p /etc/daed /var/log/daed || return 1' "$DAED_PATCH" ||
+	fail 'daed database and log directories are not created before launch'
+grep -Fq 'touch "$LOG" || return 1' "$DAED_PATCH" ||
+	fail 'daed log file is not created before launch'
+grep -Fq 'readlink -f "$proc/exe"' "$DAED_PATCH" ||
+	fail 'daed process detection does not verify the executable path'
+if grep -Fq 'sleep 0.1' "$DAED_PATCH"; then
+	fail 'daed init uses a fractional sleep unsupported by this BusyBox build'
+fi
+if grep -Eq '^\+[[:space:]]*rm -f "\$LOG"' "$DAED_PATCH"; then
+	fail 'daed shutdown still deletes the only diagnostic log'
+fi
 
 echo 'C2000-MAX daed/HNAT hybrid tests passed'

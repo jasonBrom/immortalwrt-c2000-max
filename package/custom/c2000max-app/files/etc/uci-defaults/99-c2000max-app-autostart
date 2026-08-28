@@ -26,4 +26,11 @@ if [ "$(uci -q get c2000max_app.main.permission_defaults_v3513)" != "1" ]; then
 	uci -q commit c2000max_app
 fi
 
+# Password verification now follows the actual root password state.  Remove
+# the retired override from preserved conffiles during upgrades.
+if uci -q get c2000max_app.main.local_password_required >/dev/null; then
+	uci -q delete c2000max_app.main.local_password_required
+	uci -q commit c2000max_app
+fi
+
 exit 0

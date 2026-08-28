@@ -5,6 +5,11 @@ local M = {}
 
 local FIXED_CRYPTO_KEY = "383a537d1f2df8c5a76e2f95ddae6a92"
 local RANDOM_AUTH_KEY = "f2e6e232e75f33d5f3d5b040c93d0d"
+-- 鲲鹏无限 3.1.0 uses the first 32 characters of its server facKey for
+-- AES-256-CBC and for the sorted MD5 authentication token.  Devices without
+-- a fac_key in bdinfo must use the APP's built-in fallback, not the wrapper
+-- key used by the older random-key protocol.
+local APP310_AES_FALLBACK_KEY = "59ad910d5902374f90224e063538b100"
 local CURRENT_APP_SOURCE = "official APP v5 DES protocol"
 local CACHE_SECONDS = 5
 local cached
@@ -150,12 +155,14 @@ local function clean_device_id(value)
 	return value
 end
 
-local function clean_secret(value)
+local function clean_aes_key(value)
 	value = trim(value)
-	if not value or #value ~= 32 or value:find("[%z\r\n]") then
+	if not value or #value < 32 or #value > 4096 or
+	   value:find("[%z\r\n]") then
 		return nil
 	end
-	return value
+	-- APP 3.1.0 derives AES_KEY with String(facKey).slice(0, 32).
+	return value:sub(1, 32)
 end
 
 local function factory_device_id()
@@ -227,18 +234,18 @@ local function build()
 		(bdinfo_source and (bdinfo_source .. ":fac_mac") or "bdinfo:fac_mac") or
 		factory_source
 
-	local crypto_key = clean_secret(values.crypto_secret)
+	local crypto_key = clean_aes_key(values.crypto_secret)
 	local crypto_source = crypto_key and "bdinfo:crypto_secret" or nil
 	if not crypto_key then
-		crypto_key = clean_secret(values.fac_key)
+		crypto_key = clean_aes_key(values.fac_key)
 		crypto_source = crypto_key and "bdinfo:fac_key" or nil
 	end
 	if not crypto_key then
-		crypto_key = FIXED_CRYPTO_KEY
-		crypto_source = "protocol fallback"
+		crypto_key = APP310_AES_FALLBACK_KEY
+		crypto_source = "APP 3.1 AES fallback"
 	end
 
-	local app_secret = clean_secret(values.app_secret)
+	local app_secret = clean_aes_key(values.app_secret)
 	local app_source = app_secret and "bdinfo:app_secret" or crypto_source
 	if not app_secret then
 		app_secret = crypto_key
@@ -261,6 +268,7 @@ local function build()
 		identity_mismatch = bdinfo_id ~= nil and factory_id ~= nil and
 			bdinfo_id ~= factory_id,
 		crypto_key = crypto_key,
+		app310_fallback_key = APP310_AES_FALLBACK_KEY,
 		crypto_source = crypto_source,
 		app_secret = app_secret,
 		app_source = app_source,

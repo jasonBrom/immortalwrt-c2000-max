@@ -150,6 +150,7 @@ function M.decode(body)
 		end
 
 		local current_identity = identity.get()
+		local decoded
 		local random
 		if outer.random ~= nil then
 			if type(outer.random) ~= "string" then
@@ -163,9 +164,32 @@ function M.decode(body)
 					"random key decrypt failed"
 			end
 		end
-		local plain = crypt("decrypt", outer.data,
-			random or current_identity.crypto_key)
-		local decoded = plain and json_parse(plain) or nil
+		local payload_key
+		if random then
+			payload_key = random
+			local plain = crypt("decrypt", outer.data, payload_key)
+			decoded = plain and json_parse(plain) or nil
+		else
+			-- A bound APP obtains the device facKey from the vendor account.  An
+			-- unbound APP 3.1 uses its built-in fallback and must still be able to
+			-- establish the automatic device session when password verification is
+			-- not required.  Keep the old wrapper key as the final compatibility
+			-- candidate and remember the successful key for the response.
+			local seen = {}
+			for _, candidate in ipairs({ current_identity.crypto_key,
+				current_identity.app310_fallback_key,
+				current_identity.fixed_wrapper_key }) do
+				if type(candidate) == "string" and not seen[candidate] then
+					seen[candidate] = true
+					local plain = crypt("decrypt", outer.data, candidate)
+					decoded = plain and json_parse(plain) or nil
+					if decoded then
+						payload_key = candidate
+						break
+					end
+				end
+			end
+		end
 		if not decoded then
 			return nil, {
 				encrypted = true,
@@ -175,6 +199,7 @@ function M.decode(body)
 		return decoded, {
 			encrypted = true,
 			random = random ~= nil,
+			crypto_key = not random and payload_key or nil,
 			auth_mode = random ~= nil and 1 or 0
 		}
 	end
@@ -240,7 +265,7 @@ function M.encode(value, context)
 			end
 		end
 		local encrypted = crypt("encrypt", json_encode(value),
-			random or current_identity.crypto_key)
+			random or context.crypto_key or current_identity.crypto_key)
 		if not encrypted then
 			payload = {
 				code = "2",
@@ -315,7 +340,9 @@ function M.verify_auth(data, context)
 	elseif context.random then
 		secret = current_identity.random_auth_key
 	else
-		secret = current_identity.app_secret
+		-- APP 3.1.0 signs the sorted request fields with the same first-32-char
+		-- facKey used to encrypt the payload.
+		secret = context.crypto_key or current_identity.app_secret
 	end
 	local material = "device_code" .. device_code ..
 		"timestamp" .. timestamp .. "trans_id" .. trans_id
@@ -343,7 +370,9 @@ local function request_token(data, context)
 	return token:lower()
 end
 
-function M.new_session()
+function M.new_session(auth_kind)
+	auth_kind = auth_kind == "password" and "password" or "device"
+
 	fs.mkdirr(SESSION_DIR)
 	fs.chmod(SESSION_DIR, "0700")
 	local token = sys.uniqueid(16)
@@ -352,26 +381,34 @@ function M.new_session()
 	end
 	local expires = os.time() + 3600
 	local path = SESSION_DIR .. "/" .. token
-	if not fs.writefile(path, tostring(expires) .. "\n") then
+	if not fs.writefile(path, tostring(expires) .. " " .. auth_kind .. "\n") then
 		return nil
 	end
 	fs.chmod(path, "0600")
 	return token, 3600
 end
 
-function M.valid_session(data, context)
+function M.valid_session(data, context, require_password)
 	local token = request_token(data, context)
 	if not token then
 		return false
 	end
 	local path = SESSION_DIR .. "/" .. token
-	local expires = tonumber(fs.readfile(path) or "")
+	local raw = fs.readfile(path) or ""
+	local expires, auth_kind = raw:match("^(%d+)%s+([a-z]+)")
+	expires = tonumber(expires or raw)
+	-- Sessions created by older package releases were device sessions and only
+	-- contained the expiry timestamp.
+	auth_kind = auth_kind or "device"
 	if not expires or expires < os.time() then
 		fs.unlink(path)
 		return false
 	end
+	if require_password and auth_kind ~= "password" then
+		return false
+	end
 	-- Sliding one-hour timeout, matching the official APP session behavior.
-	fs.writefile(path, tostring(os.time() + 3600) .. "\n")
+	fs.writefile(path, tostring(os.time() + 3600) .. " " .. auth_kind .. "\n")
 	return true
 end
 

@@ -173,6 +173,18 @@ start_qos() {
 			;;
 	esac
 
+	# A previous service or an interrupted limiter reload can leave an empty
+	# clsact behind.  It occupies the same ingress handle needed by the police
+	# filters even though it owns no rules.  Reclaim only a provably empty
+	# clsact; never remove filters belonging to DHCP snooping, BPF or another
+	# traffic service.
+	if tc qdisc show dev "$dev" 2>/dev/null | grep -q 'qdisc clsact '; then
+		if ! tc filter show dev "$dev" ingress 2>/dev/null | grep -q . &&
+		   ! tc filter show dev "$dev" egress 2>/dev/null | grep -q .; then
+			tc qdisc del dev "$dev" clsact 2>/dev/null || return 1
+		fi
+	fi
+
 	if tc qdisc show dev "$dev" 2>/dev/null |
 	   grep -Eq 'qdisc (ingress|clsact) '; then
 		echo "eqos: $dev already has an ingress qdisc" >&2

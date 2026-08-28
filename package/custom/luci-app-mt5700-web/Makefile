@@ -5,7 +5,7 @@ LUCI_DESCRIPTION:=Manage the lightweight MT5700 Go WebSocket and AT service
 LUCI_DEPENDS:=+mt5700-web-go
 LUCI_PKGARCH:=all
 PKG_VERSION:=1.2.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 include $(TOPDIR)/feeds/luci/luci.mk
 

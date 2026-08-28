@@ -350,6 +350,7 @@ for line in pipe:lines() do
 			end
 			if event then
 				payload.broadcast = is_broadcast or nil
+				core.note_activity()
 				local ok, result, reply_event, reply_expected =
 					pcall(cloud.handle, event, payload)
 				if not ok or type(result) ~= "table" then
