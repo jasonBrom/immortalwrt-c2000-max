@@ -60,6 +60,16 @@ func TestModernUIIsDefaultAndEmbedded(t *testing.T) {
 		t.Fatalf("modern UI response = %d, %s", response.StatusCode, body)
 	}
 
+	response, err = http.Get(server.URL + "/5700/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if !strings.Contains(string(body), `"cellscan_async":false`) {
+		t.Fatalf("config does not disable unsupported asynchronous scan: %s", body)
+	}
+
 	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}

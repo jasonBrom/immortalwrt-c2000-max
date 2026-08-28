@@ -9,5 +9,6 @@ C2000MAX compatibility changes applied before the production build:
 - relative Vite asset base for /modem/<instance>/5700/
 - instance-relative at-ws-info discovery and ws_url support
 - PDCP-first realtime speed with AT^DSFLOWQRY fallback for QModem serial mode
+- backend capability negotiation hides unsupported asynchronous full-band scan
 
 The legacy bundled UI remains available through the LuCI instance setting.

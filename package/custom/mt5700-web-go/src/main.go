@@ -1099,9 +1099,13 @@ func (a *webApp) wsInfo(w http.ResponseWriter, r *http.Request) {
 		"data": map[string]any{
 			"host": host, "port": port, "allow_wan": 0,
 			"require_auth": false,
-			"ws_url":       fmt.Sprintf("ws://%s:%d%s/ws", displayHost, port, a.config.BasePath),
-			"instance":     a.config.ID,
-			"timestamp":    time.Now().Unix(),
+			"capabilities": map[string]bool{
+				"cellscan_async":  false,
+				"schedule_config": false,
+			},
+			"ws_url":    fmt.Sprintf("ws://%s:%d%s/ws", displayHost, port, a.config.BasePath),
+			"instance":  a.config.ID,
+			"timestamp": time.Now().Unix(),
 		},
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -1121,6 +1125,10 @@ func (a *webApp) configJSON(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"at":     map[string]any{"host": host, "port": listenPort(a.config.Listen)},
 		"status": "true", "require_auth": false, "instance": a.config.ID,
+		"capabilities": map[string]bool{
+			"cellscan_async":  false,
+			"schedule_config": false,
+		},
 		"ui_variant": a.config.UIVariant,
 		"ws_url":     fmt.Sprintf("ws://%s:%d%s/ws", displayHost, listenPort(a.config.Listen), a.config.BasePath),
 	})
