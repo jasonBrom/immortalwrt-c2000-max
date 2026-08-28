@@ -158,10 +158,41 @@ function renderStunResult(result, family) {
 
 	const classic = result.rfc3489 || {};
 	const behavior = result.rfc5780 || {};
+	const serverRow = row('STUN 节点', '%s（%s ms）'.format(result.server_address || result.server,
+		result.rtt_ms == null ? '—' : result.rtt_ms));
+
+	if (family === 'ipv6') {
+		const ipv6Rows = [
+			row('STUN 反射端点', result.public_endpoint),
+			row('本地端点', result.local_endpoint),
+			serverRow,
+			row('地址转换', flag(result.nat_present) ?
+				statusText(false, '', '检测到 IPv6 地址转换') :
+				statusText(true, '未检测到（原生 IPv6）', ''))
+		];
+
+		if (flag(behavior.available)) {
+			if (flag(result.nat_present))
+				ipv6Rows.push(row('IPv6 映射行为', RFC5780_NAMES[behavior.mapping] || behavior.mapping));
+			ipv6Rows.push(
+				row('UDP 防火墙过滤', RFC5780_NAMES[behavior.filtering] || behavior.filtering),
+				row('行为发现备用节点', behavior.other_address || '—')
+			);
+		}
+		else {
+			ipv6Rows.push(row('UDP 防火墙过滤', E('span', {}, [
+				statusText(false, '', '未检测'),
+				' 当前服务器未提供 OTHER-ADDRESS / RESPONSE-ORIGIN；本次仅完成基础 STUN 连通性与反射端点检测。'
+			])));
+		}
+
+		return E('table', { 'class': 'table', 'style': 'margin-top:1em' }, ipv6Rows);
+	}
+
 	const behaviorRows = flag(behavior.available) ? [
-		row('映射行为', RFC5780_NAMES[behavior.mapping] || behavior.mapping),
-		row('过滤行为', RFC5780_NAMES[behavior.filtering] || behavior.filtering),
-		row('备用地址', behavior.other_address || '—')
+		row('RFC 5780 映射行为', RFC5780_NAMES[behavior.mapping] || behavior.mapping),
+		row('RFC 5780 过滤行为', RFC5780_NAMES[behavior.filtering] || behavior.filtering),
+		row('行为发现备用节点', behavior.other_address || '—')
 	] : [
 		row('RFC 5780', E('span', {}, [
 			statusText(false, '', '不完整'),
@@ -172,12 +203,38 @@ function renderStunResult(result, family) {
 	return E('table', { 'class': 'table', 'style': 'margin-top:1em' }, [
 		row('公网映射端点', result.public_endpoint),
 		row('本地端点', result.local_endpoint),
-		row('STUN 节点', '%s（%s ms）'.format(result.server_address || result.server,
-			result.rtt_ms == null ? '—' : result.rtt_ms)),
+		serverRow,
 		row('是否存在 NAT', flag(result.nat_present) ? '是' : '否'),
-		row('RFC 3489 类型', flag(classic.available) ?
+		row('传统 NAT 类型（RFC 3489）', flag(classic.available) ?
 			(RFC3489_NAMES[classic.type] || classic.type) : RFC3489_NAMES.unavailable)
 	].concat(behaviorRows));
+}
+
+function switchTab(tabName) {
+	document.querySelectorAll('.c2000-family-tab').forEach((button) => {
+		const active = button.getAttribute('data-tab') === tabName;
+		button.classList.toggle('active', active);
+		button.setAttribute('aria-selected', active ? 'true' : 'false');
+	});
+	document.querySelectorAll('.c2000-family-pane').forEach((pane) => {
+		const active = pane.getAttribute('data-tab') === tabName;
+		pane.hidden = !active;
+		pane.style.display = active ? 'block' : 'none';
+	});
+}
+
+function tabButton(name, label, active) {
+	return E('button', {
+		'type': 'button',
+		'class': 'c2000-family-tab' + (active ? ' active' : ''),
+		'data-tab': name,
+		'role': 'tab',
+		'aria-selected': active ? 'true' : 'false',
+		'click': function(ev) {
+			ev.preventDefault();
+			switchTab(name);
+		}
+	}, label);
 }
 
 function dnsText(value) {
@@ -202,7 +259,9 @@ return view.extend({
 			button.textContent = '检测中…';
 		}
 		if (resultNode)
-			dom.content(resultNode, E('em', {}, '正在执行 Binding、映射与过滤行为测试…'));
+			dom.content(resultNode, E('em', {}, family === 'ipv6' ?
+				'正在检测 IPv6 STUN 连通性与 UDP 防火墙行为…' :
+				'正在执行 Binding、映射与过滤行为测试…'));
 		const result = await L.resolveDefault(callStun(family, server), {
 			success: false,
 			message: 'RPC 调用失败。'
@@ -261,13 +320,26 @@ return view.extend({
 			E('style', {}, [
 				'.c2000-family-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1em}',
 				'.c2000-family-grid>.cbi-section{margin:0;min-width:0}',
-				'.c2000-family-actions{display:flex;gap:.6em;flex-wrap:wrap;margin-top:1em}'
+				'.c2000-family-actions{display:flex;gap:.6em;flex-wrap:wrap;margin-top:1em}',
+				'.c2000-family-tabbar{display:flex;gap:.25em;margin-top:1em;border-bottom:1px solid rgba(127,127,127,.28);overflow-x:auto}',
+				'.c2000-family-tab{appearance:none;background:transparent;border:0;border-bottom:3px solid transparent;color:inherit;cursor:pointer;font:inherit;padding:.8em 1.15em;white-space:nowrap}',
+				'.c2000-family-tab:hover{background:rgba(127,127,127,.10)}',
+				'.c2000-family-tab.active{border-bottom-color:var(--primary-color,#1677ff);color:var(--primary-color,#1677ff);font-weight:600}',
+				'.c2000-family-pane{padding-top:1em}',
+				'@media(max-width:600px){.c2000-family-grid{grid-template-columns:1fr}.c2000-family-tab{padding:.7em .85em}}'
 			].join('')),
-			E('h2', {}, 'IPv4 / IPv6 配置与 NAT 检测'),
+			E('h2', {}, 'IPv4 / IPv6 配置与网络检测'),
 			E('div', { 'class': 'cbi-map-descr' },
 				'IPv4 与 IPv6 完全独立检测。DNS 能否解析 AAAA 记录和上游 DNS 自身使用 IPv4/IPv6 传输是两回事；' +
 				'只要 AAAA 查询与 IPv6 公网连通正常，就不会再误报“DNS 服务器未接入 IPv6”。'),
-			E('div', { 'class': 'c2000-family-actions' }, [
+			E('div', { 'class': 'c2000-family-tabbar', 'role': 'tablist' }, [
+				tabButton('status', '双栈状态', true),
+				tabButton('settings', '地址族与 DNS', false),
+				tabButton('ipv4', 'IPv4 检测', false),
+				tabButton('ipv6', 'IPv6 检测', false)
+			]),
+			E('div', { 'class': 'c2000-family-pane', 'data-tab': 'status', 'role': 'tabpanel' }, [
+			E('div', { 'class': 'c2000-family-actions', 'style': 'margin-top:0' }, [
 				E('button', {
 					'id': 'c2000max-family-refresh',
 					'class': 'btn cbi-button',
@@ -285,7 +357,15 @@ return view.extend({
 					E('div', { 'id': 'c2000max-family-status-ipv6' },
 						renderFamilyStatus('ipv6', status.ipv6 || {}))
 				])
+			])
 			]),
+			E('div', {
+				'class': 'c2000-family-pane',
+				'data-tab': 'settings',
+				'role': 'tabpanel',
+				'hidden': '',
+				'style': 'display:none'
+			}, [
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '地址族与 DNS 设置'),
 				E('div', { 'class': 'cbi-value' }, [
@@ -342,11 +422,19 @@ return view.extend({
 							'用于运营商未下发 IPv6 DNS 时补充直连节点；这不是 IPv6/AAAA 正常工作的必要条件。')
 					])
 				])
+			])
 			]),
-			E('div', { 'class': 'c2000-family-grid' }, [
+			E('div', {
+				'class': 'c2000-family-pane',
+				'data-tab': 'ipv4',
+				'role': 'tabpanel',
+				'hidden': '',
+				'style': 'display:none'
+			}, [
 				E('div', { 'class': 'cbi-section' }, [
-					E('h3', {}, 'IPv4 NAT 类型'),
-					E('div', { 'class': 'cbi-section-descr' }, '同时执行 RFC 3489 与 RFC 5780 检测。'),
+					E('h3', {}, 'IPv4 NAT 行为检测'),
+					E('div', { 'class': 'cbi-section-descr' },
+						'显示传统 RFC 3489 NAT 类型以兼容常见测速结果，并使用 RFC 5780 分别检测映射和过滤行为。'),
 					makeServerSelect('ipv4', status.stun_ipv4 || 'stun.miwifi.com:3478'),
 					E('div', { 'class': 'c2000-family-actions' }, [
 						E('button', {
@@ -356,11 +444,19 @@ return view.extend({
 						}, '单独检测 IPv4')
 					]),
 					E('div', { 'id': 'c2000max-stun-result-ipv4' })
-				]),
+				])
+			]),
+			E('div', {
+				'class': 'c2000-family-pane',
+				'data-tab': 'ipv6',
+				'role': 'tabpanel',
+				'hidden': '',
+				'style': 'display:none'
+			}, [
 				E('div', { 'class': 'cbi-section' }, [
-					E('h3', {}, 'IPv6 NAT / 防火墙行为'),
+					E('h3', {}, 'IPv6 连通性与 UDP 防火墙检测'),
 					E('div', { 'class': 'cbi-section-descr' },
-						'IPv6 通常不会经过 NAT，仍可通过 RFC 5780 检查 UDP 映射和过滤行为。'),
+						'基础 STUN 用于确认 IPv6 反射端点和是否发生地址转换；服务器支持行为发现时，再检测 UDP 状态防火墙的过滤行为。IPv6 不显示 RFC 3489 锥形 NAT 类型。'),
 					makeServerSelect('ipv6', status.stun_ipv6 || 'stun.hot-chilli.net:3478'),
 					E('div', { 'class': 'c2000-family-actions' }, [
 						E('button', {
@@ -384,6 +480,7 @@ return view.extend({
 		window.setTimeout(function() {
 			updateCustomServer('ipv4');
 			updateCustomServer('ipv6');
+			switchTab('status');
 		}, 0);
 		return page;
 	},
