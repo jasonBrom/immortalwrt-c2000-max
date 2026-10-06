@@ -4174,6 +4174,16 @@ mtk_hnat_ipv6_nf_local_out(void *priv, struct sk_buff *skb,
 			}
 		}
 	}
+	/*
+	 * See mtk_hnat_nf_local_out_sanitize(): this hook only ever sees frames
+	 * that this host originates, so the descriptor it was handed is a
+	 * leftover from a recycled buffer.  Invalidate it before the hooks below
+	 * run, so they do not read the stale entry number and reason as an
+	 * "already forwarded by the PPE" verdict and blackhole the frame.
+	 */
+	if (!skb_shared(skb) && !skb_cow_head(skb, 0))
+		skb_hnat_magic_tag(skb) = 0;
+
 	return NF_ACCEPT;
 }
 
@@ -4214,9 +4224,18 @@ mtk_hnat_nf_local_out_sanitize(void *priv, struct sk_buff *skb,
 	    !hnat_stale_descriptor(skb, __func__, state->out))
 		return NF_ACCEPT;
 
-	/* Do not leave a stale descriptor live or modify another clone's head. */
+	/*
+	 * Cannot neutralise the descriptor without touching another clone's
+	 * head or failing the copy.  NEVER drop here: this hook also carries
+	 * locally generated frames (SSH/LuCI), and dropping them is exactly
+	 * the blackhole this sanitizer exists to prevent.
+	 *
+	 * hnat_stale_descriptor() already excludes genuine tunnel descriptors
+	 * (their skb_hnat_iface() != 0), so accepting here does not disturb
+	 * 6rd / MAP-E / DS-Lite / TOPS / CDRT offload.
+	 */
 	if (skb_shared(skb) || skb_cow_head(skb, 0))
-		return NF_DROP;
+		return NF_ACCEPT;
 
 	memset(skb_hnat_info(skb), 0, sizeof(struct hnat_desc));
 
@@ -4417,6 +4436,16 @@ mtk_hnat_ipv4_nf_local_out(void *priv, struct sk_buff *skb,
 	} else {
 		hnat_set_head_frags(state, skb, 1, hnat_set_alg);
 	}
+
+	/*
+	 * See mtk_hnat_nf_local_out_sanitize(): this hook only ever sees frames
+	 * that this host originates, so the descriptor it was handed is a
+	 * leftover from a recycled buffer.  Invalidate it before the hooks below
+	 * run, so they do not read the stale entry number and reason as an
+	 * "already forwarded by the PPE" verdict and blackhole the frame.
+	 */
+	if (!skb_shared(skb) && !skb_cow_head(skb, 0))
+		skb_hnat_magic_tag(skb) = 0;
 
 	return NF_ACCEPT;
 }
